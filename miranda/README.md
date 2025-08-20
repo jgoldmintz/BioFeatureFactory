@@ -6,12 +6,8 @@ This package contains a complete pipeline for predicting miRNA binding sites in 
 
 This self-contained package includes:
 
-- **59 gene datasets**
-- **Pre-compiled miranda executable** ready to use
 - **Uncompiled miranda source** in `miranda.tar.gz` for custom compilation
-- **Complete mutation annotation data** for transcript-level analysis (i.e. combined\__Gene-Name_\_mutations.csv)
 - **Optimized pipeline script** with parallel processing and cleanup features
-- **Conda environment** specification for easy setup
 
 ## Quick Start
 
@@ -53,10 +49,7 @@ python run-miranda-pipeline.py \
 
 ### miranda Executable
 
-- **Pre-compiled version**: Located in `software/miranda-compiled/src/miranda`
 - **Source code**: Available in `miranda.tar.gz` for custom compilation
-
-If you need to recompile miranda on your system:
 
 ```bash
 tar -xzf miranda.tar.gz
@@ -79,8 +72,8 @@ The `run-miranda-pipeline.py` script includes several optimizations:
 
 ### Input Data
 
-- **FASTA files**: `data/fasta-files/mut/transcript/` - 59 genes with mutation sequences
-- **Mutation data**: `data/mutations/combined/transcript/` - CSV files with mutation annotations
+- **FASTA files**: genes with mutatant transcript sequences
+- **Mutation data**: CSV files with mutation annotations
 
 ### Output Data
 
