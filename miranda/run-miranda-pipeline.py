@@ -2,57 +2,20 @@ import os
 import subprocess
 import argparse
 import re
+import sys
 import pandas as pd
 import concurrent.futures
 import multiprocessing
-#from dependencies.tools import get_mutation_data
+from pathlib import Path
 
 # Global flag for cleanup
 cleanup_raw_files = False
 
-def read_fasta(inf, aformat="FIRST", duplicate="replace"):
-    data = {}
-    with open(inf, "r") as fa:
-        name = ""
-        for line in fa.readlines():
-            if "#" in line:
-                continue
-            if ">" in line:
-                if aformat.upper() == "NCBI":
-                    name = re.search(">[a-zA-Z]+_?\d+(\.\d+)*", line).group(0)
-                elif aformat.upper() in ["FIRST", "WORD"]:
-                    name = line.split()[0]
-                else:
-                    name = line.strip()
-                name = name[1:].strip()
-                if name in data.keys():
-                    if duplicate.lower() in ["append", "a"]:  # simply add to existing sequence
-                        pass
-                    elif duplicate.lower() in ["replace", "r"]:  # reset sequence to empty
-                        data[name] = ""
-                    elif duplicate.lower() in ["separate", "s"]:  # add underscore+number to end of sequence name
-                        matches = re.findall("/_\d+$/", name)
-                        if matches != None and len(matches) > 0:
-                            num = int(max(matches)[1:])
-                            name = name[:-len(str(num))] + str(num + 1)
-                            data[name] = ""
-                        else:
-                            name = name + "_2"
-                            data[name] = ""
-                else:
-                    data[name] = ""
-            else:
-                data[name] = data[name] + line.strip()
-    return data
+script_dir = Path(__file__).parent.absolute()
+dependencies_dir = script_dir.parents[2] / 'dependencies'
+sys.path.insert(0, str(dependencies_dir))
 
-def get_mutation_data(ntposnt):
-    original_nt = ntposnt[0]
-    mutant_nt = ntposnt[-1]
-    if int(ntposnt[1:-1]) == 1:
-        position = int(ntposnt[1:-1])
-    else:
-        position = int(ntposnt[1:-1]) - 1  # Convert to 0-based index
-    return position, (original_nt, mutant_nt)
+from utility import get_mutation_data, read_fasta
 
 def run_single_miranda(args):
     """Run miranda for a single sequence - defined at module level for pickling"""
