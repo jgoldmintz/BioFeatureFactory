@@ -145,8 +145,7 @@ def run_miranda(directory, outdir, miranda_dir, is_mutant, mirna_db, mutation_di
     if mutation_dir is None and not is_mutant:
         possible_paths = [
             os.path.join(os.path.dirname(directory), 'mut', 'transcript'),
-            os.path.join(os.path.dirname(os.path.dirname(directory)), 'FASTA_files', 'mut', 'transcript'),
-            '/Users/jgoldmintz/disease_associated_synonymous_mutations/FASTA_files/mut/transcript/'
+            os.path.join(os.path.dirname(os.path.dirname(directory)), 'FASTA_files', 'mut', 'transcript')
         ]
 
         for path in possible_paths:
