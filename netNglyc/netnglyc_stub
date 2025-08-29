@@ -1,0 +1,228 @@
+#!/usr/bin/env python3
+"""
+NetNGlyc stub - DYNAMIC N-glycosylation site prediction
+Predicts N-glycosylation at N-X-S/T/C motifs based on sequence context
+"""
+
+import sys
+import os
+import re
+from pathlib import Path
+
+script_dir = Path(__file__).parent.absolute()
+dependencies_dir = script_dir / 'dependencies'
+sys.path.insert(0, str(dependencies_dir))
+
+from utility import read_fasta as parse_fasta
+
+def find_glycosylation_sites(sequence):
+    """Find all potential N-glycosylation sites (N-X-S/T/C where X ≠ P)"""
+    sites = []
+
+    for i in range(len(sequence) - 2):
+        if sequence[i] == 'N':
+            # Check if next position is not P
+            if sequence[i+1] != 'P':
+                # Check if position +2 is S, T, or C
+                if i+2 < len(sequence) and sequence[i+2] in 'STC':
+                    # Get the motif
+                    motif = sequence[i:i+3] if i+3 <= len(sequence) else sequence[i:]
+                    if len(motif) >= 3:
+                        sites.append({
+                            'position': i + 1,  # 1-based position
+                            'motif': motif,
+                            'extended': sequence[max(0,i-10):min(len(sequence),i+10)]
+                        })
+
+    return sites
+
+def calculate_glycosylation_potential(site, sequence):
+    """
+    DYNAMICALLY calculate glycosylation potential based on sequence context
+    Returns: (potential_score, jury_agreement)
+    """
+
+    pos = site['position'] - 1  # Convert to 0-based
+    motif = site['motif']
+
+    # Initialize base score
+    score = 0.3  # Base score for having the motif
+
+    # Factor 1: Motif type (N-X-T > N-X-S > N-X-C)
+    if motif[2] == 'T':
+        score += 0.15
+    elif motif[2] == 'S':
+        score += 0.10
+    elif motif[2] == 'C':
+        score += 0.05
+
+    # Factor 2: Position in protein (not too close to termini)
+    rel_pos = pos / len(sequence)
+    if 0.1 < rel_pos < 0.9:
+        score += 0.10
+    elif 0.05 < rel_pos < 0.95:
+        score += 0.05
+
+    # Factor 3: Local hydrophobicity (glycosylation prefers hydrophilic regions)
+    window_start = max(0, pos - 5)
+    window_end = min(len(sequence), pos + 6)
+    local_region = sequence[window_start:window_end]
+
+    hydrophilic = sum(1 for aa in local_region if aa in 'DENQKRSTHY')
+    hydrophobic = sum(1 for aa in local_region if aa in 'FLIWVAM')
+
+    if hydrophilic > hydrophobic:
+        score += 0.15
+    elif hydrophilic == hydrophobic:
+        score += 0.05
+
+    # Factor 4: Presence of aromatic residues nearby (often found near glycosylation)
+    aromatic = sum(1 for aa in local_region if aa in 'FWY')
+    if aromatic >= 1:
+        score += 0.08
+
+    # Factor 5: Proline content (P disrupts structure, affects glycosylation)
+    prolines = sum(1 for aa in local_region if aa == 'P')
+    if prolines == 0:
+        score += 0.10
+    elif prolines == 1:
+        score += 0.05
+    else:
+        score -= 0.05
+
+    # Factor 6: Turn/loop propensity (glycosylation favors turns)
+    turn_aa = sum(1 for aa in local_region if aa in 'NGSTDP')
+    if turn_aa >= 4:
+        score += 0.12
+    elif turn_aa >= 2:
+        score += 0.06
+
+    # Factor 7: Charged residues (moderate presence is favorable)
+    charged = sum(1 for aa in local_region if aa in 'DEKR')
+    if 1 <= charged <= 3:
+        score += 0.08
+
+    # Factor 8: Check for specific favorable patterns
+    if 'NST' in motif or 'NTS' in motif:
+        score += 0.10
+    if 'NAS' in motif or 'NAT' in motif:
+        score += 0.08
+    if 'NGS' in motif or 'NGT' in motif:
+        score += 0.07
+
+    # Factor 9: Distance from cysteines (disulfide bonds affect accessibility)
+    cys_positions = [i for i, aa in enumerate(sequence) if aa == 'C']
+    if cys_positions:
+        min_cys_dist = min(abs(pos - cys_pos) for cys_pos in cys_positions)
+        if min_cys_dist > 10:
+            score += 0.05
+
+    # Normalize score to 0-1 range
+    score = max(0.001, min(0.999, score))
+
+    # Calculate jury agreement (simulate 9 networks with slight variations)
+    # Each "network" has slightly different thresholds
+    thresholds = [0.45, 0.48, 0.50, 0.50, 0.50, 0.52, 0.53, 0.55, 0.58]
+    agreements = sum(1 for t in thresholds if score > t)
+
+    return score, agreements
+
+def predict_glycosylation(seq_name, sequence):
+    """Predict N-glycosylation sites for a sequence"""
+
+    # Find all potential sites
+    sites = find_glycosylation_sites(sequence)
+
+    if not sites:
+        return []
+
+    results = []
+    for site in sites:
+        potential, jury = calculate_glycosylation_potential(site, sequence)
+
+        # Determine symbol based on potential
+        if potential > 0.75:
+            symbol = '++'
+        elif potential > 0.5:
+            symbol = '+'
+        else:
+            symbol = '-'
+
+        # Add warning for borderline cases
+        warning = '*' if 0.48 < potential < 0.52 else ' '
+
+        results.append({
+            'position': site['position'],
+            'motif': site['motif'],
+            'potential': potential,
+            'jury': f"({jury}/9)",
+            'symbol': symbol,
+            'warning': warning
+        })
+
+    return results
+
+def output_netnglyc_format(seq_name, sequence, predictions):
+    """Output in NetNGlyc format"""
+
+    print("##############################################################################")
+    print("# NetNGlyc stub - Dynamic N-glycosylation site prediction")
+    print("##############################################################################")
+    print()
+    print(f"# Predictions for N-Glycosylation sites in 1 sequence")
+    print()
+    print(f"Name: {seq_name}    Length: {len(sequence)}")
+
+    # Output sequence with markers
+    for i in range(0, len(sequence), 60):
+        chunk = sequence[i:i+60]
+        print(f"{chunk:60} {min(i+60, len(sequence)):6}")
+
+        # Create marker line for this chunk
+        markers = ['.'] * len(chunk)
+        for pred in predictions:
+            pos_in_chunk = pred['position'] - i - 1
+            if 0 <= pos_in_chunk < len(chunk):
+                markers[pos_in_chunk] = 'N'
+        print(f"{''.join(markers):60} {min(i+60, len(sequence)):6}")
+
+    print("(Threshold=0.5)")
+    print("-" * 70)
+
+    # Output predictions table
+    print(f"{'SeqName':<15} {'Position':<15} {'Potential':<20} {'Jury':<15} {'N-Glyc'}")
+    print("-" * 70)
+
+    for pred in predictions:
+        motif_display = f"{pred['position']:3} {pred['motif']}"
+        print(f"{seq_name:<15} {motif_display:<15} {pred['potential']:>8.4f} {pred['warning']:<10} "
+              f"{pred['jury']:<15} {pred['symbol']:>3}")
+
+    print("-" * 70)
+
+def main():
+    if len(sys.argv) < 2:
+        print("Usage: netnglyc_stub <fasta_file>")
+        sys.exit(1)
+
+    # Find FASTA file
+    fasta_file = None
+    for arg in sys.argv[1:]:
+        if os.path.isfile(arg):
+            fasta_file = arg
+            break
+
+    if not fasta_file:
+        print("Error: No valid FASTA file provided")
+        sys.exit(1)
+
+    # Parse sequences
+    sequences = parse_fasta(fasta_file)
+
+    # Process each sequence
+    for seq_name, sequence in sequences.items():
+        predictions = predict_glycosylation(seq_name, sequence)
+        output_netnglyc_format(seq_name, sequence, predictions)
+
+if __name__ == "__main__":
+    main()

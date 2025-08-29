@@ -54,6 +54,15 @@ def get_mutation_data(ntposnt):
         position = int(ntposnt[1:-1]) - 1  # Convert to 0-based index
     return position, (original_nt, mutant_nt)
 
+def get_mutation_data_bioAccurate(ntposnt):
+    original_nt = ntposnt[0]
+    mutant_nt = ntposnt[-1]
+    if int(ntposnt[1:-1]) == 1:
+        position = int(ntposnt[1:-1])
+    else:
+        position = int(ntposnt[1:-1])
+    return position, (original_nt, mutant_nt)
+
 def convert_position(seq1, seq2, position1, space="-"):
     error = None
 
