@@ -35,3 +35,32 @@ GeneSplicer pipeline for splice site prediction.
 - EVmutation
 - spliceAI
 - netMHC
+
+## Citation
+
+If you use BioFeatureFactory or any of its pipelines, please cite:
+
+### BioFeatureFactory
+- Goldmintz J. BioFeatureFactory: Python toolkit for automated biological feature extraction. GitHub repository. https://github.com/jgoldmintz/BioFeatureFactory
+
+### Pipeline-Specific Citations
+
+#### Miranda Pipeline
+- Enright AJ, John B, Gaul U, Tuschl T, Sander C, Marks DS. MicroRNA targets in Drosophila. Genome Biol. 2003;5(1):R1.
+
+#### NetNGlyc Pipeline
+- Gupta R, Jung E, Brunak S. Prediction of N-glycosylation sites in human proteins. NetNglyc 1.0 Server. 2004. Available from: https://services.healthtech.dtu.dk/service.php?NetNGlyc-1.0
+- Teufel F, Almagro Armenteros JJ, Johansen AR, Gíslason MH, Pihl SI, Tsirigos KD, Winther O, Brunak S, von Heijne G, Nielsen H. SignalP 6.0 predicts all five types of signal peptides using protein language models. Nat Biotechnol. 2022;40(7):1023-1025.
+
+#### GeneSplicer Pipeline
+- Pertea M, Lin X, Salzberg SL. GeneSplicer: a new computational method for splice site prediction. Nucleic Acids Res. 2001;29(5):1185-90.
+
+## License
+
+This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
+
+## Support
+
+For issues and questions:
+
+- GitHub Issues: https://github.com/jgoldmintz/BioFeatureFactory/issues
