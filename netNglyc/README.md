@@ -1,4 +1,4 @@
-# Docker-based NetNGlyc for Disease-Associated Synonymous Mutations
+# Docker-based NetNGlyc
 
 This Docker setup provides accurate NetNGlyc predictions with SignalP 6.0 integration for analyzing N-glycosylation sites in disease-associated synonymous mutations.
 
@@ -256,3 +256,21 @@ docker --version
 # Check NetNGlyc source exists
 ls -la path/to/netNglyc-1.0/
 ```
+
+## Citation
+
+If you use this pipeline, please cite:
+
+- NetNGlyc: Gupta R, Jung E, Brunak S. Prediction of N-glycosylation sites in human proteins. NetNglyc 1.0 Server. 2004. Available from: https://services.healthtech.dtu.dk/service.php?NetNGlyc-1.0
+- SignalP: Teufel F, Almagro Armenteros JJ, Johansen AR, Gíslason MH, Pihl SI, Tsirigos KD, Winther O, Brunak S, von Heijne G, Nielsen H. SignalP 6.0 predicts all five types of signal peptides using protein language models. Nat Biotechnol. 2022;40(7):1023-1025.
+- BioFeatureFactory: Goldmintz J. BioFeatureFactory: Python toolkit for automated biological feature extraction. GitHub repository. https://github.com/jgoldmintz/BioFeatureFactory
+
+## License
+
+This project is licensed under the MIT License - see the [LICENSE](../../LICENSE) file in the root BioFeatureFactory directory for details.
+
+## Support
+
+For issues and questions:
+
+- GitHub Issues: https://github.com/jgoldmintz/BioFeatureFactory/issues

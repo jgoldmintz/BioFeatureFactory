@@ -167,3 +167,20 @@ Gaps indicate a mismatch between miRNA and target sequence and vice versa. The n
 2. **Permission denied**: Check that miranda executable has execute permissions (`chmod +x software/miranda-compiled/src/miranda`)
 3. **Out of memory**: Reduce `--max-workers` for systems with limited RAM
 
+## Citation
+
+If you use this pipeline, please cite:
+
+- Miranda: Enright AJ, John B, Gaul U, Tuschl T, Sander C, Marks DS. MicroRNA targets in Drosophila. Genome Biol. 2003;5(1):R1.
+- BioFeatureFactory: Goldmintz J. BioFeatureFactory: Python toolkit for automated biological feature extraction. GitHub repository. https://github.com/jgoldmintz/BioFeatureFactory
+
+## License
+
+This project is licensed under the MIT License - see the [LICENSE](../../LICENSE) file in the root BioFeatureFactory directory for details.
+
+## Support
+
+For issues and questions:
+
+- GitHub Issues: https://github.com/jgoldmintz/BioFeatureFactory/issues
+
