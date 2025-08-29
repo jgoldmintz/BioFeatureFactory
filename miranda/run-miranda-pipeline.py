@@ -11,9 +11,7 @@ from pathlib import Path
 # Global flag for cleanup
 cleanup_raw_files = False
 
-script_dir = Path(__file__).parent.absolute()
-dependencies_dir = script_dir.parents[2] / 'dependencies'
-sys.path.insert(0, str(dependencies_dir))
+sys.path.append(os.path.join(os.path.dirname(__file__), '../dependencies'))
 
 from utility import get_mutation_data, read_fasta
 

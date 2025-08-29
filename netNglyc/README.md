@@ -2,7 +2,7 @@
 
 This Docker setup provides accurate NetNGlyc predictions with SignalP 6.0 integration for analyzing N-glycosylation sites in disease-associated synonymous mutations.
 
-## 🍎 Apple Silicon Solution
+## Apple Silicon Solution
 
 **Primary Use Case**: This Docker solution is specifically designed to solve NetNGlyc compatibility issues on **Apple Silicon (M1/M2/M3) Macs**. 
 
@@ -10,20 +10,45 @@ This Docker setup provides accurate NetNGlyc predictions with SignalP 6.0 integr
 - **Solution**: Docker provides a 32-bit Linux environment where NetNGlyc works perfectly
 - **Cross-platform**: Also works on Intel Macs and Linux systems for consistency
 
-## 📋 Required Files
+## Required Files and Naming Conventions
 
-### Essential Files (Required)
+### Essential Docker Files (Required)
 - **`Dockerfile`** - Container definition with 32-bit Linux environment
 - **`build-container.sh`** - Automated build script with ARM64 Mac support
 - **`signalp_stub`** - SignalP 6.0 integration script
 - **`full-docker-netnglyc-pipeline.py`** - Complete production pipeline
 - **`netNglyc.tar.gz`** - Original NetNGlyc 1.0 distribution (download from DTU)
 
-### Optional Files (Recommended)
-- **`docker_netnglyc_parallel.py`** - Parallel processing module
-- **`pipeline_docker_integration.py`** - Integration bridge for existing workflows
+### FASTA File Naming Requirements
 
-## 🚀 Quick Start
+#### Wildtype FASTA Files
+- **Directory**: Must be in separate directory (e.g. `wt/aaseq/`)
+- **Naming**: `{GENE}_aa.fasta` (exactly this format)
+- **Content**: Single reference sequence per file
+- **Examples**: `ABCB1_aa.fasta`, `BRCA1_aa.fasta`, `CFTR_aa.fasta`
+
+#### Mutant FASTA Files  
+- **Directory**: Must be in separate directory (e.g. `mut/aaseq/`)
+- **Naming**: `{GENE}_aa.fasta` (same name as wildtype, different directory)
+- **Content**: Multiple mutation sequences per file
+- **Header format**: `>{GENE}-{MUTATION_ID}`
+
+### Mapping File Requirements
+
+#### Mapping Directory Structure
+- **Directory**: Must be in separate mapping directory (e.g., `mutations/combined/aa/`)
+- **Naming**: `{GENE}_nt_to_aa_mapping.csv` (exactly this format)
+- **One file per gene**: Each gene must have its own mapping file
+
+#### CSV Format Requirements
+```csv
+mutant,aamutant
+T3435C,I1145I
+A1967G,N656D
+G2677T,A893S
+```
+
+## Quick Start
 
 ### 1. Obtain Required Software
 
@@ -31,19 +56,19 @@ This Docker setup provides accurate NetNGlyc predictions with SignalP 6.0 integr
 Download `netNglyc.tar.gz` from:
 - **Official source**: https://services.healthtech.dtu.dk/software.php
 - **License**: Academic use only - requires institutional email registration
-- **Place in**: `/Volumes/990pro/disease_associated_synonymous_mutations/docker/`
+- **Place in**: Your docker directory (same location as Dockerfile)
 
 #### SignalP 6.0 (Required for signalp_stub)
 -  Download and install SignalP 6.0 from:
 - **Official source**: https://services.healthtech.dtu.dk/software.php
 - **License**: Academic use only - requires institutional email registration
 
-- **Install locatialson**: Standard system path (e.g., `/usr/local/bin/signalp6` or conda environment)
+- **Install location**: Standard system path (e.g., `/usr/local/bin/signalp6` or conda environment)
 - **Note**: The `signalp_stub` script calls SignalP 6.0 internally for signal peptide predictions
 
 ### 2. Build Docker Container
 ```bash
-cd /Volumes/990pro/disease_associated_synonymous_mutations/docker
+cd path/to/docker/directory
 ./build-container.sh
 ```
 
@@ -51,83 +76,174 @@ cd /Volumes/990pro/disease_associated_synonymous_mutations/docker
 ```bash
 # Process both wildtype and mutant sequences
 python3 full-docker-netnglyc-pipeline.py \
-    --fasta_wt ../FASTA_files/wt/aaseq \
-    --fasta_mut ../FASTA_files/mut/aaseq \
-    --output_wt ../Data/netnglyc-docker-out-wt \
-    --output_mut ../Data/netnglyc-docker-out-mut \
-    --mapping_dir ../mutations/combined/aa \
+    --fasta_wt path/to/wt/AminoAcid/Sequences/ \
+    --fasta_mut path/to/mut/AminoAcid/Sequences/ \
+    --output_wt path/to/wt/Outputfile \
+    --output_mut path/to/mut/Outputfile \
+    --mapping_dir path/to/mapping/directory/ \
     --workers 4
 ```
 
-## 🛠️ Configuration Options
+## Directory Structure Requirements
+
+**_Critical:_** Files Must Be In Separate Directories
+
+```
+#Example file structure
+
+project_root/
+├── FASTA_files/
+│   ├── wt/
+│   │   └── aaseq/                    # Wildtype sequences ONLY
+│   │       ├── ABCB1_aa.fasta       # Single reference sequence
+│   │       ├── BRCA1_aa.fasta       # Single reference sequence  
+│   │       └── CFTR_aa.fasta        # Single reference sequence
+│   └── mut/
+│       └── aaseq/                    # Mutant sequences ONLY
+│           ├── ABCB1_aa.fasta       # Multiple mutation sequences
+│           ├── BRCA1_aa.fasta       # Multiple mutation sequences
+│           └── CFTR_aa.fasta        # Multiple mutation sequences
+└── mutations/
+    └── combined/
+        └── aa/                       # Mapping files ONLY
+            ├── ABCB1_nt_to_aa_mapping.csv
+            ├── BRCA1_nt_to_aa_mapping.csv
+            └── CFTR_nt_to_aa_mapping.csv
+```
+
+### File Naming Rules
+
+1. **FASTA files**: Must end with `_aa.fasta`
+2. **Mapping files**: Must end with `_nt_to_aa_mapping.csv`
+3. **Gene names**: Must match exactly between FASTA and mapping files
+4. **Case sensitive**: All names are case sensitive
+
+## Configuration Options
 
 ### Adjust Worker Count
 ```bash
 # Faster processing (more RAM usage)
-python3 docker_netnglyc_parallel.py INPUT OUTPUT --workers 8
+python3 full-docker-netnglyc-pipeline.py --mode full-pipeline --workers 8 \
+    path/to/wt/AminoAcid/Sequences/GENE_aa.fasta results.tsv
 
 # Slower but less resource intensive
-python3 docker_netnglyc_parallel.py INPUT OUTPUT --workers 2
+python3 full-docker-netnglyc-pipeline.py --mode full-pipeline --workers 2 \
+    path/to/wt/AminoAcid/Sequences/GENE_aa.fasta results.tsv
 ```
 
-### Process Specific Files
+## Usage Examples
+
+### 1. Test Mode (No Other Args Required)
 ```bash
-# Only process specific FASTA pattern
-python3 docker_netnglyc_parallel.py INPUT OUTPUT --pattern "ABCB1*.fasta"
+python3 full-docker-netnglyc-pipeline.py --test
 ```
 
-## 🧪 Testing & Validation
-
-### Quick Test
+### 2. Process Single FASTA File (Automatic Mode Selection)
 ```bash
-python3 test_single_sequence.py
+python3 full-docker-netnglyc-pipeline.py \
+    path/to/wt/AminoAcid/Sequences/GENE_aa.fasta \
+    output-netnglyc.out
 ```
 
-### Validate Against Known Results
+### 3. Full Pipeline - Wildtype Sequences (Requires Mapping)
 ```bash
-# Compare with your original 164 predictions
-# The Docker version should find the same glycosylation sites
+python3 full-docker-netnglyc-pipeline.py --mode full-pipeline \
+    --mapping-dir path/to/mapping/directory/ \
+    path/to/wt/AminoAcid/Sequences/GENE_aa.fasta \
+    results.tsv
 ```
 
-## 📁 File Structure
-
-```
-docker/
-├── Dockerfile                           # Container definition (32-bit Linux)
-├── build-container.sh                   # Automated build script
-├── signalp_stub                         # SignalP 6.0 integration
-├── full-docker-netnglyc-pipeline.py     # Complete production pipeline
-├── docker_netnglyc_parallel.py          # Parallel processing module
-├── pipeline_docker_integration.py       # Integration bridge
-├── netNglyc.tar.gz                      # NetNGlyc 1.0 distribution (download)
-└── README.md                            # This documentation
-```
-
-## 🔧 Integration Options
-
-### Option 1: Standalone Docker Pipeline
+### 4. Full Pipeline - Mutant Sequences (Requires Mapping)
 ```bash
-# Complete self-contained processing
-python3 full-docker-netnglyc-pipeline.py --help
+python3 full-docker-netnglyc-pipeline.py --mode full-pipeline \
+    --is-mutant \
+    --mapping-dir path/to/mapping/directory/ \
+    path/to/mut/AminoAcid/Sequences/GENE_aa.fasta \
+    results.tsv
 ```
 
-### Option 2: Integration with Existing Pipeline
-```python
-# Add to existing run-netnglyc-pipeline.py
-import sys
-sys.path.append('docker')
-from pipeline_docker_integration import run_netnglyc_sequential_docker
+### 5. Force Parallel Processing with Custom Workers
+```bash
+python3 full-docker-netnglyc-pipeline.py --mode full-pipeline \
+    --processing-mode parallel --workers 8 \
+    path/to/wt/AminoAcid/Sequences/GENE_aa.fasta \
+    results.tsv
 ```
 
-## ⚠️ Prerequisites
+### 6. Parse Existing NetNGlyc Outputs (Mutant Mode - Requires Mapping)
+```bash
+python3 full-docker-netnglyc-pipeline.py --mode parse \
+    --is-mutant \
+    --mapping-dir path/to/mapping/directory/ \
+    netnglyc-outputs/ \
+    parsed_results.tsv
+```
+
+### 7. Parse Existing NetNGlyc Outputs (Wildtype Mode - Requires Mapping)
+```bash
+python3 full-docker-netnglyc-pipeline.py --mode parse \
+    --mapping-dir path/to/mapping/directory/ \
+    netnglyc-outputs/ \
+    parsed_results.tsv
+```
+
+## Processing Modes
+
+### Automatic Mode Selection (Default)
+- **auto**: Intelligent selection based on sequence count
+  - 1-50 sequences → single (one Docker container)
+  - 51-500 sequences → parallel (multiple Docker containers)
+  - 501+ sequences → batch (sequential batching)
+
+### Manual Mode Override
+- **single**: One Docker container (optimal for small datasets)
+- **parallel**: Multiple Docker containers (fast for medium datasets)
+- **batch**: Sequential batching (required for very large datasets)
+- **sequential**: One-by-one processing (fallback option)
+
+## Required Arguments by Mode
+
+| Mode | Input | Output | Additional Requirements |
+|------|-------|--------|------------------------|
+| `--mode parse` (mutant) | NetNGlyc output directory | TSV file | `--is-mutant`, `--mapping-dir` |
+| `--mode parse` (wildtype) | NetNGlyc output directory | TSV file | `--mapping-dir` |
+| `--mode full-pipeline` (mutant) | FASTA file/directory | TSV file | `--is-mutant`, `--mapping-dir` |
+| `--mode full-pipeline` (wildtype) | FASTA file/directory | TSV file | `--mapping-dir` |
+
+## Prerequisites
 
 1. **Docker Desktop**: Install from https://www.docker.com/products/docker-desktop
 2. **NetNGlyc License**: Academic registration required at DTU website  
-3. **SignalP 6.0**: Must be installed and accessible in system PATH
+3. **SignalP 6.0 License**: Academic registration required at DTU website
 4. **4-8GB RAM**: For parallel processing (adjustable)
 5. **Storage**: ~2GB for container + temporary processing files
 
-## 🐛 Troubleshooting
+## Troubleshooting
+
+### File Naming Issues
+```bash
+# Check FASTA file naming
+ls path/to/wt/AminoAcid/Sequences/    # Should show: GENE_aa.fasta
+ls path/to/mut/AminoAcid/Sequences/    # Should show: GENE_aa.fasta
+
+# Check mapping file naming
+ls path/to/mapping/directory/    # Should show: GENE_nt_to_aa_mapping.csv
+```
+
+### Directory Structure Issues
+```bash
+# Verify separate directories
+# WT and MUT files must be in different directories
+# Mapping files must be in their own directory
+```
+
+### FASTA Header Format Issues
+```bash
+# Check mutant FASTA headers
+head -5 path/to/mut/AminoAcid/Sequences/ABCB1_aa.fasta
+# Should show: >ABCB1-T3435C format
+# NOT: >T3435C or >ABCB1_T3435C
+```
 
 ### Docker not found
 ```bash
@@ -138,27 +254,5 @@ docker --version
 ### Container build fails
 ```bash
 # Check NetNGlyc source exists
-ls -la ../software/netNglyc-1.0/
+ls -la path/to/netNglyc-1.0/
 ```
-
-### Processing fails
-```bash
-# Test container setup
-python3 docker_netnglyc_parallel.py --test
-```
-
-### Slow performance
-```bash
-# Reduce workers if running out of memory
-python3 docker_netnglyc_parallel.py INPUT OUTPUT --workers 2
-```
-
-## 📈 Expected Results
-
-With this Docker setup, you should get:
-- ✅ **Identical predictions** to your original 164 results
-- ✅ **Working neural network** (no more "Command not found" errors)
-- ✅ **SignalP 6.0 integration** with accurate signal peptide predictions
-- ✅ **Parallel processing** for faster completion
-
-The Docker approach ensures 100% compatibility with the original NetNGlyc while providing modern SignalP 6.0 integration.

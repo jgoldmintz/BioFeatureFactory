@@ -16,11 +16,12 @@ import sys
 import time
 import platform
 from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor, as_completed
-from dependencies.utility import read_fasta, get_mutation_data_bioAccurate
+
 
 # Import utility functions  
-sys.path.append(os.path.join(os.path.dirname(__file__), 'dependencies'))
+sys.path.append(os.path.join(os.path.dirname(__file__), '../dependencies'))
 
+from utility import read_fasta, get_mutation_data_bioAccurate
 
 def _process_single_sequence_worker(args):
     """
@@ -2003,43 +2004,6 @@ def main():
 
     parser = argparse.ArgumentParser(
         description="Complete NetNGlyc pipeline with SignalP 6 integration and intelligent parallel processing",
-        epilog="""
-USAGE EXAMPLES:
-
-1. Test mode (no other args required):
-   %(prog)s --test
-
-2. Process single FASTA file (automatic mode selection):
-   %(prog)s input.fasta output-netnglyc.out
-
-3. Full pipeline with automatic processing mode (wildtype sequences):
-   %(prog)s --mode full-pipeline --mapping-dir ./mutations/combined/aa/ input.fasta results.tsv
-
-4. Full pipeline with automatic processing mode (mutant sequences):
-   %(prog)s --mode full-pipeline --is-mutant input.fasta results.tsv
-
-5. Force parallel processing with 8 workers:
-   %(prog)s --mode full-pipeline --processing-mode parallel --workers 8 input.fasta results.tsv
-
-6. Parse existing NetNGlyc outputs (mutant mode):
-   %(prog)s --mode parse --is-mutant netnglyc-outputs/ parsed_results.tsv
-
-7. Parse existing NetNGlyc outputs (wildtype mode - requires mapping):
-   %(prog)s --mode parse --mapping-dir ./mutations/combined/aa/ netnglyc-outputs/ parsed_results.tsv
-
-PROCESSING MODES:
-- auto: Intelligent selection (1-50 seqs→single, 51-500→parallel, 501+→batch)
-- single: One Docker container (optimal for small datasets)
-- parallel: Multiple Docker containers (fast for medium datasets) 
-- batch: Sequential batching (required for very large datasets)
-
-REQUIRED ARGUMENTS BY MODE:
-- process: input, output
-- parse (mutant): input, output, --is-mutant
-- parse (wildtype): input, output, --mapping-dir  
-- full-pipeline (mutant): input, output, --is-mutant
-- full-pipeline (wildtype): input, output, --mapping-dir
-        """,
         formatter_class=argparse.RawDescriptionHelpFormatter
     )
     parser.add_argument("input", nargs='?', help="Input FASTA file or directory (required for process/full-pipeline modes)")
