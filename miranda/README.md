@@ -6,7 +6,6 @@ This package contains a complete pipeline for predicting miRNA binding sites in 
 
 This self-contained package includes:
 
-- **Uncompiled miranda source** in `miranda.tar.gz` for custom compilation
 - **Optimized pipeline script** with parallel processing and cleanup features
 
 ## Quick Start
@@ -43,19 +42,6 @@ python run-miranda-pipeline.py \
     -o miranda-output/ \
     -m software/miranda-compiled/src/ \
     -d /path/to/mirna/database.fasta
-```
-
-## Software Components
-
-### miranda Executable
-
-- **Source code**: Available in `miranda.tar.gz` for custom compilation
-
-```bash
-tar -xzf miranda.tar.gz
-cd miranda/
-./configure
-make
 ```
 
 ### Pipeline Features
