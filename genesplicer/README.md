@@ -36,21 +36,6 @@ This module provides a Python wrapper for GeneSplicer, a computational method fo
 1. **Training data**: Obtain species-specific training data (human, Arabidopsis, etc.)
 1. **mafft**: Required for mapping genomic positions. 
 
-### Setup
-
-```bash
-# Clone the repository
-git clone https://github.com/jgoldmintz/BioFeatureFactory.git
-cd BioFeatureFactory/genesplicer
-
-# Install Python dependencies
-pip install -r requirements.txt
-
-# Set GeneSplicer path
-export GENESPLICER_PATH=/path/to/genesplicer/bin
-export GENESPLICER_TRAINING=/path/to/training/data
-```
-
 ## Usage
 
 ### Basic Usage
