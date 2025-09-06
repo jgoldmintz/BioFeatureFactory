@@ -10,16 +10,7 @@ This self-contained package includes:
 
 ## Quick Start
 
-### 1. Environment Setup
-
-Create and activate the conda environment:
-
-```bash
-conda env create -f environment.yml
-conda activate miranda-env
-```
-
-### 2. Running the Pipeline
+### 1. Running the Pipeline
 
 For mutant sequence analysis (most common use case):
 
