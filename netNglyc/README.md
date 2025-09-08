@@ -257,6 +257,35 @@ docker --version
 ls -la path/to/netNglyc-1.0/
 ```
 
+## Recent Bug Fixes (September-08-2025)
+
+### Critical 1:Many Mapping Logic Fix
+
+**Issue Resolved**: The NetNGlyc pipeline previously only checked position when matching predictions to mutations, missing the amino acid verification step.
+
+**Problem Example**:
+- Position 541: Wildtype K → mutations A1622G (K→E) and A1624C (K→N)
+- **Before Fix**: Both mutations incorrectly received the same wildtype K prediction
+- **After Fix**: Each mutation only matches predictions with the correct amino acid (E for A1622G, N for A1624C)
+
+**Technical Changes**:
+1. **Enhanced Amino Acid Parsing**: Added `get_mutation_data_bioAccurate_aa()` function to parse amino acid mutations
+2. **Wildtype Processing**: Implemented 1:many mapping logic - one prediction can generate multiple pkeys for different mutations at the same position
+3. **Mutant Processing**: Added amino acid verification using `pred['sequon'][0]` (first letter of sequon)
+4. **Position + Amino Acid Matching**: Both wildtype and mutant processing now verify:
+   - `pred['position'] == target_position`
+   - `pred['sequon'][0] == target_amino_acid`
+
+**Impact**:
+- **Eliminates false positive matches**: Mutations only match predictions with correct amino acids
+- **Supports synonymous mutations**: Multiple mutations at same position get distinct, accurate results
+- **Improves data integrity**: Ensures biological accuracy in glycosylation predictions
+
+**Files Modified**:
+- `full-docker-netnglyc-pipeline.py`: Enhanced mapping logic and amino acid verification
+
+This fix ensures that NetNGlyc predictions are correctly matched to mutations based on both genomic position and amino acid context, providing accurate glycosylation analysis for disease-associated synonymous mutations.
+
 ## Citation
 
 If you use this pipeline, please cite:

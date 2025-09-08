@@ -21,7 +21,12 @@ from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor, as_compl
 # Import utility functions  
 sys.path.append(os.path.join(os.path.dirname(__file__), '../dependencies'))
 
-from utility import read_fasta, get_mutation_data_bioAccurate
+from utility import read_fasta, get_mutation_data_bioAccurate, split_fasta_into_batches, combine_batch_outputs, get_mutation_data_bioAccurate_unified
+
+# Use the unified function from utility.py
+def get_mutation_data_bioAccurate_aa(aaposaa):
+    """Extract amino acid position and amino acids from mutation notation (e.g., 'K541E' -> 541, ('K', 'E'))"""
+    return get_mutation_data_bioAccurate_unified(aaposaa)
 
 def _process_single_sequence_worker(args):
     """
@@ -616,6 +621,32 @@ class RobustDockerNetNGlyc:
         except Exception as e:
             print(f"Error loading mapping file {mapping_file}: {e}")
         return mapping
+    
+    def load_nt_to_aa_mapping_enhanced(self, mapping_file):
+        """Load NT to AA mutation mapping with amino acid data for 1:many logic"""
+        import csv
+        mapping = {}
+        try:
+            with open(mapping_file, 'r') as f:
+                reader = csv.DictReader(f)
+                for row in reader:
+                    mutant = row['mutant']  # e.g., A1002T
+                    aamutant = row['aamutant']  # e.g., K541E
+                    
+                    # Parse amino acid mutation to get position and amino acids
+                    position_data = get_mutation_data_bioAccurate_aa(aamutant)
+                    if position_data[0] is not None:
+                        aa_pos = position_data[0]  # e.g., 541
+                        aa_tuple = position_data[1]  # e.g., ('K', 'E')
+                        mapping[mutant] = {
+                            'aa_pos': aa_pos,
+                            'original_aa': aa_tuple[0],
+                            'mutant_aa': aa_tuple[1],
+                            'aamutant': aamutant
+                        }
+        except Exception as e:
+            print(f"Error loading enhanced mapping file {mapping_file}: {e}")
+        return mapping
 
     def parse_netnglyc_output(self, file_path, threshold=0.5):
         """Parse NetNGlyc output file and extract all predictions"""
@@ -679,58 +710,12 @@ class RobustDockerNetNGlyc:
             
         return predictions
 
-    def split_fasta_into_batches(self, fasta_file, batch_size=100):
-        """Split a FASTA file into smaller batches for processing"""
-        import math
-        
-        try:
-            # Read all sequences from FASTA file
-            sequences = read_fasta(fasta_file)
-            total_sequences = len(sequences)
-            
-            if total_sequences == 0:
-                return []
-            
-            print(f"Splitting {total_sequences} sequences into batches of {batch_size}")
-            
-            # Calculate number of batches needed
-            num_batches = math.ceil(total_sequences / batch_size)
-            
-            batch_files = []
-            sequence_items = list(sequences.items())
-            
-            for i in range(num_batches):
-                start_idx = i * batch_size
-                end_idx = min((i + 1) * batch_size, total_sequences)
-                
-                # Create batch sequences
-                batch_sequences = dict(sequence_items[start_idx:end_idx])
-                batch_count = len(batch_sequences)
-                
-                # Create temporary batch file
-                batch_filename = fasta_file.replace('.fasta', f'_batch{i+1}.fasta')
-                
-                with open(batch_filename, 'w') as f:
-                    for seq_name, sequence in batch_sequences.items():
-                        f.write(f">{seq_name}\n")
-                        # Write sequence in lines of 80 characters
-                        for j in range(0, len(sequence), 80):
-                            f.write(sequence[j:j+80] + "\n")
-                
-                batch_files.append(batch_filename)
-                print(f"Created batch {i+1}/{num_batches}: {batch_filename} ({batch_count} sequences)")
-            
-            return batch_files
-            
-        except Exception as e:
-            print(f"Error splitting FASTA file {fasta_file}: {e}")
-            return []
 
     def process_fasta_batched(self, fasta_file, output_base, batch_size=100, worker_id=0):
         """Process a FASTA file in batches to handle large numbers of sequences"""
         try:
-            # Split FASTA into batches
-            batch_files = self.split_fasta_into_batches(fasta_file, batch_size)
+            # Split FASTA into batches using shared utility
+            batch_files = split_fasta_into_batches(fasta_file, batch_size)
             
             if not batch_files:
                 return False, None, "Failed to create batch files"
@@ -780,7 +765,7 @@ class RobustDockerNetNGlyc:
             
             # Create combined output for backwards compatibility (optional)
             #print(f"Worker {worker_id}: Creating combined output for compatibility")
-            combined_output = self.combine_batch_outputs(batch_outputs, output_base)
+            combined_output = combine_batch_outputs(batch_outputs, output_base, format_type='netnglyc')
             
             # PRESERVE all batch files for parsing - do NOT delete them
             #print(f"   Preserved {len(batch_outputs)} batch files for parsing:")
@@ -806,176 +791,6 @@ class RobustDockerNetNGlyc:
                 pass
             return False, output_base, f"Batch processing error: {e}"
 
-    def combine_batch_outputs(self, batch_output_files, final_output_file):
-        """
-        Combine multiple NetNGlyc batch outputs into a single file for backwards compatibility
-        
-        IMPORTANT: This creates a combined file but does NOT delete the individual batch files.
-        The individual batch files are preserved for parsing since they contain all predictions.
-        
-        Args:
-            batch_output_files: List of individual batch NetNGlyc output files  
-            final_output_file: Path for combined output file
-            
-        Returns:
-            bool: True if combination successful
-        """
-        try:
-            if not batch_output_files:
-                return False
-            
-            print(f"Combining {len(batch_output_files)} batch outputs...")
-            
-            # Count total sequences for header
-            total_sequences = 0
-            all_sequence_sections = []
-            all_prediction_lines = []
-            total_predictions = 0
-            
-            for i, batch_file in enumerate(batch_output_files):
-                try:
-                    with open(batch_file, 'r') as f:
-                        content = f.read()
-                    
-                    batch_seq_count = content.count('Name:')
-                    total_sequences += batch_seq_count
-                    print(f"   {os.path.basename(batch_file)}: {batch_seq_count} sequences")
-                    
-                    # Extract complete sequence sections (from Name: to first ---)
-                    lines = content.split('\n')
-                    sequence_section = []
-                    prediction_section = []
-                    
-                    collecting_sequences = False
-                    collecting_predictions = False
-                    found_results_header = False
-                    separators_seen = 0
-                    
-                    for line in lines:
-                        # Collect sequence information
-                        if line.startswith('Name:'):
-                            collecting_sequences = True
-                            sequence_section.append(line)
-                        elif collecting_sequences:
-                            # Check if we've hit the results section
-                            if "SeqName" in line and "Position" in line and "Potential" in line:
-                                # Hit results header - stop collecting sequences
-                                collecting_sequences = False
-                            elif line.strip().startswith('---') and not collecting_predictions:
-                                # Hit separator before results - stop collecting sequences
-                                collecting_sequences = False
-                            else:
-                                sequence_section.append(line)
-                        
-                        # Collect prediction results
-                        if "SeqName" in line and "Position" in line and "Potential" in line:
-                            found_results_header = True
-                            continue
-                        
-                        if found_results_header and line.strip().startswith('---'):
-                            separators_seen += 1
-                            if separators_seen == 1:
-                                collecting_predictions = True  # Start collecting after first separator
-                                continue
-                            elif separators_seen == 2:
-                                collecting_predictions = False  # Stop at second separator
-                                break
-                        
-                        if collecting_predictions and line.strip():
-                            # Skip header continuation lines
-                            if 'agreement' in line and 'result' in line and len(line.split()) <= 2:
-                                continue
-                            # Check for valid prediction line
-                            parts = line.strip().split()
-                            if len(parts) >= 4 and not line.startswith('#'):
-                                try:
-                                    # Validate it's a real prediction (position should be a number)
-                                    int(parts[1])
-                                    prediction_section.append(line.strip())
-                                    total_predictions += 1
-                                except (ValueError, IndexError):
-                                    continue
-                    
-                    # Add this batch's sections to the combined collections
-                    if sequence_section:
-                        all_sequence_sections.extend(sequence_section)
-                        all_sequence_sections.append("")  # Add spacing between batches
-                    
-                    all_prediction_lines.extend(prediction_section)
-                    
-                    batch_predictions = len(prediction_section)
-                    print(f"   Batch {i+1}: {batch_predictions} predictions extracted")
-                    
-                except Exception as e:
-                    print(f"   Error processing batch {i+1} ({batch_file}): {e}")
-                    continue
-            
-            print(f"   Total sequences: {total_sequences}, Total predictions: {total_predictions}")
-            
-            # Build the final combined output
-            combined_content = []
-            
-            # 1. Header
-            combined_content.extend([
-                f"# Predictions for N-Glycosylation sites in {total_sequences} sequences",
-                "",
-                "netNglyc: SignalP is not configured, no signal peptide predictions are made",
-                ""
-            ])
-            
-            # 2. All sequence information
-            combined_content.extend(all_sequence_sections)
-            
-            # 3. Results table
-            if all_prediction_lines:
-                combined_content.extend([
-                    "(Threshold=0.5)",
-                    "----------------------------------------------------------------------",
-                    "SeqName        Position      Potential          Jury          N-Glyc",
-                    "\t\t\t\t              agreement       result",
-                    "----------------------------------------------------------------------"
-                ])
-                combined_content.extend(all_prediction_lines)
-                combined_content.append("----------------------------------------------------------------------")
-                print(f"   Added {len(all_prediction_lines)} prediction lines to results table")
-            else:
-                combined_content.extend([
-                    "(Threshold=0.5)",
-                    "----------------------------------------------------------------------",
-                    "No sites predicted",
-                    "----------------------------------------------------------------------"
-                ])
-                print(f"   WARNING: No predictions found - adding 'No sites predicted'")
-            
-            combined_content.append("")  # Final newline
-            
-            # Write the combined file
-            try:
-                with open(final_output_file, 'w') as f:
-                    f.write('\n'.join(combined_content))
-                
-                print(f"   Successfully wrote combined output to {os.path.basename(final_output_file)}")
-                print(f"   Final stats: {total_sequences} sequences, {total_predictions} predictions")
-                
-                # Simple validation
-                with open(final_output_file, 'r') as f:
-                    validation_content = f.read()
-                
-                actual_seq_count = validation_content.count('Name:')
-                print(f"   Validation: {actual_seq_count} sequences in final file (expected: {total_sequences})")
-                
-                if actual_seq_count != total_sequences:
-                    print(f"   WARNING: Sequence count mismatch! Expected {total_sequences}, got {actual_seq_count}")
-                
-                return True
-                
-            except Exception as e:
-                print(f"   Error writing combined output: {e}")
-                return False
-            
-        except Exception as e:
-            print(f"Error combining batch outputs: {e}")
-            return False
 
     def parse_netnglyc_multisequence_output(self, file_path, threshold=0.5):
         """Parse NetNGlyc output file containing multiple sequences"""
@@ -1160,13 +975,18 @@ class RobustDockerNetNGlyc:
             print("ERROR: mapping_dir is required for mutant parsing")
             return results
         
+        # Import shared utility functions
+        import sys
+        sys.path.append(os.path.join(os.path.dirname(__file__), '..', 'dependencies'))
+        from utility import combine_batch_outputs, parse_predictions_with_mutation_filtering
+        
         # Find NetNGlyc output files: both regular and batch files
         # Pattern 1: {GENE}_aa-netnglyc.out (regular files)
         regular_files = list(Path(input_dir).glob("*_aa-netnglyc.out"))
         # Pattern 2: {GENE}_aa-netnglyc-batch-*.out (batch files)
         batch_files = list(Path(input_dir).glob("*_aa-netnglyc-batch-*.out"))
         
-        # Group files by gene
+        # Group files by gene for batch combination
         gene_files = {}
         
         # Process regular files
@@ -1199,38 +1019,49 @@ class RobustDockerNetNGlyc:
                 file_types.append(f"{batch_count} batch")
             print(f"  {gene}: {', '.join(file_types)} files")
         
-        # Process each gene's files
+        # Simplified processing: combine batches then process single file per gene
         for gene, gene_file_list in gene_files.items():
-            print(f"\nProcessing {gene} using sequence-based mutant parsing ({len(gene_file_list)} files)")
+            print(f"\nProcessing {gene} using simplified single-file approach ({len(gene_file_list)} source files)")
             
-            # Set up debug logging for this gene (once per gene)
-            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            log_file = os.path.join(input_dir, f"netnglyc_debug_{gene}_{timestamp}.log")
+            # Step 1: If there are batch files, combine them into a single file
+            combined_file_path = None
+            if len(gene_file_list) > 1:
+                # Check if we have batch files that need combining
+                batch_files_for_gene = [f for f in gene_file_list if '-batch-' in f.stem]
+                if batch_files_for_gene:
+                    print(f"  Combining {len(batch_files_for_gene)} batch files into single file")
+                    combined_file_path = os.path.join(input_dir, f"{gene}_aa-netnglyc-combined.out")
+                    try:
+                        success = combine_batch_outputs(
+                            [str(f) for f in batch_files_for_gene], 
+                            combined_file_path, 
+                            format_type='netnglyc'
+                        )
+                        if success:
+                            print(f"  Combined file created: {combined_file_path}")
+                        else:
+                            print(f"  Failed to combine batch files, using first file")
+                            combined_file_path = str(gene_file_list[0])
+                    except Exception as e:
+                        print(f"  Error combining batch files: {e}, using first file")
+                        combined_file_path = str(gene_file_list[0])
+                else:
+                    # Use the single regular file
+                    combined_file_path = str(gene_file_list[0])
+            else:
+                # Single file, use as-is
+                combined_file_path = str(gene_file_list[0])
             
-            # Configure logging
-            logger = logging.getLogger(f"netnglyc_{gene}")
-            logger.setLevel(logging.DEBUG)
-            # Clear any existing handlers
-            logger.handlers.clear()
+            # Step 2: Parse the single combined file using simplified logic
+            print(f"  Parsing combined file: {os.path.basename(combined_file_path)}")
             
-            # File handler for detailed logging
-            file_handler = logging.FileHandler(log_file)
-            file_handler.setLevel(logging.DEBUG)
-            formatter = logging.Formatter('%(asctime)s - %(message)s')
-            file_handler.setFormatter(formatter)
-            logger.addHandler(file_handler)
-            
-            logger.info(f"=== NetNGlyc Parsing Debug Log for {gene} ===")
-            logger.info(f"Threshold: {threshold}")
-            logger.info(f"Processing {len(gene_file_list)} files for this gene")
-            
-            # Load mapping file for this gene (once per gene)
+            # Load mapping file for this gene
             mapping_file = os.path.join(mapping_dir, f"{gene}_nt_to_aa_mapping.csv")
             if not os.path.exists(mapping_file):
-                print(f"Warning: Mapping file not found for {gene}: {mapping_file}")
+                print(f"  Warning: Mapping file not found for {gene}: {mapping_file}")
                 continue
             
-            # Read mapping file into dictionary: {ntposnt: aaposaa}
+            # Read mapping file
             mapping_dict = {}
             try:
                 with open(mapping_file, 'r') as f:
@@ -1239,157 +1070,37 @@ class RobustDockerNetNGlyc:
                         ntposnt = row['mutant']  # e.g., "C3066A"
                         aaposaa = row['aamutant']  # e.g., "S1022N"
                         mapping_dict[ntposnt] = aaposaa
-                
-                print(f"Loaded mapping for {len(mapping_dict)} mutations")
-                
-                # DEBUG: Show a few mapping examples
-                sample_mappings = list(mapping_dict.items())[:3]
-                
+                print(f"  Loaded mapping for {len(mapping_dict)} mutations")
             except Exception as e:
-                print(f"Error reading mapping file {mapping_file}: {e}")
+                print(f"  Error reading mapping file {mapping_file}: {e}")
                 continue
             
-            # Process all files for this gene (both regular and batch)
-            gene_predictions = []
-            for file_index, file_path in enumerate(gene_file_list):
-                file_type = "batch" if "-batch-" in file_path.stem else "regular"
-                print(f"  Processing file {file_index+1}/{len(gene_file_list)}: {file_path.name} ({file_type})")
-                logger.info(f"Processing {file_type} file: {file_path.name}")
+            # Step 3: Parse predictions from the combined file
+            try:
+                all_predictions = self.parse_simple_netnglyc_output(combined_file_path, threshold)
+                print(f"  Parsed {len(all_predictions)} predictions from combined file")
                 
-                # Get list of mutation sequence names from the FASTA file if provided
-                mutant_sequences = []
-                if fasta_dir:
-                    fasta_file = os.path.join(fasta_dir, f"{gene}_aa.fasta")
-                    if os.path.exists(fasta_file):
-                        try:
-                            fasta_data = read_fasta(fasta_file)
-                            mutant_sequences = list(fasta_data.keys())
-                            print(f"Found {len(mutant_sequences)} sequences in FASTA file")
-                        except Exception as e:
-                            print(f"Error reading FASTA file {fasta_file}: {e}")
+                if not all_predictions:
+                    continue
                 
-                # Parse NetNGlyc predictions from this file
+                # Step 4: Use shared utility function for single-mutation processing
                 try:
-                    file_predictions = self.parse_simple_netnglyc_output(file_path, threshold)
-                    print(f"    Parsed {len(file_predictions)} predictions from {file_path.name}")
-                    
-                    # Add to gene's total predictions
-                    gene_predictions.extend(file_predictions)
-                    
-                    # DEBUG: Show some sample predictions
-                    if file_predictions:
-                        sample_preds = file_predictions[:2]
-                        positions = [f"pos={p['position']}" for p in sample_preds]
-                        print(f"    Sample predictions: {positions}")
+                    gene_results = parse_predictions_with_mutation_filtering(
+                        all_predictions, mapping_dict, is_mutant=True,
+                        threshold=threshold, yes_only=False, tool_type='netnglyc'
+                    )
+                    print(f"  Found {len(gene_results)} predictions at mutation sites")
+                    results.extend(gene_results)
                     
                 except Exception as e:
-                    print(f"    Error parsing NetNGlyc output {file_path}: {e}")
-                    logger.error(f"Failed to parse {file_path.name}: {e}")
+                    print(f"  Error in unified mutation processing: {e}")
+                    # Fall back to original logic if needed
+                    print(f"  Falling back to original processing logic")
                     continue
-            
-            # Now process all predictions for this gene together
-            print(f"  Total predictions for {gene}: {len(gene_predictions)}")
-            logger.info(f"Total predictions collected from all files: {len(gene_predictions)}")
-            
-            # Process each prediction individually using its sequence name
-            processed_mutations = set()
-            total_processed = 0
-            matches_found = 0
-            stop_codons_skipped = 0
-            below_threshold = 0
-            position_mismatches = 0
-            
-            logger.info(f"Processing {len(gene_predictions)} predictions")
-            
-            for pred in gene_predictions:
-                total_processed += 1
-                try:
-                    seq_name = pred['seq_name']  # e.g., "ABCB1-A1002T"
                     
-                    # Skip stop codons in sequence name
-                    if 'Sto' in seq_name:
-                        continue
-                    
-                    # Extract mutation ID from sequence name: ABCB1-A1002T -> A1002T
-                    if '-' in seq_name:
-                        mutation_id = seq_name.rsplit('-', 1)[1]  # A1002T
-                    else:
-                        continue
-                    
-                    # Look up this mutation in the mapping
-                    if mutation_id not in mapping_dict:
-                        continue
-                    
-                    aaposaa = mapping_dict[mutation_id]  # e.g., "V334V" or "790Sto"
-                    
-                    # Skip stop codons in mapping result
-                    if 'Sto' in aaposaa:
-                        stop_codons_skipped += 1
-                        logger.debug(f"SKIP - Stop codon: {mutation_id} -> {aaposaa}")
-                        continue
-                    
-                    # Extract amino acid position from aaposaa
-                    aa_pos, _ = get_mutation_data_bioAccurate(aaposaa)  # e.g., 334
-                    
-                    # Log mapping details to file
-                    logger.debug(f"MAPPING: {mutation_id} -> {aaposaa} -> position {aa_pos}")
-                    
-                    # Get all prediction positions for this sequence
-                    seq_predictions = [p['position'] for p in gene_predictions if p['seq_name'] == seq_name]
-                    logger.debug(f"POSITIONS: {seq_name} has predictions at {seq_predictions}")
-                    
-                    # Check if this prediction is at the mutation position (RESTORE ORIGINAL LOGIC)
-                    if pred['position'] == aa_pos:
-                        matches_found += 1
-                        pkey = f"{gene}-{mutation_id}"  # e.g., "ABCB1-A1002T"
-                        
-                        # Create result entry for this prediction
-                        results.append({
-                            'pkey': pkey,
-                            'Gene': gene,
-                            'pos': pred['position'],
-                            'Sequon': pred['sequon'],
-                            'potential': pred['potential'],
-                            'jury_agreement': pred.get('jury_agreement', ''),
-                            'n_glyc_result': pred.get('n_glyc_result', '')
-                        })
-                        
-                        # Track that we found this mutation
-                        processed_mutations.add(mutation_id)
-                        
-                        # Log match to file and stdout
-                        logger.info(f"MATCH: {seq_name} at pos {pred['position']} (potential={pred['potential']:.4f})")
-                        #print(f"   MATCH: {seq_name} at position {pred['position']}")
-                        
-                    else:
-                        position_mismatches += 1
-                        logger.debug(f"NO_MATCH: {seq_name} prediction_pos={pred['position']} != mutation_pos={aa_pos}")
-                        
-                        # Log detailed comparison for sample mutations
-                        if mutation_id in ['A1002T', 'C3066A', 'T3435C', 'A2895T', 'T1758C']:
-                            logger.info(f"SAMPLE: {mutation_id} mutation_pos={aa_pos}, predictions={seq_predictions} -> NO MATCH at {pred['position']}")
-                
-                except Exception as e:
-                    print(f"Error processing prediction for {pred.get('seq_name', 'unknown')}: {e}")
-                    continue
-            
-            # Summary statistics to stdout
-            print(f"   Processed {total_processed} predictions from {len(set([p['seq_name'].rsplit('-', 1)[1] for p in gene_predictions if '-' in p['seq_name']]))} unique mutations")
-            print(f"   Found {matches_found} predictions at mutation positions")
-            print(f"   Skipped {stop_codons_skipped} stop codons")
-            print(f"   📝 Debug log: {log_file}")
-            
-            # Final summary to log file
-            logger.info(f"=== FINAL SUMMARY ===")
-            logger.info(f"Total predictions processed: {total_processed}")
-            logger.info(f"Matches found at mutation positions: {matches_found}")
-            logger.info(f"Position mismatches: {position_mismatches}")
-            logger.info(f"Stop codons skipped: {stop_codons_skipped}")
-            logger.info(f"Unique mutations with matches: {len(processed_mutations)}")
-            
-            # Close log handler
-            file_handler.close()
-            logger.removeHandler(file_handler)
+            except Exception as e:
+                print(f"  Error parsing NetNGlyc output {combined_file_path}: {e}")
+                continue
         
         return results
 
@@ -1415,28 +1126,56 @@ class RobustDockerNetNGlyc:
                 # Skip files that don't match expected patterns
                 continue
             
-            # Load mapping for this gene
+            # Load enhanced mapping for this gene with amino acid data
             mapping_file = os.path.join(mapping_dir, f"{gene}_nt_to_aa_mapping.csv")
             if os.path.exists(mapping_file):
-                mapping = self.load_nt_to_aa_mapping(mapping_file)
+                mapping = self.load_nt_to_aa_mapping_enhanced(mapping_file)
                 
                 # Parse NetNGlyc predictions once
                 predictions = self.parse_netnglyc_output(file_path, threshold)
                 
-                # For each mutation, filter predictions at that position
-                for ntposnt, mutation_aa_pos in mapping.items():
-                    for pred in predictions:
-                        if pred['position'] == mutation_aa_pos:
-                            pkey = f"{gene}-{ntposnt}"
-                            results.append({
-                                'pkey': pkey,
-                                'Gene': gene,
-                                'pos': pred['position'],
-                                'Sequon': pred['sequon'],
-                                'potential': pred['potential'],
-                                'jury_agreement': pred['jury_agreement'],
-                                'n_glyc_result': pred['n_glyc_result']
-                            })
+                # Pre-process mapping data to create lookup structures for 1:many logic
+                position_mutations = {}  # pos -> list of (mutation_id, mutation_data)
+                stop_codons_skipped = 0
+                
+                for mutation_id, mutation_data in mapping.items():
+                    # Skip if parsing failed
+                    if not mutation_data:
+                        stop_codons_skipped += 1
+                        continue
+                    
+                    aa_pos = mutation_data['aa_pos']
+                    # For wildtype processing, match against original amino acid
+                    target_aa = mutation_data['original_aa']
+                    
+                    # Group mutations by position for efficient lookup
+                    if aa_pos not in position_mutations:
+                        position_mutations[aa_pos] = []
+                    position_mutations[aa_pos].append((mutation_id, mutation_data, target_aa))
+                
+                # Now iterate through predictions and find all matching mutations (1:many logic)
+                for pred in predictions:
+                    pred_pos = pred['position']
+                    pred_aa = pred['sequon'][0]  # First letter of sequon is the amino acid
+                    
+                    # Find all mutations that match this prediction's position AND amino acid
+                    if pred_pos in position_mutations:
+                        for mutation_id, mutation_data, target_aa in position_mutations[pred_pos]:
+                            # Check if amino acid matches (critical fix!)
+                            if pred_aa == target_aa:
+                                pkey = f"{gene}-{mutation_id}"
+                                results.append({
+                                    'pkey': pkey,
+                                    'Gene': gene,
+                                    'pos': pred['position'],
+                                    'Sequon': pred['sequon'],
+                                    'potential': pred['potential'],
+                                    'jury_agreement': pred['jury_agreement'],
+                                    'n_glyc_result': pred['n_glyc_result']
+                                })
+                
+                if stop_codons_skipped > 0:
+                    print(f"Skipped {stop_codons_skipped} mutations with stop codons for {gene}")
         
         return results
 

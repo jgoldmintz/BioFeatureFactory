@@ -23,6 +23,12 @@ Docker-based NetNGlyc 1.0 pipeline with SignalP 6.0 integration.
 - SignalP 6.0 integration for modern signal peptide predictions
 - Intelligent processing mode auto-detection based on sequence count
 
+### **netPhos**
+Docker-based NetPhos 3.1 pipeline for phosphorylation site prediction.
+- Apple Silicon compatibility via Docker APE system integration
+- Per-file processing optimization with intelligent caching
+- Serine/threonine/tyrosine phosphorylation predictions with kinase specificity
+
 ### **GeneSplicer**
 GeneSplicer pipeline for splice site prediction.
 - ThreadPoolExecutor optimization
@@ -31,7 +37,6 @@ GeneSplicer pipeline for splice site prediction.
 ## Upcoming:
 
 - netSufP3
-- netPhos
 - EVmutation
 - spliceAI
 - netMHC
@@ -51,6 +56,9 @@ If you use BioFeatureFactory or any of its pipelines, please cite:
 #### NetNGlyc Pipeline
 - Gupta R, Jung E, Brunak S. Prediction of N-glycosylation sites in human proteins. NetNglyc 1.0 Server. 2004. Available from: https://services.healthtech.dtu.dk/service.php?NetNGlyc-1.0
 - Teufel F, Almagro Armenteros JJ, Johansen AR, Gíslason MH, Pihl SI, Tsirigos KD, Winther O, Brunak S, von Heijne G, Nielsen H. SignalP 6.0 predicts all five types of signal peptides using protein language models. Nat Biotechnol. 2022;40(7):1023-1025.
+
+#### NetPhos Pipeline
+- Blom N, Gammeltoft S, Brunak S. Sequence and structure-based prediction of eukaryotic protein phosphorylation sites. J Mol Biol. 1999;294(5):1351-62.
 
 #### GeneSplicer Pipeline
 - Pertea M, Lin X, Salzberg SL. GeneSplicer: a new computational method for splice site prediction. Nucleic Acids Res. 2001;29(5):1185-90.
