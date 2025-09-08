@@ -12,12 +12,16 @@ This Docker setup provides accurate NetNGlyc predictions with SignalP 6.0 integr
 
 ## Required Files and Naming Conventions
 
-### Essential Docker Files (Required)
+### Essential Files
+
+#### Shared Docker Infrastructure (`BioFeatureFactory/docker/`)
 - **`Dockerfile`** - Container definition with 32-bit Linux environment
-- **`build-container.sh`** - Automated build script with ARM64 Mac support
+- **`build-container.sh`** - Automated build script with ARM64 Mac support  
 - **`signalp_stub`** - SignalP 6.0 integration script
-- **`full-docker-netnglyc-pipeline.py`** - Complete production pipeline
 - **`netNglyc.tar.gz`** - Original NetNGlyc 1.0 distribution (download from DTU)
+
+#### NetNGlyc-Specific Files (`BioFeatureFactory/netnglyc/`)
+- **`full-docker-netnglyc-pipeline.py`** - Complete production pipeline
 
 ### FASTA File Naming Requirements
 
@@ -56,7 +60,7 @@ G2677T,A893S
 Download `netNglyc.tar.gz` from:
 - **Official source**: https://services.healthtech.dtu.dk/software.php
 - **License**: Academic use only - requires institutional email registration
-- **Place in**: Your docker directory (same location as Dockerfile)
+- **Place in**: `BioFeatureFactory/docker/` directory (same location as Dockerfile)
 
 #### SignalP 6.0 (Required for signalp_stub)
 -  Download and install SignalP 6.0 from:
@@ -68,7 +72,7 @@ Download `netNglyc.tar.gz` from:
 
 ### 2. Build Docker Container
 ```bash
-cd path/to/docker/directory
+cd path/to/BioFeatureFactory/docker/
 ./build-container.sh
 ```
 

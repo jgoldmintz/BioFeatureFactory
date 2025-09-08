@@ -133,7 +133,7 @@ def parse_with_mutation_filtering_directory(input_path, mapping_dir, threshold=0
             netphos_files.extend(Path(input_path).glob(ext))
         
         if not netphos_files:
-            print(f"⚠️  No NetPhos output files (.out, .txt) found in directory: {input_path}")
+            print(f"Warning: No NetPhos output files (.out, .txt) found in directory: {input_path}")
             return []
         
         print(f"Found {len(netphos_files)} NetPhos output files in {input_path}")
@@ -363,9 +363,9 @@ def process_netphos_batched(fasta_file, output_file, batch_size=100, timeout=300
             
             if success:
                 batch_outputs.append(batch_output)
-                print(f"✅ Batch {i+1} completed: {batch_output}")
+                print(f"Batch {i+1} completed: {batch_output}")
             else:
-                print(f"❌ Batch {i+1} failed: {error}")
+                print(f"Batch {i+1} failed: {error}")
                 # Continue with other batches
         
         # Handle batch outputs
@@ -547,15 +547,15 @@ def run_netphos_with_fasta(fasta_file, output_file, batch_size=None, timeout=300
         success, error = _run_docker_netphos(fasta_file, output_file, timeout)
         
         if success:
-            print(f"✅ NetPhos completed: {output_file}")
+            print(f"NetPhos completed: {output_file}")
             # Cache result if successful
             if use_cache:
                 save_to_cache(fasta_file, output_file, "netphos", 
                              {"processing_mode": "single", "sequence_count": seq_count})
             return True
         else:
-            print(f"❌ Single run failed: {error}")
-            print("❌ NetPhos failed for single sequence. Check Docker setup and APE system availability.")
+            print(f"Single run failed: {error}")
+            print("NetPhos failed for single sequence. Check Docker setup and APE system availability.")
             return False
     
     elif seq_count <= 10:
@@ -564,14 +564,14 @@ def run_netphos_with_fasta(fasta_file, output_file, batch_size=None, timeout=300
         success, error = _run_docker_netphos(fasta_file, output_file, timeout)
         
         if success:
-            print(f"✅ NetPhos completed: {output_file}")
+            print(f" NetPhos completed: {output_file}")
             # Cache result if successful
             if use_cache:
                 save_to_cache(fasta_file, output_file, "netphos", 
                              {"processing_mode": "single", "sequence_count": seq_count})
             return True
         else:
-            print(f"❌ Single run failed: {error}")
+            print(f" Single run failed: {error}")
             print("Falling back to batch processing for small sequence set...")
             result = process_netphos_batched(fasta_file, output_file, batch_size=10, timeout=timeout)
             # Cache result if successful
@@ -669,13 +669,13 @@ def main():
         # Accept either single file or directory
         if os.path.isfile(args.input):
             if not args.input.endswith(('.out', '.txt')):
-                print(f"⚠️  Warning: Input file {args.input} doesn't have typical NetPhos extension (.out, .txt)")
+                print(f"Warning:  Warning: Input file {args.input} doesn't have typical NetPhos extension (.out, .txt)")
         elif not os.path.isdir(args.input):
             parser.error(f"Input must be a file or directory: {args.input}")
     
     # Validate threshold/yes-only logic
     if args.yes_only and args.threshold > 0.0:
-        print("⚠️  Warning: --yes-only specified, ignoring --threshold value (YES answers are already high-confidence)")
+        print("Warning:  Warning: --yes-only specified, ignoring --threshold value (YES answers are already high-confidence)")
         args.threshold = 0.0  # Reset threshold when yes-only is used
     
     # Handle different processing modes
@@ -694,7 +694,7 @@ def main():
                 print("ERROR: NetPhos execution failed")
                 return 1
             
-            print(f"✅ NetPhos completed: {netphos_output}")
+            print(f" NetPhos completed: {netphos_output}")
             
             # For netphos-only mode, we're done
             if args.mode == 'netphos-only':
@@ -712,7 +712,7 @@ def main():
                 fasta_files.extend(Path(args.input).glob(ext))
             
             if not fasta_files:
-                print(f"⚠️  No FASTA files (.fasta, .fa, .fas) found in directory: {args.input}")
+                print(f"Warning:  No FASTA files (.fasta, .fa, .fas) found in directory: {args.input}")
                 return 1
             
             print(f"Found {len(fasta_files)} FASTA files in {args.input}")
@@ -731,15 +731,15 @@ def main():
                 
                 if success:
                     netphos_outputs.append(netphos_output)
-                    print(f"✅ NetPhos completed: {netphos_output}")
+                    print(f" NetPhos completed: {netphos_output}")
                 else:
-                    print(f"❌ NetPhos failed for: {fasta_path}")
+                    print(f" NetPhos failed for: {fasta_path}")
             
             if not netphos_outputs:
                 print("ERROR: NetPhos execution failed for all files")
                 return 1
             
-            print(f"✅ NetPhos completed for {len(netphos_outputs)}/{len(fasta_files)} files")
+            print(f" NetPhos completed for {len(netphos_outputs)}/{len(fasta_files)} files")
             
             # For netphos-only mode, we're done
             if args.mode == 'netphos-only':

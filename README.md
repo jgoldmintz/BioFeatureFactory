@@ -1,37 +1,43 @@
 # BioFeatureFactory
-Python toolkit for automated feature extraction using gene sequences and SNP data
+Python toolkit for automated biological feature extraction from protein sequences, with focus on disease-associated synonymous mutations.
 
-## Repository Key Features:
+## Architecture
 
-- **Multiple processing modes** (full-pipeline, tool-only, parse-only)
-- **Parallel processing** with intelligent worker management
-- **Comprehensive logging** and error handling
-- **Resume capability** and caching for interrupted runs
-- **Automatic cleanup** for large datasets
-- **Mutation position filtering** using mapping files
+### Shared Infrastructure
+- **docker/**: Shared Docker environment for both NetNGlyc and NetPhos pipelines
+- **dependencies/**: Common utility functions and shared processing logic
 
-## Currently Available:
+### Key Features
+- **Unified mutation processing**: Single-mutation logic for accurate mutant sequence analysis
+- **Shared utilities**: Common functions for both NetPhos and NetNGlyc pipelines  
+- **Multiple processing modes**: full-pipeline, tool-only, parse-only
+- **Parallel processing**: Intelligent worker management with ProcessPoolExecutor
+- **Apple Silicon support**: Docker-based solutions for ARM64 compatibility
+- **Comprehensive logging**: Error handling and processing validation
 
-### **miranda pipeline**
+## Available Pipelines
+
+### **NetNGlyc Pipeline** (`netnglyc/`)
+N-linked glycosylation site prediction with SignalP 6.0 integration.
+- Docker-based NetNGlyc 1.0 with modern SignalP 6.0 predictions
+- Simplified single-file-per-gene processing architecture
+- Batch combination and intelligent processing mode selection
+- Single-mutation processing for accurate mutant analysis
+
+### **NetPhos Pipeline** (`netphos/`)
+Phosphorylation site prediction for serine, threonine, and tyrosine residues.
+- Docker-based NetPhos 3.1 with APE system integration
+- Single-mutation processing eliminates over-matching
+- Kinase-specific predictions with confidence scoring
+- Unified mutation filtering logic
+
+### **Miranda Pipeline** (`miranda/`)
 miRNA target site prediction software suite.
 - Timeout protection for long-running analyses
 - Raw file cleanup options for storage management
 
-### **netNglyc**
-Docker-based NetNGlyc 1.0 pipeline with SignalP 6.0 integration.
-- Apple Silicon compatibility via Docker
-- SignalP 6.0 integration for modern signal peptide predictions
-- Intelligent processing mode auto-detection based on sequence count
-
-### **netPhos**
-Docker-based NetPhos 3.1 pipeline for phosphorylation site prediction.
-- Apple Silicon compatibility via Docker APE system integration
-- Per-file processing optimization with intelligent caching
-- Serine/threonine/tyrosine phosphorylation predictions with kinase specificity
-
-### **GeneSplicer**
-GeneSplicer pipeline for splice site prediction.
-- ThreadPoolExecutor optimization
+### **GeneSplicer Pipeline** (`genesplicer/`)
+Splice site prediction with ThreadPoolExecutor optimization.
 - Temporary file management with automatic cleanup
 
 ## Upcoming:
