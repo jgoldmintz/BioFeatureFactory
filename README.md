@@ -46,6 +46,7 @@ Splice site prediction with ThreadPoolExecutor optimization.
 - EVmutation
 - spliceAI
 - netMHC
+- RNAfold
 
 ## Citation
 
