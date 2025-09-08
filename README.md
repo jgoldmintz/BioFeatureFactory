@@ -40,6 +40,7 @@ GeneSplicer pipeline for splice site prediction.
 - EVmutation
 - spliceAI
 - netMHC
+- RNAfold
 
 ## Citation
 
