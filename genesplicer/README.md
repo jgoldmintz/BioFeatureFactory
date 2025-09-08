@@ -34,22 +34,7 @@ This module provides a Python wrapper for GeneSplicer, a computational method fo
 
 1. **GeneSplicer binary**: Download and install GeneSplicer from the [official site](https://ccb.jhu.edu/software/genesplicer/)
 1. **Training data**: Obtain species-specific training data (human, Arabidopsis, etc.)
-1. **Python dependencies**: See `requirements.txt`
-
-### Setup
-
-```bash
-# Clone the repository
-git clone https://github.com/jgoldmintz/BioFeatureFactory.git
-cd BioFeatureFactory/genesplicer
-
-# Install Python dependencies
-pip install -r requirements.txt
-
-# Set GeneSplicer path
-export GENESPLICER_PATH=/path/to/genesplicer/bin
-export GENESPLICER_TRAINING=/path/to/training/data
-```
+1. **mafft**: Required for mapping genomic positions. 
 
 ## Usage
 
