@@ -459,10 +459,19 @@ def process_single_mutation_for_sequence(seq_name, predictions, mapping_dict, is
             result_pred = pred.copy()
             result_pred['pkey'] = pkey
             # Fix Gene field to just gene name (not gene-mutation)
-            if tool_type == 'netphos':
-                result_pred['Gene'] = gene
-            elif tool_type == 'netnglyc':
-                result_pred['Gene'] = gene
+            result_pred['Gene'] = gene
+            
+            # Map field names to match CSV writer expectations
+            if tool_type == 'netnglyc':
+                # Map NetNGlyc field names to CSV format
+                if 'position' in result_pred:
+                    result_pred['pos'] = result_pred.pop('position')
+                if 'sequon' in result_pred:
+                    result_pred['Sequon'] = result_pred.pop('sequon')
+                # Remove seq_name as it's not needed in CSV
+                if 'seq_name' in result_pred:
+                    result_pred.pop('seq_name')
+            
             results.append(result_pred)
     
     return results

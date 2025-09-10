@@ -15,6 +15,8 @@ import hashlib
 import sys
 import time
 import platform
+from datetime import datetime
+import logging
 from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor, as_completed
 
 
@@ -32,14 +34,15 @@ def _process_single_sequence_worker(args):
     """
     Worker function for parallel processing - must be at module level for pickling
     """
-    temp_fasta, temp_output, seq_name, docker_image, use_signalp, cache_dir, docker_timeout = args
+    temp_fasta, temp_output, seq_name, docker_image, use_signalp, cache_dir, docker_timeout, verbose = args
     
     worker_processor = RobustDockerNetNGlyc(
         docker_image=docker_image,
         use_signalp=use_signalp,
         max_workers=1,
         cache_dir=cache_dir,
-        docker_timeout=docker_timeout
+        docker_timeout=docker_timeout,
+        verbose=verbose
     )
     
     try:
@@ -73,12 +76,13 @@ def get_docker_platform_args():
 class SignalP6Handler:
     """Handle SignalP 6 predictions on the host before Docker NetNGlyc"""
 
-    def __init__(self, cache_dir=None):
+    def __init__(self, cache_dir=None, verbose=False):
         if cache_dir is None:
             cache_dir = os.path.join(os.path.expanduser("~"), ".signalp6_cache")
         self.cache_dir = cache_dir
         os.makedirs(self.cache_dir, exist_ok=True)
         self.last_output_dir = None  # Store the output directory path
+        self.verbose = verbose
 
     def check_signalp6_available(self):
         """Check if SignalP 6 is available on the host"""
@@ -90,7 +94,8 @@ class SignalP6Handler:
                 text=True
             )
             if result.returncode == 0:
-                print(f"Using SignalP 6.0: {result.stdout.strip()}")
+                if self.verbose:
+                    print(f"Using SignalP 6.0: {result.stdout.strip()}")
                 return True
         except:
             pass
@@ -127,10 +132,12 @@ class SignalP6Handler:
                 return json.load(f), cache_dir
 
         if not self.check_signalp6_available():
-            print("SignalP 6.0 not available - will use compatible stub within Docker container")
+            if self.verbose:
+                print("SignalP 6.0 not available - will use compatible stub within Docker container")
             return {}, None
 
-        print(f"Running SignalP 6.0 on {os.path.basename(fasta_file)}")
+        if self.verbose:
+            print(f"Running SignalP 6.0 on {os.path.basename(fasta_file)}")
 
         # Use provided output_dir or create temp
         if output_dir:
@@ -221,16 +228,17 @@ class RobustDockerNetNGlyc:
     """
 
     def __init__(self, docker_image="netnglyc:latest", use_signalp=True,
-                 max_workers=4, cache_dir=None, docker_timeout=600, keep_intermediates=False):
+                 max_workers=4, cache_dir=None, docker_timeout=600, keep_intermediates=False, verbose=False):
         self.docker_image = docker_image
         self.max_workers = max_workers
         self.temp_dir = tempfile.mkdtemp(prefix="netnglyc_")
         self.use_signalp = use_signalp
         self.docker_timeout = docker_timeout
         self.keep_intermediates = keep_intermediates
+        self.verbose = verbose
 
         # Initialize SignalP handler
-        self.signalp_handler = SignalP6Handler(cache_dir=cache_dir) if use_signalp else None
+        self.signalp_handler = SignalP6Handler(cache_dir=cache_dir, verbose=self.verbose) if use_signalp else None
 
         # Initialize cache
         if cache_dir is None:
@@ -238,13 +246,40 @@ class RobustDockerNetNGlyc:
         self.cache_dir = cache_dir
         os.makedirs(self.cache_dir, exist_ok=True)
 
+        # Setup error logging with date-named log file
+        self._setup_error_logging()
+
         # Detect platform once during initialization
         self.platform_args = get_docker_platform_args()
-        if self.platform_args:
+        if self.platform_args and self.verbose:
             print(f"Detected ARM64 architecture - Docker will use emulation mode")
 
         # Test Docker setup (non-fatal - allow fallback during processing)
         self._test_docker_availability()
+
+    def _setup_error_logging(self):
+        """Setup error logging with date-named log file"""
+        # Create error log with current date
+        today = datetime.now().strftime("%Y-%m-%d")
+        log_filename = f"netnglyc_errors_{today}.log"
+        log_path = os.path.join(self.cache_dir, log_filename)
+        
+        # Setup logger
+        self.error_logger = logging.getLogger(f'netnglyc_errors_{id(self)}')
+        self.error_logger.setLevel(logging.ERROR)
+        
+        # Remove existing handlers to avoid duplicates
+        for handler in self.error_logger.handlers[:]:
+            self.error_logger.removeHandler(handler)
+        
+        # Create file handler
+        handler = logging.FileHandler(log_path)
+        formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
+        handler.setFormatter(formatter)
+        self.error_logger.addHandler(handler)
+        
+        # Don't propagate to root logger
+        self.error_logger.propagate = False
 
     def _test_docker_availability(self):
         """Test if Docker and NetNGlyc image are available (non-fatal)"""
@@ -252,7 +287,8 @@ class RobustDockerNetNGlyc:
             # Test Docker
             result = subprocess.run(["docker", "--version"], capture_output=True, timeout=5)
             if result.returncode != 0:
-                print("Docker not available - will fallback to native stub when needed")
+                if self.verbose:
+                    print("Docker not available - will fallback to native stub when needed")
                 return False
 
             # Test image
@@ -263,14 +299,17 @@ class RobustDockerNetNGlyc:
                 timeout=5
             )
             if not result.stdout.strip():
-                print(f"Docker image '{self.docker_image}' not found - will fallback to native stub when needed")
+                if self.verbose:
+                    print(f"Docker image '{self.docker_image}' not found - will fallback to native stub when needed")
                 return False
                 
-            print(f"Docker NetNGlyc ready: {self.docker_image}")
+            if self.verbose:
+                print(f"Docker NetNGlyc ready: {self.docker_image}")
             return True
 
         except Exception as e:
-            print(f"Docker test failed ({e}) - will fallback to native stub when needed")
+            if self.verbose:
+                print(f"Docker test failed ({e}) - will fallback to native stub when needed")
             return False
 
     def _test_docker(self):
@@ -362,9 +401,25 @@ class RobustDockerNetNGlyc:
 
             raise Exception(f"Docker NetNGlyc failed with return code {result.returncode}")
 
+        except subprocess.TimeoutExpired as e:
+            # Timeout - log error but don't fallback to stub
+            error_msg = f"Docker NetNGlyc timeout ({self.docker_timeout}s) for file: {os.path.basename(fasta_file)}"
+            print(f"ERROR: {error_msg}")
+            self.error_logger.error(error_msg)
+            raise Exception(f"NetNGlyc Docker timeout after {self.docker_timeout} seconds")
         except Exception as e:
-            print(f"Docker NetNGlyc failed ({e}), attempting native stub fallback...")
-            return self._run_native_netnglyc_stub(fasta_file, signalp_results=None)
+            # Check if this is a NetNGlyc binary missing issue vs other Docker problems
+            error_str = str(e).lower()
+            if "no such file" in error_str and "netnglyc" in error_str:
+                # NetNGlyc binary missing from container - fallback to stub
+                print(f"NetNGlyc binary not found in container, using native stub fallback...")
+                return self._run_native_netnglyc_stub(fasta_file, signalp_results=None)
+            else:
+                # Other Docker infrastructure issues - don't fallback, report error
+                error_msg = f"Docker NetNGlyc infrastructure error for file {os.path.basename(fasta_file)}: {e}"
+                print(f"ERROR: {error_msg}")
+                self.error_logger.error(error_msg)
+                raise Exception(f"Docker NetNGlyc failed: {e}")
         finally:
             # Clean up work directory
             if os.path.exists(work_dir):
@@ -749,9 +804,11 @@ class RobustDockerNetNGlyc:
                     
                     if success:
                         batch_outputs.append(batch_output)
-                        print(f"   Batch {i+1} saved: {os.path.basename(batch_output)}")
+                        if self.verbose:
+                            print(f"   Batch {i+1} saved: {os.path.basename(batch_output)}")
                     else:
-                        print(f"Batch {i+1} failed: {error}")
+                        if self.verbose:
+                            print(f"Batch {i+1} failed: {error}")
                         # Clean up batch files
                         for bf in batch_files:
                             if os.path.exists(bf):
@@ -1020,8 +1077,16 @@ class RobustDockerNetNGlyc:
             print(f"  {gene}: {', '.join(file_types)} files")
         
         # Simplified processing: combine batches then process single file per gene
+        gene_count = 0
+        total_genes = len(gene_files)
+        
         for gene, gene_file_list in gene_files.items():
-            print(f"\nProcessing {gene} using simplified single-file approach ({len(gene_file_list)} source files)")
+            gene_count += 1
+            
+            if self.verbose:
+                print(f"\nProcessing {gene} using simplified single-file approach ({len(gene_file_list)} source files)")
+            else:
+                print(f"Processing {gene}: {gene_count}/{total_genes}")
             
             # Step 1: If there are batch files, combine them into a single file
             combined_file_path = None
@@ -1029,7 +1094,8 @@ class RobustDockerNetNGlyc:
                 # Check if we have batch files that need combining
                 batch_files_for_gene = [f for f in gene_file_list if '-batch-' in f.stem]
                 if batch_files_for_gene:
-                    print(f"  Combining {len(batch_files_for_gene)} batch files into single file")
+                    if self.verbose:
+                        print(f"  Combining {len(batch_files_for_gene)} batch files into single file")
                     combined_file_path = os.path.join(input_dir, f"{gene}_aa-netnglyc-combined.out")
                     try:
                         success = combine_batch_outputs(
@@ -1038,12 +1104,15 @@ class RobustDockerNetNGlyc:
                             format_type='netnglyc'
                         )
                         if success:
-                            print(f"  Combined file created: {combined_file_path}")
+                            if self.verbose:
+                                print(f"  Combined file created: {combined_file_path}")
                         else:
-                            print(f"  Failed to combine batch files, using first file")
+                            if self.verbose:
+                                print(f"  Failed to combine batch files, using first file")
                             combined_file_path = str(gene_file_list[0])
                     except Exception as e:
-                        print(f"  Error combining batch files: {e}, using first file")
+                        if self.verbose:
+                            print(f"  Error combining batch files: {e}, using first file")
                         combined_file_path = str(gene_file_list[0])
                 else:
                     # Use the single regular file
@@ -1053,12 +1122,14 @@ class RobustDockerNetNGlyc:
                 combined_file_path = str(gene_file_list[0])
             
             # Step 2: Parse the single combined file using simplified logic
-            print(f"  Parsing combined file: {os.path.basename(combined_file_path)}")
+            if self.verbose:
+                print(f"  Parsing combined file: {os.path.basename(combined_file_path)}")
             
             # Load mapping file for this gene
             mapping_file = os.path.join(mapping_dir, f"{gene}_nt_to_aa_mapping.csv")
             if not os.path.exists(mapping_file):
-                print(f"  Warning: Mapping file not found for {gene}: {mapping_file}")
+                if self.verbose:
+                    print(f"  Warning: Mapping file not found for {gene}: {mapping_file}")
                 continue
             
             # Read mapping file
@@ -1070,7 +1141,8 @@ class RobustDockerNetNGlyc:
                         ntposnt = row['mutant']  # e.g., "C3066A"
                         aaposaa = row['aamutant']  # e.g., "S1022N"
                         mapping_dict[ntposnt] = aaposaa
-                print(f"  Loaded mapping for {len(mapping_dict)} mutations")
+                if self.verbose:
+                    print(f"  Loaded mapping for {len(mapping_dict)} mutations")
             except Exception as e:
                 print(f"  Error reading mapping file {mapping_file}: {e}")
                 continue
@@ -1078,7 +1150,8 @@ class RobustDockerNetNGlyc:
             # Step 3: Parse predictions from the combined file
             try:
                 all_predictions = self.parse_simple_netnglyc_output(combined_file_path, threshold)
-                print(f"  Parsed {len(all_predictions)} predictions from combined file")
+                if self.verbose:
+                    print(f"  Parsed {len(all_predictions)} predictions from combined file")
                 
                 if not all_predictions:
                     continue
@@ -1089,7 +1162,8 @@ class RobustDockerNetNGlyc:
                         all_predictions, mapping_dict, is_mutant=True,
                         threshold=threshold, yes_only=False, tool_type='netnglyc'
                     )
-                    print(f"  Found {len(gene_results)} predictions at mutation sites")
+                    if self.verbose:
+                        print(f"  Found {len(gene_results)} predictions at mutation sites")
                     results.extend(gene_results)
                     
                 except Exception as e:
@@ -1352,7 +1426,8 @@ class RobustDockerNetNGlyc:
             use_signalp=self.use_signalp,
             max_workers=1,  # Each worker handles one file
             cache_dir=self.cache_dir,
-            docker_timeout=self.docker_timeout
+            docker_timeout=self.docker_timeout,
+            verbose=self.verbose
         )
         
         processing_info = {
@@ -1554,7 +1629,7 @@ class RobustDockerNetNGlyc:
             worker_args = []
             for temp_fasta, temp_output, seq_name in temp_files:
                 args = (temp_fasta, temp_output, seq_name, self.docker_image, 
-                       self.use_signalp, self.cache_dir, self.docker_timeout)
+                       self.use_signalp, self.cache_dir, self.docker_timeout, self.verbose)
                 worker_args.append((args, seq_name))
             
             # Use ProcessPoolExecutor for true parallelism
@@ -1776,6 +1851,8 @@ def main():
                         help="Processing strategy: 'auto' (intelligent selection based on sequence count), 'single' (1 container, best for 1-50 seqs), 'parallel' (multiple containers, best for 51-500 seqs), 'sequential' (one-by-one), 'batch' (split into batches, required for 501+ seqs)")
     parser.add_argument("--keep-intermediates", action="store_true",
                         help="Keep intermediate Docker output files for debugging (don't clean up temporary directories)")
+    parser.add_argument("--verbose", action="store_true",
+                        help="Enable verbose output showing detailed processing information")
 
     args = parser.parse_args()
 
@@ -1806,7 +1883,8 @@ def main():
                 docker_image=args.docker_image,
                 use_signalp=not args.no_signalp,
                 cache_dir=args.cache_dir,
-                docker_timeout=args.batch_timeout
+                docker_timeout=args.batch_timeout,
+                verbose=args.verbose
         ) as processor:
             success, output, error = processor.process_single_fasta(
                 test_fasta, test_output, 0
@@ -1847,7 +1925,8 @@ def main():
         processor = RobustDockerNetNGlyc(
             docker_image=args.docker_image, 
             use_signalp=False, 
-            docker_timeout=args.batch_timeout
+            docker_timeout=args.batch_timeout,
+            verbose=args.verbose
         )
         
         if args.is_mutant:
@@ -1884,7 +1963,8 @@ def main():
                 max_workers=args.workers,
                 cache_dir=args.cache_dir,
                 docker_timeout=args.batch_timeout,
-                keep_intermediates=args.keep_intermediates
+                keep_intermediates=args.keep_intermediates,
+                verbose=args.verbose
             ) as processor:
                 
                 if os.path.isfile(args.input):
@@ -1963,9 +2043,7 @@ def main():
         finally:
             # Cleanup temporary directory (unless keeping intermediates for debugging)
             if args.keep_intermediates:
-                #print(f"DEBUG: Keeping intermediate Docker outputs in: {temp_output_dir}")
-                print(f"    You can examine individual NetNGlyc output files for debugging")
-                print(f"    Remember to clean up manually when done: rm -rf {temp_output_dir}")
+                print(f"Raw output files can be viewed in {temp_output_dir}")
             else:
                 import shutil
                 shutil.rmtree(temp_output_dir, ignore_errors=True)
@@ -1981,7 +2059,8 @@ def main():
             use_signalp=not args.no_signalp,
             max_workers=args.workers,
             cache_dir=args.cache_dir,
-            docker_timeout=args.batch_timeout
+            docker_timeout=args.batch_timeout,
+            verbose=args.verbose
     ) as processor:
 
         if os.path.isfile(args.input):

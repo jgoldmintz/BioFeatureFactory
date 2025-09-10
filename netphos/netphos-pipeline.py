@@ -681,10 +681,15 @@ def main():
     # Handle different processing modes
     if args.mode in ['full-pipeline', 'netphos-only']:
         # Input can be a FASTA file or directory containing FASTA files
+        # Create temporary directory for NetPhos outputs (like NetNGlyc does)
+        import tempfile
+        temp_output_dir = tempfile.mkdtemp(prefix="netphos_outputs_")
+        
         if os.path.isfile(args.input):
-            # Single file processing
+            # Single file processing - create output in temp directory
             fasta_file = args.input
-            netphos_output = args.input.replace('.fasta', '-netphos.out')
+            netphos_output = os.path.join(temp_output_dir, 
+                                        os.path.basename(args.input).replace('.fasta', '-netphos.out'))
             
             print(f"Running NetPhos on {fasta_file}...")
             use_cache = not args.no_cache
@@ -702,8 +707,8 @@ def main():
                 return 0
             
             # For full-pipeline mode, continue to parsing
-            args.input = netphos_output
-            print(f"Proceeding to parse {netphos_output}")
+            args.input = temp_output_dir
+            print(f"Proceeding to parse outputs from {temp_output_dir}")
             
         elif os.path.isdir(args.input):
             # Directory processing - find all FASTA files
@@ -717,12 +722,14 @@ def main():
             
             print(f"Found {len(fasta_files)} FASTA files in {args.input}")
             
-            # Process each FASTA file individually (each file determines its own optimal strategy)
+            # Process each FASTA file individually - outputs go directly to temp directory
             netphos_outputs = []
             for fasta_file in fasta_files:
                 fasta_path = str(fasta_file)
                 seq_count = count_fasta_sequences(fasta_path)
-                netphos_output = fasta_path.replace('.fasta', '-netphos.out')
+                # Create output in temp directory
+                netphos_output = os.path.join(temp_output_dir, 
+                                            os.path.basename(fasta_path).replace('.fasta', '-netphos.out'))
                 
                 print(f"Processing {fasta_path} ({seq_count} sequences)...")
                 use_cache = not args.no_cache
@@ -747,12 +754,6 @@ def main():
                 return 0
             
             # For full-pipeline mode, continue to parsing the directory of outputs
-            # Create a temporary directory containing all NetPhos outputs
-            import tempfile
-            temp_output_dir = tempfile.mkdtemp(prefix="netphos_outputs_")
-            for output_file in netphos_outputs:
-                shutil.copy2(output_file, temp_output_dir)
-            
             args.input = temp_output_dir
             print(f"Proceeding to parse outputs from {temp_output_dir}")
         else:
