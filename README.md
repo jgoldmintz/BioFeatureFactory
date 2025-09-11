@@ -1,6 +1,5 @@
 # BioFeatureFactory
-Python toolkit for automated biological feature extraction from protein sequences, with focus on disease-associated synonymous mutations.
-
+Python toolkit for automated feature extraction using gene sequences and SNP data
 ## Architecture
 
 ### Shared Infrastructure
