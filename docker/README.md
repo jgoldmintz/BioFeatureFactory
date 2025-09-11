@@ -7,7 +7,7 @@ This directory contains the shared Docker infrastructure used by both NetPhos an
 - **Dockerfile** - Container definition with 32-bit Linux environment for running NetNGlyc and NetPhos
 - **build-container.sh** - Automated build script with ARM64 Mac support
 - **signalp_stub** - SignalP 6.0 integration script for signal peptide predictions
-
+- **netNglyc_stub** - NetNglyc 1.0 integration script for N-linked glycolysation
 ## Required Downloads
 
 ### NetNGlyc 1.0 Distribution
