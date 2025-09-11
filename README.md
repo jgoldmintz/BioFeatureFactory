@@ -1,5 +1,4 @@
 # BioFeatureFactory
-Python toolkit for automated biological feature extraction from protein sequences, with focus on disease-associated synonymous mutations.
 
 ## Architecture
 
