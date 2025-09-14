@@ -22,7 +22,7 @@ from pathlib import Path
 
 # Import shared batch processing utilities
 sys.path.append(os.path.join(os.path.dirname(__file__), '../dependencies'))
-from utility import split_fasta_into_batches, combine_batch_outputs, get_mutation_data_bioAccurate_unified
+from utility import split_fasta_into_batches, combine_batch_outputs, get_mutation_data_bioAccurate_unified, discover_mapping_files, discover_fasta_files
 
 # Use the unified function from utility.py
 def get_mutation_data_bioAccurate(aaposaa):
@@ -160,11 +160,14 @@ def parse_with_mutation_filtering_single_file(input_file, mapping_dir, threshold
     # Extract base gene name (e.g., "CHRNE-C915T" -> "CHRNE")
     gene = raw_gene.split('-')[0]
     
-    # Load NT->AA mapping for this gene
-    mapping_file = os.path.join(mapping_dir, f"{gene}_nt_to_aa_mapping.csv")
-    if not os.path.exists(mapping_file):
-        print(f"Warning: No mapping file found for {gene}: {mapping_file}")
+    # Load NT->AA mapping for this gene using flexible discovery
+    discovered_mappings = discover_mapping_files(mapping_dir)
+    if gene not in discovered_mappings:
+        print(f"Warning: No mapping file found for {gene} in {mapping_dir}")
+        print(f"Available mappings: {list(discovered_mappings.keys())}")
         return []
+    
+    mapping_file = discovered_mappings[gene]
     
     mapping_dict = load_nt_to_aa_mapping(mapping_file)
     print(f"Loaded {len(mapping_dict)} mutations for {gene}")
@@ -609,7 +612,7 @@ def main():
     parser.add_argument('--yes-only', action='store_true',
                        help='Only include predictions marked as YES (high-confidence predictions, overrides --threshold)')
     parser.add_argument('--mapping-dir', 
-                       help='Directory containing NT->AA mapping files (enables pkey generation and mutation filtering)')
+                       help='Directory containing mutation mapping CSV files (enables pkey generation and mutation filtering)')
     parser.add_argument('--is-mutant', action='store_true',
                        help='Process mutant sequences (matches mutant amino acid). Default: wildtype (matches original amino acid)')
     
@@ -711,13 +714,13 @@ def main():
             print(f"Proceeding to parse outputs from {temp_output_dir}")
             
         elif os.path.isdir(args.input):
-            # Directory processing - find all FASTA files
-            fasta_files = []
-            for ext in ['*.fasta', '*.fa', '*.fas']:
-                fasta_files.extend(Path(args.input).glob(ext))
+            # Directory processing - find all FASTA files using flexible discovery
+            discovered_fastas = discover_fasta_files(args.input)
+            fasta_files = [Path(file_path) for file_path in discovered_fastas.values()]
             
             if not fasta_files:
-                print(f"Warning:  No FASTA files (.fasta, .fa, .fas) found in directory: {args.input}")
+                print(f"Warning: No FASTA files found in directory: {args.input}")
+                print(f"Searched for extensions: .fasta, .fa, .fas, .fna")
                 return 1
             
             print(f"Found {len(fasta_files)} FASTA files in {args.input}")
@@ -727,9 +730,14 @@ def main():
             for fasta_file in fasta_files:
                 fasta_path = str(fasta_file)
                 seq_count = count_fasta_sequences(fasta_path)
-                # Create output in temp directory
-                netphos_output = os.path.join(temp_output_dir, 
-                                            os.path.basename(fasta_path).replace('.fasta', '-netphos.out'))
+                # Create output in temp directory with flexible extension handling
+                input_basename = os.path.basename(fasta_path)
+                # Remove any FASTA extension and add -netphos.out
+                for ext in ['.fasta', '.fa', '.fas', '.fna']:
+                    if input_basename.lower().endswith(ext):
+                        input_basename = input_basename[:-len(ext)]
+                        break
+                netphos_output = os.path.join(temp_output_dir, f"{input_basename}-netphos.out")
                 
                 print(f"Processing {fasta_path} ({seq_count} sequences)...")
                 use_cache = not args.no_cache
@@ -764,7 +772,7 @@ def main():
     if args.mode in ['full-pipeline', 'parse-only']:
         # Validate mapping directory is required for parsing modes
         if not args.mapping_dir:
-            parser.error(f"For {args.mode} mode: --mapping-dir is REQUIRED (directory containing {{GENE}}_nt_to_aa_mapping.csv files)")
+            parser.error(f"For {args.mode} mode: --mapping-dir is REQUIRED (directory containing mutation mapping CSV files)")
         
         if not os.path.exists(args.mapping_dir):
             print(f"ERROR: Mapping directory not found: {args.mapping_dir}")
