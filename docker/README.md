@@ -7,6 +7,7 @@ This directory contains the shared Docker infrastructure used by both NetPhos an
 - **Dockerfile** - Container definition with 32-bit Linux environment for running NetNGlyc and NetPhos
 - **build-container.sh** - Automated build script with ARM64 Mac support
 - **signalp_stub** - SignalP 6.0 integration script for signal peptide predictions
+- **netnglyc_stub** - License-free NetNGlyc alternative for fallback scenarios
 
 ## Required Downloads
 
@@ -29,13 +30,25 @@ This Docker container is used by:
 - **NetNGlyc Pipeline** (../netnglyc/full-docker-netnglyc-pipeline.py)
 - **NetPhos Pipeline** (../netphos/netphos-pipeline.py)
 
-The container provides a 32-bit Linux environment where both NetNGlyc and NetPhos can run correctly, especially important for Apple Silicon Macs where the original binaries cannot run natively.
+The container provides a 32-bit Linux environment that enables:
+- **Modern SignalP 6.0 integration** for accurate signal peptide predictions
+- **Apple Silicon compatibility** where native NetNGlyc and NetPhos binaries cannot run
+- **Consistent cross-platform execution** across different architectures
 
-## Prerequisites
+## Platform Requirements
 
-1. **Docker Desktop**: Install from https://www.docker.com/products/docker-desktop
-2. **SignalP 6.0**: Install on host system for signalp_stub integration
-3. **NetNGlyc 1.0**: Download and place netNglyc.tar.gz in this directory
+### **Docker Required:**
+- **Apple Silicon Macs** (M1/M2/M3) - Native binaries incompatible with ARM64
+- **Windows** - Linux binary compatibility
+
+### **Docker Optional:**
+- **Linux x86_64** - Can run NetNGlyc natively with 32-bit libraries
+- **Intel Macs** - Can run Darwin binaries natively (if available)
+
+### **Prerequisites:**
+1. **SignalP 6.0** Install on a host system for modern signal peptide prediction
+2. **Docker Desktop** (Platform-dependent) - Required for Apple Silicon and Windows
+3. **NetNGlyc 1.0** - Download and place netNglyc.tar.gz in this directory
 
 ## Container Image
 

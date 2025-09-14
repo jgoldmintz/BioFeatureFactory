@@ -526,3 +526,166 @@ def parse_predictions_with_mutation_filtering(predictions, mapping_dict, is_muta
         raise NotImplementedError("Wildtype processing should use existing pipeline-specific logic")
     
     return results
+
+def extract_gene_from_filename(filename):
+    """Extract gene name from filename using intelligent pattern matching
+    
+    Args:
+        filename: Filename without extension (e.g., 'BRCA1_aa', 'CFTR_mapping', 'TP53_nt_to_aa_mapping')
+        
+    Returns:
+        str: Extracted gene name (e.g., 'BRCA1', 'CFTR', 'TP53')
+    """
+    import re
+    
+    # Common patterns to remove from gene names
+    # Order matters: more specific patterns first
+    patterns_to_remove = [
+        r'_nt_to_aa_mapping$',      # Remove '_nt_to_aa_mapping' suffix (most specific)
+        r'_mapping$',               # Remove '_mapping' suffix
+        r'_sequences$',             # Remove '_sequences' suffix
+        r'_mutations$',             # Remove '_mutations' suffix
+        r'_data$',                  # Remove '_data' suffix
+        r'_aa$',                    # Remove '_aa' suffix
+        r'_nt$',                    # Remove '_nt' suffix
+    ]
+    
+    gene_name = filename
+    for pattern in patterns_to_remove:
+        gene_name = re.sub(pattern, '', gene_name, flags=re.IGNORECASE)
+    
+    # Clean up any remaining underscores at the end
+    gene_name = gene_name.rstrip('_')
+    
+    return gene_name if gene_name else filename  # Fallback to original if empty
+
+def discover_mapping_files(mapping_dir):
+    """Scan directory for CSV mapping files and extract gene names flexibly
+    
+    Args:
+        mapping_dir: Directory path containing mapping CSV files
+        
+    Returns:
+        dict: {gene_name: file_path} mapping
+    """
+    from pathlib import Path
+    import csv
+    
+    mapping_files = {}
+    
+    if not mapping_dir or not Path(mapping_dir).exists():
+        return mapping_files
+    
+    # Scan for all CSV files
+    for csv_file in Path(mapping_dir).glob("*.csv"):
+        try:
+            # Extract gene name from filename
+            gene_name = extract_gene_from_filename(csv_file.stem)
+            
+            # Validate CSV content structure
+            if validate_mapping_content(csv_file):
+                mapping_files[gene_name] = str(csv_file)
+            
+        except Exception as e:
+            # Skip files that can't be processed
+            print(f"Warning: Skipping {csv_file}: {e}")
+            continue
+    
+    return mapping_files
+
+def discover_fasta_files(fasta_dir):
+    """Scan directory for FASTA files with flexible extensions and extract gene names
+    
+    Args:
+        fasta_dir: Directory path containing FASTA files
+        
+    Returns:
+        dict: {gene_name: file_path} mapping
+    """
+    from pathlib import Path
+    
+    fasta_files = {}
+    
+    if not fasta_dir or not Path(fasta_dir).exists():
+        return fasta_files
+    
+    # Common FASTA file extensions
+    fasta_extensions = ['*.fasta', '*.fa', '*.fas', '*.fna', '*.faa']
+    
+    for extension in fasta_extensions:
+        for fasta_file in Path(fasta_dir).glob(extension):
+            try:
+                # Extract gene name from filename
+                gene_name = extract_gene_from_filename(fasta_file.stem)
+                
+                # Validate FASTA content
+                if validate_fasta_content(fasta_file):
+                    # If gene already found, prefer more specific naming
+                    if gene_name not in fasta_files or '_aa' in fasta_file.stem:
+                        fasta_files[gene_name] = str(fasta_file)
+                
+            except Exception as e:
+                # Skip files that can't be processed
+                print(f"Warning: Skipping {fasta_file}: {e}")
+                continue
+    
+    return fasta_files
+
+def validate_mapping_content(file_path):
+    """Validate that CSV file has the expected mapping structure
+    
+    Args:
+        file_path: Path to CSV file
+        
+    Returns:
+        bool: True if valid mapping file, False otherwise
+    """
+    import csv
+    
+    try:
+        with open(file_path, 'r') as f:
+            reader = csv.DictReader(f)
+            
+            # Check for required columns (flexible naming)
+            fieldnames = [field.lower() for field in reader.fieldnames] if reader.fieldnames else []
+            
+            # Look for mutation and amino acid mutation columns
+            has_mutation = any(col in fieldnames for col in ['mutant', 'mutation', 'nt_mutation', 'ntmutant'])
+            has_aa_mutation = any(col in fieldnames for col in ['aamutant', 'aa_mutation', 'amino_acid_mutation', 'protein_mutation'])
+            
+            return has_mutation and has_aa_mutation
+            
+    except Exception:
+        return False
+
+def validate_fasta_content(file_path):
+    """Validate that file contains valid FASTA format
+    
+    Args:
+        file_path: Path to FASTA file
+        
+    Returns:
+        bool: True if valid FASTA file, False otherwise
+    """
+    try:
+        with open(file_path, 'r') as f:
+            first_line = f.readline().strip()
+            
+            # Must start with '>' for FASTA format
+            if not first_line.startswith('>'):
+                return False
+            
+            # Check that there's sequence content
+            second_line = f.readline().strip()
+            if not second_line or second_line.startswith('>'):
+                return False
+            
+            # Basic sequence validation (should contain valid amino acid or nucleotide characters)
+            valid_chars = set('ACDEFGHIKLMNPQRSTVWYXZUOB*-')  # Amino acids + ambiguous
+            if not any(char.upper() in valid_chars for char in second_line):
+                return False
+            
+            return True
+            
+    except Exception:
+        return False
