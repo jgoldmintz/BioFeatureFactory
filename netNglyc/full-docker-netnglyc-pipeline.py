@@ -132,14 +132,10 @@ class SignalP6Handler:
                 return json.load(f), cache_dir
 
         if not self.check_signalp6_available():
-            warning_msg = "️  WARNING: SignalP 6.0 not available, falling back to signalp6_stub within Docker container"
-            print(warning_msg)
-            print(warning_msg, file=sys.stderr)
-            if self.verbose:
-                detail_msg = "  This may result in less accurate signal peptide predictions"
-                print(detail_msg)
-                print(detail_msg, file=sys.stderr)
-            return {}, None
+            error_msg = "ERROR: SignalP 6.0 is required but not available. Please install SignalP 6.0 and ensure it's in your PATH."
+            print(error_msg)
+            print(error_msg, file=sys.stderr)
+            raise Exception("SignalP 6.0 not available - required for NetNGlyc processing with SignalP integration")
 
         if self.verbose:
             print(f"Running SignalP 6.0 on {os.path.basename(fasta_file)}")
@@ -230,6 +226,11 @@ class SignalP6Handler:
 class RobustDockerNetNGlyc:
     """
     Docker NetNGlyc with integrated SignalP 6 preprocessing on host
+    
+    Requires:
+    - Licensed NetNGlyc 1.0 in Docker container
+    - SignalP 6.0 installed on host system (when use_signalp=True)
+    - No fallback functionality - fails explicitly if requirements not met
     """
 
     def __init__(self, docker_image="netnglyc:latest", use_signalp=True,
@@ -349,7 +350,13 @@ class RobustDockerNetNGlyc:
 
     def _run_docker_netnglyc(self, fasta_file, signalp_output_dir=None):
         """
-        Run NetNGlyc in Docker container with SignalP results mounted
+        Run licensed NetNGlyc in Docker container with SignalP results mounted
+        
+        Requires:
+        - Valid NetNGlyc Docker image with licensed NetNGlyc 1.0
+        - Properly configured Docker environment
+        
+        Fails explicitly if Docker or NetNGlyc requirements not met
         """
         # Create a temporary directory for this run
         work_dir = tempfile.mkdtemp(dir=self.temp_dir)
@@ -413,21 +420,11 @@ class RobustDockerNetNGlyc:
             self.error_logger.error(error_msg)
             raise Exception(f"NetNGlyc Docker timeout after {self.docker_timeout} seconds")
         except Exception as e:
-            # Check if this is a NetNGlyc binary missing issue vs other Docker problems
-            error_str = str(e).lower()
-            if "no such file" in error_str and "netnglyc" in error_str:
-                # NetNGlyc binary missing from container - fallback to stub
-                warning_msg = "⚠️  WARNING: NetNGlyc binary not found in container, using native netnglyc_stub fallback..."
-                print(warning_msg)
-                print(warning_msg, file=sys.stderr)
-                self.error_logger.warning("FALLBACK: Using netnglyc_stub instead of Docker NetNGlyc due to missing binary")
-                return self._run_native_netnglyc_stub(fasta_file, signalp_results=None)
-            else:
-                # Other Docker infrastructure issues - don't fallback, report error
-                error_msg = f"Docker NetNGlyc infrastructure error for file {os.path.basename(fasta_file)}: {e}"
-                print(f"ERROR: {error_msg}")
-                self.error_logger.error(error_msg)
-                raise Exception(f"Docker NetNGlyc failed: {e}")
+            # All Docker issues result in explicit failure - no fallback
+            error_msg = f"Docker NetNGlyc failed for file {os.path.basename(fasta_file)}: {e}"
+            print(f"ERROR: {error_msg}")
+            self.error_logger.error(error_msg)
+            raise Exception(f"Docker NetNGlyc failed: {e}")
         finally:
             # Clean up work directory
             if os.path.exists(work_dir):
@@ -469,117 +466,16 @@ class RobustDockerNetNGlyc:
         
         return '\n'.join(cleaned_lines)
 
-    def _run_native_netnglyc_stub(self, fasta_file, signalp_results=None):
-        """
-        Run netnglyc_stub directly on host system (license-free alternative)
-        
-        Args:
-            fasta_file: Path to FASTA file to analyze
-            signalp_results: Dict of SignalP 6.0 results (optional)
-            
-        Returns:
-            str: NetNGlyc-compatible output string, or None if failed
-        """
-        try:
-            # Find netnglyc_stub script
-            script_dir = os.path.dirname(os.path.abspath(__file__))
-            stub_path = os.path.join(script_dir, "netnglyc_stub")
-            
-            if not os.path.exists(stub_path):
-                print(f"NetNGlyc stub not found at: {stub_path}")
-                return None
-            
-            print(f"Running native NetNGlyc stub on {os.path.basename(fasta_file)}")
-            
-            # Execute netnglyc_stub
-            cmd = ["python3", stub_path, fasta_file]
-            
-            result = subprocess.run(
-                cmd,
-                capture_output=True,
-                text=True,
-                timeout=300  # 5 minute timeout
-            )
-            
-            if result.returncode == 0 and result.stdout:
-                stub_output = result.stdout
-                
-                # Enhance output with SignalP information if available
-                if signalp_results:
-                    enhanced_output = self._integrate_signalp_with_stub_output(
-                        stub_output, signalp_results
-                    )
-                    return enhanced_output
-                else:
-                    return stub_output
-            else:
-                print(f"NetNGlyc stub failed: {result.stderr[:200] if result.stderr else 'No error message'}")
-                return None
-                
-        except subprocess.TimeoutExpired:
-            print("NetNGlyc stub execution timed out")
-            return None
-        except Exception as e:
-            print(f"NetNGlyc stub execution error: {e}")
-            return None
-
-    def _integrate_signalp_with_stub_output(self, stub_output, signalp_results):
-        """
-        Integrate SignalP 6.0 results into netnglyc_stub output for enhanced accuracy
-        
-        Args:
-            stub_output: Original netnglyc_stub output
-            signalp_results: Dict of SignalP predictions per sequence
-            
-        Returns:
-            str: Enhanced output with SignalP information
-        """
-        try:
-            lines = stub_output.split('\n')
-            enhanced_lines = []
-            
-            # Add SignalP header information
-            enhanced_lines.append("##############################################################################")
-            enhanced_lines.append("# NetNGlyc stub with SignalP 6.0 integration - Enhanced N-glycosylation prediction")
-            enhanced_lines.append("##############################################################################")
-            enhanced_lines.append("")
-            
-            # Process each line and enhance with SignalP context
-            in_header = True
-            for line in lines:
-                if line.startswith("# Predictions for N-Glycosylation sites"):
-                    enhanced_lines.append(line)
-                    enhanced_lines.append("")
-                    
-                    # Add SignalP summary
-                    if signalp_results:
-                        enhanced_lines.append("# SignalP 6.0 predictions:")
-                        for seq_id, info in signalp_results.items():
-                            if info['has_signal']:
-                                enhanced_lines.append(f"# {seq_id}: Signal peptide detected, "
-                                                    f"cleavage at position {info['cleavage_site']} "
-                                                    f"(probability: {info['probability']:.3f})")
-                            else:
-                                enhanced_lines.append(f"# {seq_id}: No signal peptide detected "
-                                                    f"(probability: {info['probability']:.6f})")
-                        enhanced_lines.append("")
-                    in_header = False
-                elif not line.startswith("##############################################################################") and not (in_header and line.startswith("#")):
-                    enhanced_lines.append(line)
-            
-            return '\n'.join(enhanced_lines)
-            
-        except Exception as e:
-            print(f"Warning: Failed to integrate SignalP results: {e}")
-            return stub_output
 
     def process_single_fasta(self, fasta_file, output_file, worker_id=0):
         """
-        Process a single FASTA file with optional SignalP 6 preprocessing
+        Process a single FASTA file with SignalP 6 preprocessing and licensed NetNGlyc
 
-        1. Run SignalP 6 on host (if enabled)
-        2. Pass ORIGINAL FASTA and SignalP results to Docker
+        1. Run SignalP 6 on host (if enabled) - REQUIRED if use_signalp=True
+        2. Pass ORIGINAL FASTA and SignalP results to licensed NetNGlyc Docker
         3. NetNGlyc analyzes full sequence with SignalP context
+        
+        Fails explicitly if requirements not met (no fallback functionality)
         """
         #print(f"Worker {worker_id}: Processing {os.path.basename(fasta_file)}")
 
@@ -612,13 +508,8 @@ class RobustDockerNetNGlyc:
                         if info['has_signal']:
                             pass  # SignalP info processed elsewhere
     
-            # Step 2: Run NetNGlyc (Docker or native stub) with ORIGINAL FASTA and SignalP results
-            if getattr(self, 'use_native_stub', False):
-                #print(f"Worker {worker_id}: Running native NetNGlyc stub...")
-                netnglyc_output = self._run_native_netnglyc_stub(fasta_file, signalp_results)
-            else:
-                #print(f"Worker {worker_id}: Running NetNGlyc in Docker...")
-                netnglyc_output = self._run_docker_netnglyc(fasta_file, signalp_output_dir)
+            # Step 2: Run NetNGlyc Docker with ORIGINAL FASTA and SignalP results
+            netnglyc_output = self._run_docker_netnglyc(fasta_file, signalp_output_dir)
 
             if netnglyc_output:
                 # Step 3: Save results
@@ -1430,10 +1321,6 @@ class RobustDockerNetNGlyc:
                                 'validation_warnings': warnings
                             })
                             
-                            if warnings:
-                                print(f"WARNING: {strategy['file_name']}: {len(warnings)} validation warnings")
-                                for warning in warnings:
-                                    print(f"    • {warning}")
                         
                         results["processing_summary"][strategy['file_name']] = processing_info
                         print(f"SUCCESS: {strategy['file_name']}: {processing_info.get('predictions_found', 0)} predictions")
@@ -1915,7 +1802,7 @@ def main():
     import argparse
 
     parser = argparse.ArgumentParser(
-        description="Complete NetNGlyc pipeline with SignalP 6 integration and intelligent parallel processing",
+        description="Licensed NetNGlyc pipeline with SignalP 6 integration and intelligent parallel processing. Requires licensed NetNGlyc 1.0 Docker container and SignalP 6.0 installation.",
         formatter_class=argparse.RawDescriptionHelpFormatter
     )
     parser.add_argument("input", nargs='?', help="Input FASTA file or directory (required for process/full-pipeline modes)")
@@ -2114,10 +2001,6 @@ def main():
                             output_content, expected_seq_count
                         )
                         
-                        if warnings:
-                            print("Output validation warnings:")
-                            for warning in warnings:
-                                print(f"  WARNING: {warning}")
                         
                         print(f"Processing successful: {prediction_count} predictions found")
                     else:
