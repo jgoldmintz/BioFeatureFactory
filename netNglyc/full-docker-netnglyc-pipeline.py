@@ -17,18 +17,13 @@ import time
 import platform
 from datetime import datetime
 import logging
-from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor, as_completed
+from concurrent.futures import ProcessPoolExecutor, as_completed
 
 
 # Import utility functions  
 sys.path.append(os.path.join(os.path.dirname(__file__), '../dependencies'))
 
-from utility import read_fasta, get_mutation_data_bioAccurate, split_fasta_into_batches, combine_batch_outputs, get_mutation_data_bioAccurate_unified, discover_mapping_files, discover_fasta_files
-
-# Use the unified function from utility.py
-def get_mutation_data_bioAccurate_aa(aaposaa):
-    """Extract amino acid position and amino acids from mutation notation (e.g., 'K541E' -> 541, ('K', 'E'))"""
-    return get_mutation_data_bioAccurate_unified(aaposaa)
+from utility import read_fasta, get_mutation_data_bioAccurate, split_fasta_into_batches, combine_batch_outputs, discover_mapping_files, discover_fasta_files, ExtractGeneFromFASTA, parse_predictions_with_mutation_filtering
 
 def _process_single_sequence_worker(args):
     """
@@ -83,6 +78,8 @@ class SignalP6Handler:
         os.makedirs(self.cache_dir, exist_ok=True)
         self.last_output_dir = None  # Store the output directory path
         self.verbose = verbose
+        # Check SignalP availability once at initialization
+        self.signalp6_available = self.check_signalp6_available()
 
     def check_signalp6_available(self):
         """Check if SignalP 6 is available on the host"""
@@ -90,7 +87,7 @@ class SignalP6Handler:
             result = subprocess.run(
                 ["signalp6", "--version"],
                 capture_output=True,
-                timeout=5,
+                timeout=50,
                 text=True
             )
             if result.returncode == 0:
@@ -131,7 +128,7 @@ class SignalP6Handler:
             with open(cache_file, 'r') as f:
                 return json.load(f), cache_dir
 
-        if not self.check_signalp6_available():
+        if not self.signalp6_available:
             error_msg = "ERROR: SignalP 6.0 is required but not available. Please install SignalP 6.0 and ensure it's in your PATH."
             print(error_msg)
             print(error_msg, file=sys.stderr)
@@ -216,7 +213,7 @@ class SignalP6Handler:
         except Exception as e:
             print(f"SignalP 6 error: {e}")
         finally:
-            # Clean up temp dir if we created one
+            # Clean up temp dir if one was created
             if temp_dir and temp_dir != signalp_output_dir:
                 shutil.rmtree(temp_dir)
 
@@ -624,7 +621,7 @@ class RobustDockerNetNGlyc:
                     aamutant = row['aamutant']  # e.g., K541E
                     
                     # Parse amino acid mutation to get position and amino acids
-                    position_data = get_mutation_data_bioAccurate_aa(aamutant)
+                    position_data = get_mutation_data_bioAccurate(aamutant)
                     if position_data[0] is not None:
                         aa_pos = position_data[0]  # e.g., 541
                         aa_tuple = position_data[1]  # e.g., ('K', 'E')
@@ -708,8 +705,9 @@ class RobustDockerNetNGlyc:
     def process_fasta_batched(self, fasta_file, output_base, batch_size=100, worker_id=0):
         """Process a FASTA file in batches to handle large numbers of sequences"""
         try:
-            # Split FASTA into batches using shared utility
-            batch_files = split_fasta_into_batches(fasta_file, batch_size)
+            # Split FASTA into batches using shared utility (save to outputs directory for troubleshooting)
+            outputs_dir = os.path.dirname(output_base)
+            batch_files = split_fasta_into_batches(fasta_file, batch_size, temp_dir=outputs_dir)
             
             if not batch_files:
                 return False, None, "Failed to create batch files"
@@ -720,8 +718,8 @@ class RobustDockerNetNGlyc:
                 success, output_file, error = self.process_single_fasta(
                     batch_files[0], output_base, worker_id
                 )
-                # Clean up batch file
-                if os.path.exists(batch_files[0]):
+                # Clean up batch file (only if not keeping intermediates)
+                if not self.keep_intermediates and os.path.exists(batch_files[0]):
                     os.remove(batch_files[0])
                 return success, output_file, error
             
@@ -748,38 +746,36 @@ class RobustDockerNetNGlyc:
                     else:
                         if self.verbose:
                             print(f"Batch {i+1} failed: {error}")
-                        # Clean up batch files
-                        for bf in batch_files:
-                            if os.path.exists(bf):
-                                os.remove(bf)
+                        # Clean up batch files (only if not keeping intermediates)
+                        if not self.keep_intermediates:
+                            for bf in batch_files:
+                                if os.path.exists(bf):
+                                    os.remove(bf)
                         return False, output_base, f"Batch {i+1} failed: {error}"
                         
                 finally:
-                    # Clean up this batch file
-                    if os.path.exists(batch_file):
+                    # Clean up this batch file (only if not keeping intermediates)
+                    if not self.keep_intermediates and os.path.exists(batch_file):
                         os.remove(batch_file)
             
             # Create combined output for backwards compatibility (optional)
             #print(f"Worker {worker_id}: Creating combined output for compatibility")
-            combined_output = combine_batch_outputs(batch_outputs, output_base, format_type='netnglyc')
+            combined_output = combine_batch_outputs(batch_outputs, output_base, format_type='netnglyc', original_fasta_file=fasta_file)
             
             # PRESERVE all batch files for parsing - do NOT delete them
             #print(f"   Preserved {len(batch_outputs)} batch files for parsing:")
             for batch_output in batch_outputs:
                 if os.path.exists(batch_output):
                     print(f"      - {os.path.basename(batch_output)}")
-            
-            # No longer cleaning up batch files - they're needed for parsing!
-            
             if combined_output:
                 return True, output_base, None
             else:
                 return False, output_base, "Failed to combine batch outputs"
                 
         except Exception as e:
-            # Clean up any remaining batch files
+            # Clean up any remaining batch files (only if not keeping intermediates)
             try:
-                if 'batch_files' in locals():
+                if 'batch_files' in locals() and not self.keep_intermediates:
                     for bf in batch_files:
                         if os.path.exists(bf):
                             os.remove(bf)
@@ -864,7 +860,7 @@ class RobustDockerNetNGlyc:
                             
                             
                             if potential >= threshold:
-                                # If we haven't detected the current sequence yet, use seq_name
+                                # If the current sequence has yet to be detected, use seq_name
                                 if current_sequence is None:
                                     current_sequence = seq_name
                                     predictions_by_sequence[current_sequence] = []
@@ -974,7 +970,7 @@ class RobustDockerNetNGlyc:
         # Import shared utility functions
         import sys
         sys.path.append(os.path.join(os.path.dirname(__file__), '..', 'dependencies'))
-        from utility import combine_batch_outputs, parse_predictions_with_mutation_filtering
+
         
         # Find NetNGlyc output files: both regular and batch files
         # Pattern 1: {GENE}_aa-netnglyc.out (regular files)
@@ -989,20 +985,22 @@ class RobustDockerNetNGlyc:
         for file_path in regular_files:
             filename = file_path.stem  # Remove .out extension
             if '_aa-netnglyc' in filename:
-                gene = filename.replace('_aa-netnglyc', '')
-                if gene not in gene_files:
+                gene = ExtractGeneFromFASTA(str(file_path))
+                if gene and gene not in gene_files:
                     gene_files[gene] = []
-                gene_files[gene].append(file_path)
+                if gene:
+                    gene_files[gene].append(file_path)
         
         # Process batch files  
         for file_path in batch_files:
             filename = file_path.stem  # Remove .out extension
-            # Extract gene from batch filename: ABCB1_aa-netnglyc-batch-1 -> ABCB1
+            # Extract gene from batch file content
             if '_aa-netnglyc-batch-' in filename:
-                gene = filename.split('_aa-netnglyc-batch-')[0]
-                if gene not in gene_files:
+                gene = ExtractGeneFromFASTA(str(file_path))
+                if gene and gene not in gene_files:
                     gene_files[gene] = []
-                gene_files[gene].append(file_path)
+                if gene:
+                    gene_files[gene].append(file_path)
         
         #print(f"Found files for {len(gene_files)} genes:")
         for gene, files in gene_files.items():
@@ -1030,17 +1028,30 @@ class RobustDockerNetNGlyc:
             # Step 1: If there are batch files, combine them into a single file
             combined_file_path = None
             if len(gene_file_list) > 1:
-                # Check if we have batch files that need combining
+                # Check batch files needs combining
                 batch_files_for_gene = [f for f in gene_file_list if '-batch-' in f.stem]
                 if batch_files_for_gene:
                     if self.verbose:
                         print(f"  Combining {len(batch_files_for_gene)} batch files into single file")
                     combined_file_path = os.path.join(input_dir, f"{gene}_aa-netnglyc-combined.out")
                     try:
+                        # Try to find the original FASTA file for this gene
+                        possible_fasta_files = [
+                            os.path.join(input_dir, f"{gene}_aa.fasta"),
+                            os.path.join(input_dir, f"debug-{gene}-aa.fasta"),
+                            os.path.join(input_dir, f"{gene}.fasta"),
+                        ]
+                        original_fasta_file = None
+                        for fasta_path in possible_fasta_files:
+                            if os.path.exists(fasta_path):
+                                original_fasta_file = fasta_path
+                                break
+                        
                         success = combine_batch_outputs(
                             [str(f) for f in batch_files_for_gene], 
                             combined_file_path, 
-                            format_type='netnglyc'
+                            format_type='netnglyc',
+                            original_fasta_file=original_fasta_file
                         )
                         if success:
                             if self.verbose:
@@ -1132,12 +1143,12 @@ class RobustDockerNetNGlyc:
         for file_path in output_files:
             filename = file_path.stem  # Remove .out extension
             
-            # Extract gene from filename: ABCB1_aa-netnglyc or ABCB1_wt-netnglyc
-            gene = None
-            if '_aa-netnglyc' in filename:
-                gene = filename.replace('_aa-netnglyc', '')
-            elif '_wt-netnglyc' in filename:
-                gene = filename.replace('_wt-netnglyc', '')
+            # Extract gene from file content using robust extraction
+            if '_aa-netnglyc' in filename or '_wt-netnglyc' in filename:
+                gene = ExtractGeneFromFASTA(str(file_path))
+                if not gene:
+                    # Skip files where gene extraction failed
+                    continue
             else:
                 # Skip files that don't match expected patterns
                 continue
@@ -1250,7 +1261,7 @@ class RobustDockerNetNGlyc:
                     print(f"  FASTA file extensions found: {', '.join(sorted(extensions_found))}")
         else:
             print(f"Processing {len(input_files)} files from directory: {input_dir}")
-        if self.use_signalp and self.signalp_handler.check_signalp6_available():
+        if self.use_signalp and self.signalp_handler.signalp6_available:
             print("SignalP 6 will be used for signal peptide prediction")
 
         # Analyze each file and determine processing strategy
@@ -1390,6 +1401,7 @@ class RobustDockerNetNGlyc:
             max_workers=1,  # Each worker handles one file
             cache_dir=self.cache_dir,
             docker_timeout=self.docker_timeout,
+            keep_intermediates=self.keep_intermediates,  # CRITICAL: Pass the flag to worker processes
             verbose=self.verbose
         )
         
@@ -1404,7 +1416,7 @@ class RobustDockerNetNGlyc:
             if processing_mode == "single":
                 success, output, error = worker_processor.process_single_fasta(file_path, output_file, 0)
             elif processing_mode == "parallel":
-                # For directory processing, we use a smaller worker count per file
+                # For directory processing,  a smaller worker count per file is used
                 parallel_workers = min(4, max(1, seq_count // 50))  # Adaptive worker count
                 success, output, error = worker_processor.process_parallel_docker(
                     file_path, output_file, parallel_workers
@@ -1589,14 +1601,15 @@ class RobustDockerNetNGlyc:
             
             #print(f"Processing {total_sequences} sequences with {max_workers} parallel Docker containers")
             
-            # Create temporary files for individual sequences
+            # Create temporary files for individual sequences (save to outputs directory for troubleshooting)
+            outputs_dir = os.path.dirname(output_file)
             temp_files = []
             output_files = []
             
             for i, (seq_name, sequence) in enumerate(sequences.items()):
-                # Create individual FASTA file
-                temp_fasta = os.path.join(self.temp_dir, f"seq_{i}_{seq_name.replace('/', '_')}.fasta")
-                temp_output = os.path.join(self.temp_dir, f"seq_{i}_output.out")
+                # Create individual FASTA file (save to outputs directory for troubleshooting)
+                temp_fasta = os.path.join(outputs_dir, f"seq_{i}_{seq_name.replace('/', '_')}.fasta")
+                temp_output = os.path.join(outputs_dir, f"seq_{i}_output.out")
                 
                 with open(temp_fasta, 'w') as f:
                     f.write(f">{seq_name}\n")
@@ -1654,14 +1667,15 @@ class RobustDockerNetNGlyc:
         except Exception as e:
             return False, output_file, f"Parallel processing error: {e}"
         finally:
-            # Clean up temporary files
-            for temp_fasta, temp_output, _ in temp_files:
-                for temp_file in [temp_fasta, temp_output]:
-                    if os.path.exists(temp_file):
-                        try:
-                            os.remove(temp_file)
-                        except:
-                            pass
+            # Clean up temporary files (only if not keeping intermediates)
+            if not self.keep_intermediates:
+                for temp_fasta, temp_output, _ in temp_files:
+                    for temp_file in [temp_fasta, temp_output]:
+                        if os.path.exists(temp_file):
+                            try:
+                                os.remove(temp_file)
+                            except:
+                                pass
 
     def combine_parallel_outputs(self, output_files, final_output_file, total_sequences):
         """Combine multiple parallel NetNGlyc outputs into a single file"""
@@ -1808,8 +1822,6 @@ def main():
     parser.add_argument("input", nargs='?', help="Input FASTA file or directory (required for process/full-pipeline modes)")
     parser.add_argument("output", nargs='?', help="Output file or directory (required for all modes except --test/--clear-cache)")
     parser.add_argument("--workers", type=int, default=4, help="Number of parallel workers (used with --processing-mode parallel, default: 4)")
-    parser.add_argument("--no-signalp", action="store_true",
-                        help="Skip SignalP 6 preprocessing (faster but less accurate)")
     parser.add_argument("--docker-image", default="netnglyc:latest",
                         help="Docker image name (default: netnglyc:latest)")
     parser.add_argument("--cache-dir", help="Custom cache directory for SignalP/NetNGlyc results")
@@ -1866,7 +1878,7 @@ def main():
 
         with RobustDockerNetNGlyc(
                 docker_image=args.docker_image,
-                use_signalp=not args.no_signalp,
+                use_signalp=True,
                 cache_dir=args.cache_dir,
                 docker_timeout=args.batch_timeout,
                 verbose=args.verbose
@@ -1944,7 +1956,7 @@ def main():
             
             with RobustDockerNetNGlyc(
                 docker_image=args.docker_image,
-                use_signalp=not args.no_signalp,
+                use_signalp=True,
                 max_workers=args.workers,
                 cache_dir=args.cache_dir,
                 docker_timeout=args.batch_timeout,
@@ -1985,7 +1997,7 @@ def main():
                         )
                     elif processing_mode == "sequential":
                         #print("Using sequential processing (one-by-one)")
-                        # For sequential, we'll use single processing but could add specific logic
+                        # For sequential, use single processing but could add specific logic
                         success, output, error = processor.process_single_fasta(args.input, output_file, 0)
                     else:
                         print(f"Unknown processing mode: {processing_mode}, defaulting to single")
@@ -2019,7 +2031,19 @@ def main():
                 
                 if args.is_mutant:
                     #print("Parsing as mutant files using wildtype logic with mapping")
+                    parsing_start_time = time.time()
                     results = processor.parse_mutant_files(temp_output_dir, args.threshold, mapping_dir=args.mapping_dir, fasta_dir=args.input)
+                    parsing_elapsed = time.time() - parsing_start_time
+                    
+                    # Print comprehensive summary for mutant processing
+                    print(f"\n{'=' * 60}")
+                    print(f"Mutant Processing Summary:")
+                    print(f"   • Total predictions found: {len(results)}")
+                    print(f"   • Parsing time: {parsing_elapsed / 60:.1f} minutes")
+                    print(f"   • Threshold used: {args.threshold}")
+                    if args.mapping_dir:
+                        print(f"   • Filtered to mutation positions only")
+                    print("=" * 60)
                 else:
                     #print("Parsing as wildtype files")
                     results = processor.parse_wildtype_files(temp_output_dir, args.mapping_dir, args.threshold)
@@ -2042,7 +2066,7 @@ def main():
 
     with RobustDockerNetNGlyc(
             docker_image=args.docker_image,
-            use_signalp=not args.no_signalp,
+            use_signalp=True,
             max_workers=args.workers,
             cache_dir=args.cache_dir,
             docker_timeout=args.batch_timeout,

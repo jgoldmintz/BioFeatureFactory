@@ -60,6 +60,11 @@ def get_mutation_data(ntposnt):
     return position, (original_nt, mutant_nt)
 
 def get_mutation_data_bioAccurate(ntposnt):
+
+    # Skip stop codons (for the case of aa)
+    if 'Stop' in ntposnt or 'Sto' in ntposnt:
+        return None, None
+
     original_nt = ntposnt[0]
     mutant_nt = ntposnt[-1]
     if int(ntposnt[1:-1]) == 1:
@@ -92,12 +97,13 @@ def convert_position(seq1, seq2, position1, space="-"):
         error = "Sequence 1 position aligns with a gap in sequence 2\n" + str(inspect.stack()[1].function)
     return (i2, error)
 
-def split_fasta_into_batches(fasta_file, batch_size=100):
+def split_fasta_into_batches(fasta_file, batch_size=100, temp_dir=None):
     """Split a FASTA file into smaller batches for processing
     
     Args:
         fasta_file: Path to input FASTA file
         batch_size: Number of sequences per batch (default: 100)
+        temp_dir: Directory to create batch files in (default: system temp directory)
         
     Returns:
         List of batch file paths created
@@ -126,8 +132,16 @@ def split_fasta_into_batches(fasta_file, batch_size=100):
             batch_sequences = dict(sequence_items[start_idx:end_idx])
             batch_count = len(batch_sequences)
             
-            # Create temporary batch file
-            batch_filename = fasta_file.replace('.fasta', f'_batch{i+1}.fasta')
+            # Create temporary batch file (use temp_dir if provided, otherwise system temp)
+            
+            if temp_dir:
+                # Use provided temp directory
+                base_name = os.path.basename(fasta_file).replace('.fasta', f'_batch{i+1}.fasta')
+                batch_filename = os.path.join(temp_dir, base_name)
+            else:
+                # Use system temp directory
+                base_name = os.path.basename(fasta_file).replace('.fasta', f'_batch{i+1}.fasta')
+                batch_filename = os.path.join(tempfile.gettempdir(), base_name)
             
             with open(batch_filename, 'w') as f:
                 for seq_name, sequence in batch_sequences.items():
@@ -145,7 +159,7 @@ def split_fasta_into_batches(fasta_file, batch_size=100):
         print(f"Error splitting FASTA file {fasta_file}: {e}")
         return []
 
-def combine_batch_outputs(batch_output_files, final_output_file, format_type='netnglyc'):
+def combine_batch_outputs(batch_output_files, final_output_file, format_type='netnglyc', original_fasta_file=None):
     """
     Combine multiple batch outputs into a single file for backwards compatibility
     
@@ -164,7 +178,7 @@ def combine_batch_outputs(batch_output_files, final_output_file, format_type='ne
         print(f"Combining {len(batch_output_files)} batch outputs (format: {format_type})...")
         
         if format_type == 'netnglyc':
-            return _combine_glycosylation_outputs(batch_output_files, final_output_file)
+            return _combine_glycosylation_outputs(batch_output_files, final_output_file, original_fasta_file)
         elif format_type == 'netphos':
             return _combine_phosphorylation_outputs(batch_output_files, final_output_file)
         else:
@@ -174,7 +188,21 @@ def combine_batch_outputs(batch_output_files, final_output_file, format_type='ne
         print(f"Error combining batch outputs: {e}")
         return False
 
-def _combine_glycosylation_outputs(batch_output_files, final_output_file):
+def ExtractGeneFromFASTA(file_path,count=False):
+    """Extract gene name from NetNGlyc output file using read_fasta"""
+    sequences = read_fasta(file_path)
+    if sequences:
+        first_seq_name = list(sequences.keys())[0]
+        separators = ['-', '_']
+        for sep in separators:
+            if sep in first_seq_name:
+                if count:
+                    return first_seq_name.rsplit(sep, 1)[0],len(sequences)
+                return first_seq_name.rsplit(sep, 1)[0]
+        return first_seq_name
+    return None
+
+def _combine_glycosylation_outputs(batch_output_files, final_output_file, original_fasta_file=None):
     """Combine glycosylation prediction batch outputs (NetNGlyc format)"""
     try:
         # Count total sequences for header
@@ -187,21 +215,55 @@ def _combine_glycosylation_outputs(batch_output_files, final_output_file):
                 with open(batch_file, 'r') as f:
                     content = f.read()
                 
-                # Extract sequences count from header
-                lines = content.split('\n')
-                for line in lines:
-                    if 'amino acids' in line and line.startswith('>'):
-                        try:
-                            seq_count = int(line.split()[1])
-                            total_sequences += seq_count
-                        except:
-                            total_sequences += 1  # Fallback
-                        break
+
+                import os
+                seperator = ['-','_']
+                # Use original FASTA file if provided, otherwise fallback to counting Name: lines
+                if original_fasta_file and os.path.exists(original_fasta_file):
+                    try:
+                        #fasta_sequences = read_fasta(original_fasta_file)
+                        gene_name, total_sequences = ExtractGeneFromFASTA(original_fasta_file, count=True)
+                        # Determine if this is wildtype or mutant based on sequence names
+                            # For the first batch, use total sequences from original file
+                        if i == 0:
+                            print(f"Using original FASTA file for sequence count: {total_sequences} sequences from {gene_name}")
+                            # For subsequent batches, the total was previously counted
+
+                    except Exception as e:
+                        print(f"Warning: Error reading original FASTA file {original_fasta_file}: {e}")
+                        # Fallback to counting Name: lines in NetNGlyc output
+                        lines = content.split('\n')
+                        name_count = sum(1 for line in lines if line.startswith('Name:'))
+                        total_sequences += name_count if name_count > 0 else 1
+                        
+                else:
+                    # Fallback: Count sequences directly from NetNGlyc output
+                    lines = content.split('\n')
+                    name_count = sum(1 for line in lines if line.startswith('Name:'))
+                    
+                    if name_count > 0:
+                        total_sequences += name_count
+                    else:
+                        # Parse header line for sequence count: ">debug-GENE-aa-netnglyc\t5 amino acids"
+                        for line in lines:
+                            if 'amino acids' in line:
+                                try:
+                                    parts = line.split()
+                                    for j, part in enumerate(parts):
+                                        if part.isdigit() and j+1 < len(parts) and 'amino' in parts[j+1]:
+                                            total_sequences += int(part)
+                                            break
+                                    break
+                                except:
+                                    total_sequences += 1  # Ultimate fallback
+                            else:
+                                total_sequences += 1  # Fallback if no header found
                 
                 # Collect sequence display sections and prediction lines
                 in_sequence_section = False
                 in_prediction_section = False
                 
+                lines = content.split('\n')
                 for line in lines:
                     if line.strip().startswith('>') and 'amino acids' in line:
                         continue  # Skip individual headers
@@ -375,32 +437,6 @@ def extract_mutation_from_sequence_name(seq_name):
     
     return seq_name, None
 
-def get_mutation_data_bioAccurate_unified(aaposaa):
-    """Extract amino acid position and amino acids from mutation notation (e.g., 'K541E' -> 541, ('K', 'E'))
-    
-    This is a unified version that works for both NetPhos and NetNGlyc pipelines.
-    
-    Args:
-        aaposaa: Amino acid mutation string (e.g., 'K541E', 'Y110F')
-        
-    Returns:
-        tuple: (position, (original_aa, mutant_aa)) or (None, None) if invalid
-    """
-    import re
-    
-    # Skip stop codons
-    if 'Stop' in aaposaa or 'Sto' in aaposaa:
-        return None, None
-    
-    # Match pattern: [Letter][Numbers][Letter]
-    match = re.match(r'[A-Z](\d+)[A-Z]', aaposaa)
-    if match:
-        position = int(match.group(1))
-        original_aa = aaposaa[0]
-        mutant_aa = aaposaa[-1]
-        return position, (original_aa, mutant_aa)
-    return None, None
-
 def process_single_mutation_for_sequence(seq_name, predictions, mapping_dict, is_mutant=True, tool_type='netphos'):
     """Process predictions for one sequence against its specific mutation
     
@@ -429,7 +465,7 @@ def process_single_mutation_for_sequence(seq_name, predictions, mapping_dict, is
     aaposaa = mapping_dict[mutation_id]  # e.g., "Y110F"
     
     # Parse amino acid position and mutation info
-    position_data = get_mutation_data_bioAccurate_unified(aaposaa)
+    position_data = get_mutation_data_bioAccurate(aaposaa)
     if position_data[0] is None:
         return []
     
