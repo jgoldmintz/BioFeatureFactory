@@ -1,5 +1,5 @@
 # BioFeatureFactory
-Python toolkit for automated feature extraction using gene sequences and SNP data
+Modular bioinformatics framework for automated feature extraction, coordinate mapping, and predictive modeling using gene- and variant-level inputs.
 ## Architecture
 
 ### Key Features
