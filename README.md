@@ -2,32 +2,6 @@
 Python toolkit for automated feature extraction using gene sequences and SNP data
 ## Architecture
 
-### Shared Infrastructure
-- **docker/**: Shared Docker environment for both NetNGlyc and NetPhos pipelines
-- **dependencies/**: Common utility functions and shared processing logic (see below)
-
-### Exon-Aware Mapping Workflow (`dependencies/exon_aware_mapping.py`)
-
-Generates coordinate-resolved sequence assets used across pipelines.  
-It aligns per-gene mutation CSVs with an annotation file and reference genome to produce:
-
-- **ORF, transcript, and genomic FASTA bundles** for each gene  
-- **Coordinate mapping CSVs** in chromosome, genomic-slice, and transcript space (`combined_{GENE}.csv`)  
-- **Optional validation reports** summarizing mapping and mismatch issues  
-
-**Typical usage:**
-```bash
-python3 dependencies/exon_aware_mapping.py \
-  --mutations /path/to/mutations/ \
-  --annotation /path/to/annotations.gtf \
-  --reference /path/to/reference_genome.fa \
-  --out-fasta /path/to/output_fastas/ \
-  --out-chromosome-mapping /path/to/chromosome_mappings/ \
-  --out-genomic-mapping /path/to/genomic_mappings/ \
-  --out-transcript-mapping /path/to/transcript_mappings/
-```
-Use this step whenever mutation datasets change to refresh the coordinate mappings consumed by downstream pipelines.
-
 ### Key Features
 - **Unified mutation processing**: Single-mutation logic for accurate mutant sequence analysis
 - **Shared utilities**: Common functions for both NetPhos and NetNGlyc pipelines  
@@ -67,6 +41,32 @@ Deep learning-based splice site prediction with Nextflow automation.
 - TensorFlow race condition mitigation for stable parallel execution
 - Exon-aware coordinate mapping with pkey generation
 - RefSeq chromosome format support with annotation conversion
+
+## Shared Infrastructure
+- **docker/**: Shared Docker environment for both NetNGlyc and NetPhos pipelines
+- **dependencies/**: Common utility functions and shared processing logic (see below)
+
+### Exon-Aware Mapping Workflow (`dependencies/exon_aware_mapping.py`)
+
+Generates coordinate-resolved sequence assets used across pipelines.  
+It aligns per-gene mutation CSVs with an annotation file and reference genome to produce:
+
+- **ORF, transcript, and genomic FASTA bundles** for each gene  
+- **Coordinate mapping CSVs** in chromosome, genomic-slice, and transcript space (`combined_{GENE}.csv`)  
+- **Optional validation reports** summarizing mapping and mismatch issues  
+
+**Typical usage:**
+```bash
+python3 dependencies/exon_aware_mapping.py \
+  --mutations /path/to/mutations/ \
+  --annotation /path/to/annotations.gtf \
+  --reference /path/to/reference_genome.fa \
+  --out-fasta /path/to/output_fastas/ \
+  --out-chromosome-mapping /path/to/chromosome_mappings/ \
+  --out-genomic-mapping /path/to/genomic_mappings/ \
+  --out-transcript-mapping /path/to/transcript_mappings/
+```
+Use this step whenever mutation datasets change to refresh the coordinate mappings consumed by downstream pipelines.
 
 ## Upcoming:
 
