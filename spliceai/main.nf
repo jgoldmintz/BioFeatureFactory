@@ -25,31 +25,6 @@ params.maxforks = 0 // default: unbounded
 if (params.help) {
     println """
 Usage: nextflow run main.nf [options]
-
-Required parameters:
-  --reference_genome       Path to reference genome FASTA file
-  --annotation_file        SpliceAI annotation file
-  --transcript_mapping_dir Directory with transcript mapping files
-  --genomic_mapping_dir    Directory with genomic mapping files
-  --output_dir             Output directory for results
-
-Input parameters (choose one):
-  --mutations_dir          Directory containing mutation CSV files
-  --input_vcf_dir          Directory containing pre-existing VCF files
-  --input_vcf_file         Single pre-existing VCF file
-
-Optional parameters:
-  --skip_vcf_generation    Skip VCF generation and use existing VCFs
-  --chromosome_mapping_dir Directory with chromosome mapping files
-  --vcf_output_dir         Directory for intermediate VCF files
-  --validation_log         Validation log (or directory of logs)
-  --clear_vcf_cache        Force regeneration of cached VCF entries
-  --validate_mapping       Cross-check supplied chromosome mappings
-  --chromosome_format      Chromosome naming style (default: refseq)
-  --splice_threshold       Splice threshold (default: 0.0)
-  --retry_jitter           Max jitter (seconds) before retries
-  --maxforks               Limit concurrent SpliceAI jobs (default: 0 = unbounded, cannot exceed CPU count)
-  --help                   Show this help message
 """
     exit 0
 }
@@ -59,7 +34,9 @@ def cpu_count = Runtime.runtime.availableProcessors()
 if (params.maxforks.toInteger() > cpu_count)
     error "ERROR: --maxforks (${params.maxforks}) cannot exceed available CPUs (${cpu_count})"
 
+// ---------------- WORKFLOW ----------------
 workflow {
+
     if (!params.reference_genome) error "ERROR: --reference_genome is required"
     if (!params.annotation_file) error "ERROR: --annotation_file is required"
     if (!params.transcript_mapping_dir) error "ERROR: --transcript_mapping_dir is required"
@@ -76,41 +53,41 @@ workflow {
     println "DEBUG: chromosome_format = ${params.chromosome_format}"
     println "DEBUG: maxforks = ${params.maxforks} (CPU count: ${cpu_count})"
 
-    def reference_genome       = file(params.reference_genome).toAbsolutePath()
-    def annotation_file        = file(params.annotation_file).toAbsolutePath()
-    def transcript_mapping_dir = file(params.transcript_mapping_dir).toAbsolutePath()
-    def chromosome_mapping_dir = params.chromosome_mapping_dir ? file(params.chromosome_mapping_dir).toAbsolutePath() : ""
-    def genomic_mapping_dir    = file(params.genomic_mapping_dir).toAbsolutePath()
-    def splice_threshold       = params.splice_threshold ?: 0.0
-    def validation_log         = params.validation_log ? file(params.validation_log).toString() : ''
+    def vcf_source
 
     if (params.input_vcf_file) {
-        single_vcf = Channel.fromPath(params.input_vcf_file)
+        vcf_source = Channel
+            .fromPath(params.input_vcf_file)
             .map { vcf -> tuple(vcf.baseName.replaceAll(/\.vcf$/, ''), vcf) }
-
-        compressed_vcfs = compress_and_index(single_vcf)
-        spliceai_results = run_spliceai(compressed_vcfs, reference_genome, annotation_file)
-        final_results = parse_results(spliceai_results, transcript_mapping_dir, chromosome_mapping_dir, splice_threshold, validation_log)
-
-    } else if (params.skip_vcf_generation || params.input_vcf_dir) {
-        if (!params.input_vcf_dir) error "Must specify --input_vcf_dir when using --skip_vcf_generation"
-
-        vcf_files = Channel.fromPath("${params.input_vcf_dir}/*.vcf")
-            .map { vcf -> tuple(vcf.baseName.replaceAll(/\.vcf$/, ''), vcf) }
-
-        compressed_vcfs = compress_and_index(vcf_files)
-        spliceai_results = run_spliceai(compressed_vcfs, reference_genome, annotation_file)
-        final_results = parse_results(spliceai_results, transcript_mapping_dir, chromosome_mapping_dir, splice_threshold, validation_log)
-
-    } else {
-        if (!params.mutations_dir) error "Must specify --mutations_dir when not skipping VCF generation"
-
-        mutation_files = Channel.fromPath("${params.mutations_dir}/*.csv")
-        generated_vcfs = generate_vcfs(mutation_files)
-        compressed_vcfs = compress_and_index(generated_vcfs)
-        spliceai_results = run_spliceai(compressed_vcfs, reference_genome, annotation_file)
-        final_results = parse_results(spliceai_results, transcript_mapping_dir, chromosome_mapping_dir, splice_threshold, validation_log)
     }
+    else if (params.skip_vcf_generation || params.input_vcf_dir) {
+        if (!params.input_vcf_dir)
+            error "Must specify --input_vcf_dir when using --skip_vcf_generation"
+        vcf_source = Channel
+            .fromPath("${params.input_vcf_dir}/*.vcf")
+            .map { vcf -> tuple(vcf.baseName.replaceAll(/\.vcf$/, ''), vcf) }
+    }
+    else {
+        if (!params.mutations_dir)
+            error "Must specify --mutations_dir when not skipping VCF generation"
+
+        mutation_files = Channel
+            .fromPath("${params.mutations_dir}/*.csv")
+            .map { csv -> tuple(csv.baseName.replaceAll(/_mutations$/, ''), csv) }
+
+        vcf_source = generate_vcfs(mutation_files)
+    }
+
+    // enforce sequential chaining
+    compress_and_index(vcf_source)
+    run_spliceai(compress_and_index.out, file(params.reference_genome), file(params.annotation_file))
+    parse_results(
+        run_spliceai.out,
+        file(params.transcript_mapping_dir),
+        file(params.chromosome_mapping_dir ?: ""),
+        params.splice_threshold ?: 0.0,
+        params.validation_log ?: ""
+    )
 }
 
 // ---------------- PROCESSES ----------------
@@ -118,7 +95,7 @@ process generate_vcfs {
     publishDir params.vcf_output_dir ?: '.', mode: 'copy', pattern: '*.vcf', enabled: params.vcf_output_dir != null
 
     input:
-    path(mutations_csv)
+    tuple val(gene_id), path(mutations_csv)
 
     output:
     tuple val(gene_id), path("${gene_id}.vcf")
@@ -174,7 +151,6 @@ process run_spliceai {
     tuple val(gene_id), path("${gene_id}.spliceai.vcf")
 
     script:
-    // stagger start time 5–20s per task to avoid TensorFlow collisions
     def stagger = new Random(task.hashCode()).nextInt(15) + 5
     def jitter = (task.attempt > 1) ? new Random().nextInt(params.retry_jitter ?: 10) : 0
 

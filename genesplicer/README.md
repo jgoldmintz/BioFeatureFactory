@@ -33,8 +33,7 @@ This module provides a Python wrapper for GeneSplicer, a computational method fo
 ### Prerequisites
 
 1. **GeneSplicer binary**: Download and install GeneSplicer from the [official site](https://ccb.jhu.edu/software/genesplicer/)
-1. **Training data**: Obtain species-specific training data (human, Arabidopsis, etc.)
-1. **mafft**: Required for mapping genomic positions. 
+1. **Training data**: Obtain species-specific training data (human, Arabidopsis, etc.) 
 
 ## Usage
 
