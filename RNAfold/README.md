@@ -105,11 +105,11 @@ The `jsd_unpaired` function in this pipeline measures the **difference between r
   - $q_i =$ unpaired probability in the alternate sequence  
   - $m_i = (p_i + q_i)/2$
 
-- The function computes the Jensen–Shannon divergence (JSD) using **log base 2**:
-  $$
-  JSD(P \parallel Q) = \frac{1}{L} \sum_{i=1}^{L} \left[ H(m_i) - \frac{1}{2}(H(p_i) + H(q_i)) \right]
-  $$
-  where $H(x) = -x\log_2(x) - (1-x)\log_2(1-x)$ is the Bernoulli entropy for the unpaired probability.
+The function computes the Jensen–Shannon divergence (JSD) using $log_2$:
+
+ $JSD(P \parallel Q) = \frac{1}{L} \sum_{i=1}^{L} \left[ H(m_i) - \frac{1}{2}(H(p_i) + H(q_i)) \right]$
+
+where, $H(x) = -x\log_2(x) - (1-x)\log_2(1-x)$ is the Bernoulli entropy for the unpaired probability.
 
 - **Averaging:**  
   The script takes a simple arithmetic mean across all positions (no weighting).  
