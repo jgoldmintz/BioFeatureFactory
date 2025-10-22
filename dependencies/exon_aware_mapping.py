@@ -25,6 +25,7 @@ from utility import (
     extract_gene_from_filename,
     get_genome_loc,
     read_fasta,
+    write_fasta
 )
 
 
@@ -350,14 +351,6 @@ def pick_chr_name(fasta: pysam.FastaFile, chrom: str) -> str:
         if alias and alias in ref_aliases:
             return ref_aliases[alias]
     raise ValueError(f"Chromosome '{chrom}' not found in FASTA. Available: {list(fasta.references)[:6]} ...")
-
-def write_fasta(path: Path, name_to_seq: dict[str, str]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with open(path, "w") as f:
-        for name, seq in name_to_seq.items():
-            f.write(f">{name}\n")
-            for i in range(0, len(seq), 60):
-                f.write(seq[i:i+60] + "\n")
 
 def write_mapping_csv(path: Path, header_label: str, rows: list[tuple[str, str]]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)

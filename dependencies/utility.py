@@ -72,6 +72,31 @@ def read_fasta(inf, aformat="FIRST", duplicate="replace"):
                 data[name] = data[name] + line.strip()
     return data
 
+def write_fasta(path: Path, name_to_seq: dict[str, str]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path, "w") as f:
+        for name, seq in name_to_seq.items():
+            f.write(f">{name}\n")
+            for i in range(0, len(seq), 60):
+                f.write(seq[i:i+60] + "\n")
+
+def update_str(s, c, pos):
+    return (s[:pos] + c + s[pos + 1:])
+
+def subseq(seq: str, pos: int, l: int) -> str:
+    """
+    Return a window centered on pos.
+    - pos: 0-based index into seq
+    - l  : odd window length (e.g., 151)
+    Truncates at sequence ends (no padding).
+    """
+    assert isinstance(l, int) and l > 0 and (l % 2 == 1), "l must be a positive odd integer"
+    assert 0 <= pos < len(seq), "pos out of range"
+    half = l // 2
+    start = max(0, pos - half)
+    end   = min(len(seq), pos + half + 1)  # +1 because end is exclusive
+    return seq[start:end]
+
 _FILTER_LOG_CACHE: dict[tuple[str, ...], dict[str, set[str]]] = {}
 # Exon-aware validation lines look like "GENE: mutation A123G expects ..."
 _LOG_MUTATION_RE = re.compile(r"^(?P<gene>[^:]+): mutation (?P<mut>[ACGT][0-9]+[ACGT])\b")

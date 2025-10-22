@@ -105,33 +105,6 @@ python3 full-docker-netnglyc-pipeline.py \
     --workers 4
 ```
 
-## Directory Structure Requirements
-
-**_Critical:_** Files Must Be In Separate Directories
-
-```
-#Example file structure
-
-project_root/
-├── FASTA_files/
-│   ├── wt/
-│   │   └── aaseq/                    # Wildtype sequences ONLY
-│   │       ├── ABCB1_aa.fasta       # Traditional naming
-│   │       ├── brca1.fa             # Flexible extension
-│   │       └── CFTR-sequences.fas   # Flexible naming pattern
-│   └── mut/
-│       └── aaseq/                    # Mutant sequences ONLY
-│           ├── ABCB1_mutations.fasta  # Flexible naming
-│           ├── brca1-variants.fa      # Different extension
-│           └── cftr_data.fna          # Various patterns supported
-└── mutations/
-    └── combined/
-        └── aa/                       # Mapping files ONLY
-            ├── ABCB1_mapping.csv      # Flexible naming
-            ├── brca1-aa-mutations.csv # Various patterns
-            └── cftr_nt_to_aa.csv      # Traditional or custom naming
-```
-
 ### File Discovery Rules (Flexible)
 
 1. **FASTA files**: Supports `.fasta`, `.fa`, `.fas`, `.fna` extensions (case insensitive)
@@ -164,7 +137,7 @@ python3 full-docker-netnglyc-pipeline.py --test
 ```bash
 # Works with any FASTA extension
 python3 full-docker-netnglyc-pipeline.py \
-    path/to/sequences/ABCB1_aa.fasta \
+    path/to/sequences/fastaFile \
     output-netnglyc.out
     
 # Also works with:
