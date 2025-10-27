@@ -597,18 +597,18 @@ def main():
             tx_rows, chrom_rows, gdna_rows = map_orf_mutations_to_transcript_and_genome(muts, tx_map)
 
             # Chromosome mapping CSV (required)
-            write_mapping_csv(chrom_out / f"combined_{gene}.csv", "chromosome", chrom_rows)
-            print(f"  Chromosome mapping: {chrom_out / ('combined_' + gene + '.csv')}  ({len(chrom_rows)} rows)")
+            write_mapping_csv(chrom_out / f"chr_mapping_{gene}.csv", "chromosome", chrom_rows)
+            print(f"  Chromosome mapping: {chrom_out / ('chr_mapping_' + gene + '.csv')}  ({len(chrom_rows)} rows)")
 
             # Genomic (relative gDNA) mapping CSV (optional)
             if gdna_out:
-                write_mapping_csv(gdna_out / f"combined_{gene}.csv", "genomic", gdna_rows)
-                print(f"  Genomic mapping: {gdna_out / ('combined_' + gene + '.csv')}  ({len(gdna_rows)} rows)")
+                write_mapping_csv(gdna_out / f"genomic_mapping_{gene}.csv", "genomic", gdna_rows)
+                print(f"  Genomic mapping: {gdna_out / ('genomic_mapping_' + gene + '.csv')}  ({len(gdna_rows)} rows)")
 
             # Transcript mapping CSV (optional)
             if tmap_out:
-                write_mapping_csv(tmap_out / f"combined_{gene}.csv", "transcript", tx_rows)
-                print(f"  Transcript mapping: {tmap_out / ('combined_' + gene + '.csv')}  ({len(tx_rows)} rows)")
+                write_mapping_csv(tmap_out / f"transcript_mapping_{gene}.csv", "transcript", tx_rows)
+                print(f"  Transcript mapping: {tmap_out / ('transcript_mapping_' + gene + '.csv')}  ({len(tx_rows)} rows)")
             len_issues = tx_map.get("validation_length_issues") or []
             mismatches = tx_map.get("validation_mismatches") or []
             total_mut = len(muts)
