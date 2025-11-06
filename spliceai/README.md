@@ -17,7 +17,7 @@ This Nextflow-based pipeline provides automated SpliceAI splice site prediction 
 - **Process Isolation**: Staggered execution to prevent model loading conflicts
 
 ### Flexible Input Handling
-- **Multiple Input Modes**: Single VCF, VCF directory, or mutation CSV directory
+- **Multiple Input Modes**: Run SpliceAI on a single VCF (`--input_vcf_file`), a directory of VCFs (`--input_vcf_dir`), or auto-build VCFs from mutation specs (`--mutations_path`)
 - **Chromosome Format Support**: RefSeq (NC_000007.14) and simple (7) chromosome naming
 - **Validation Integration**: Skip mutations flagged in exon-aware validation logs
 - **Cache Management**: Intelligent VCF caching for repeated runs
@@ -33,12 +33,17 @@ This Nextflow-based pipeline provides automated SpliceAI splice site prediction 
 ### Input Requirements
 
 #### Mutation CSV Files
-- Provide the directory via `--mutations_dir`
-- Each CSV lists mutation IDs (e.g., C123T) in a single column with a header row
-- Naming is flexible; gene symbols are inferred from filenames
+- Provide the path via `--mutations_path` (directory or single file). Legacy alias: `--mutations_dir`
+- Each CSV must be named `<gene_id>_mutations.csv` (case-insensitive) so the gene ID seeds downstream channels
+- Directory mode scans every matching CSV and emits `<gene_id>.vcf` per input
+- File mode reuses the single CSV for one gene
 
 #### Mapping Files (Required for pkey generation)
-- Supply mapping directories using `--chromosome_mapping_dir`, `--transcript_mapping_dir`, and `--genomic_mapping_dir`
+- Supply mapping paths using `--transcript_mapping_path`, `--genomic_mapping_path`, and optional `--chromosome_mapping_path` (legacy aliases: `--*_dir`)
+- Paths may point to a directory (per-gene CSVs) or a single CSV reused for every gene
+- Directory mode discovery is case-insensitive and matches `*<GENE>*.csv`
+- Transcript and genomic mapping are required per gene; missing files trigger an error
+- Chromosome mapping is optional. If absent for a gene, the parser warns and continues without chromosome mapping for that gene
 - Chromosome mapping example (`combined_{GENE}.csv`):
   ```csv
   mutant,chromosome
@@ -56,6 +61,7 @@ This Nextflow-based pipeline provides automated SpliceAI splice site prediction 
 - Specify paths through `--reference_genome` and `--annotation_file`
 - Reference genome: Indexed FASTA (e.g., `GRCh38_reference.fna`)
 - SpliceAI annotation: Tab-delimited file produced by `annot_to_spliceai.py`
+- Optional: provide `--vcf_output_dir` to keep intermediate gzip-compressed VCFs separate from `--output_dir`
 
 ### Annotation File Generation
 
@@ -98,54 +104,63 @@ python3 annot_to_spliceai.py \
 The commands below show typical invocations; replace the sample paths with your own locations.
 ```bash
 nextflow run main.nf \
-    --mutations_dir mutations/ \
+    --mutations_path mutations/ \
     --reference_genome /path/to/reference.fna \
     --annotation_file annotation_ncbi.txt \
-    --transcript_mapping_dir mutations/combined/transcript/ \
-    --genomic_mapping_dir mutations/combined/genomic/ \
-    --chromosome_mapping_dir mutations/combined/chromosome/ \
-    --output_dir results/
+    --transcript_mapping_path mappings/transcript/ \
+    --genomic_mapping_path mappings/genomic/ \
+    --chromosome_mapping_path mappings/chromosome/ \
+    --output_dir results/ \
+    --vcf_output_dir vcf_cache/
 
 nextflow run main.nf \
     --input_vcf_dir vcf_files/ \
     --skip_vcf_generation \
     --reference_genome /path/to/reference.fna \
     --annotation_file annotation_ncbi.txt \
-    --transcript_mapping_dir mutations/combined/transcript/ \
-    --genomic_mapping_dir mutations/combined/genomic/ \
+    --transcript_mapping_path mappings/transcript.csv \
+    --genomic_mapping_path mappings/genomic.csv \
     --output_dir results/
 
 nextflow run main.nf \
     --input_vcf_file ABCB1.vcf \
     --reference_genome /path/to/reference.fna \
     --annotation_file annotation_ncbi.txt \
-    --transcript_mapping_dir mutations/combined/transcript/ \
-    --genomic_mapping_dir mutations/combined/genomic/ \
+    --transcript_mapping_path mappings/transcript.csv \
+    --genomic_mapping_path mappings/genomic.csv \
     --output_dir results/
 ```
 
 ## Processing Modes
 
 ### Input Mode Selection
-- **`--mutations_dir`**: Process mutation CSV files (generates VCFs first)
-- **`--input_vcf_dir`**: Process pre-existing VCF directory
-- **`--input_vcf_file`**: Process single VCF file
+- **`--mutations_path`**: Process mutation CSV files (directory mode or single CSV). Legacy alias: `--mutations_dir`
+- **`--input_vcf_dir`**: Process pre-existing VCF directory (requires `--skip_vcf_generation`)
+- **`--input_vcf_file`**: Process single VCF file (implied skip)
 - **`--skip_vcf_generation`**: Skip VCF generation when using `--input_vcf_dir`
+
+### VCF Source Selection
+- Provide `--mutations_path` when you want the pipeline to generate VCFs. Omit `--skip_vcf_generation` in this mode.
+- Use `--skip_vcf_generation` with either `--input_vcf_dir` or `--input_vcf_file` when VCFs already exist.
+- Supply only `--input_vcf_file` to run a single VCF; the gene ID is inferred from the basename.
+- When neither `--input_vcf_dir` nor `--input_vcf_file` is provided, VCFs are built from `--mutations_path`.
 
 ### VCF Generation Options
 - **`--chromosome_format`**: Output chromosome format (`refseq`, `simple`, `ucsc`)
 - **`--validate_mapping`**: Cross-check chromosome mappings against reference
 - **`--clear_vcf_cache`**: Force regeneration of cached VCF files
+- **`--vcf_output_dir`**: Publish intermediate VCFs, bgzipped files, and indexes to a dedicated directory
 
 ### SpliceAI Execution Control
 - **`--splice_threshold`**: Minimum delta score threshold (default: 0.0)
 - **`--retry_jitter`**: Maximum retry delay in seconds (default: 10)
-- **`--maxforks`**: Limit concurrent SpliceAI tasks (default: 0 = unbounded, capped by CPU count)
+- **`--maxforks`**: Limit concurrent SpliceAI tasks (default: 0 = unbounded, automatically capped at available CPU cores)
 
 ### Validation and Filtering
 - **`--validation_log`**: Path to validation log for filtering failed mutations
-- **`--chromosome_mapping_dir`**: Required for pkey generation
-- **`--transcript_mapping_dir`**: Required for mutation ID mapping
+- **`--chromosome_mapping_path`**: Optional per-gene chromosome mapping (legacy `--chromosome_mapping_dir`)
+- **`--transcript_mapping_path`**: Required for mutation ID mapping (legacy `--transcript_mapping_dir`)
+- **`--genomic_mapping_path`**: Required for genomic mapping (legacy `--genomic_mapping_dir`)
 
 ## TensorFlow Race Condition Mitigation
 
@@ -180,7 +195,7 @@ ABCB1-G456A	ABCB1	NC_000007.14	87504456	G	A	G	B	0.15	0.02	0.25	0.04	5	-18	10	-22
 - `ds_ag/ds_al/ds_dg/ds_dl`: Delta scores for acceptor gain/loss, donor gain/loss
 - `dp_ag/dp_al/dp_dg/dp_dl`: Distance to predicted sites
 - `max_delta_score`: Highest delta score for the variant
-- `block_label`: Unique identifier for transcript isoforms - _A, B, C, D,_ or _dup_ (where _dup_ indicates consistent output across isoforms).
+- `block_label`: SpliceAI evaluates variants across transcript isoforms and emits one “transcript block” per isoform in the VCF INFO field. The parser preserves this order, labelling the first four unique score vectors as `A`, `B`, `C`, and `D`. Additional isoforms—or isoforms whose predictions match an earlier block exactly—are labelled `dup`. This highlights isoform-specific splicing differences while collapsing redundant outputs. For example, in `Data/spliceai/AR_spliceai_results.tsv`, variant `AR-G1130A` appears twice: block `A` captures the first AR isoform, whereas block `dup` represents other isoforms with identical scores.
 
 ## Advanced Usage
 

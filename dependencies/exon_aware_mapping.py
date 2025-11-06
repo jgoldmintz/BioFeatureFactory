@@ -6,6 +6,7 @@ Build exon-aware mappings + sequences for genes:
     * chromosome: mutant -> genomic-orientation "REF<abs_pos>ALT"
     * genomic (optional): mutant -> genomic-slice-relative "REF<gDNA_pos>ALT"
     * transcript (optional): mutant -> transcript-orientation "REF<tx_pos>ALT"
+    * amino-acid (optional): mutant -> AA mutation "REF<aa_pos>ALT"
 """
 
 import argparse
@@ -20,12 +21,14 @@ import warnings
 # This script is placed alongside utility.py
 sys.path.append(str(Path(__file__).parent))
 from utility import (
+    get_mutation_data,
     get_mutation_data_bioAccurate,
+    get_mutant_aa,
     trim_muts,
     extract_gene_from_filename,
     get_genome_loc,
     read_fasta,
-    write_fasta
+    write_fasta,
 )
 
 
@@ -450,17 +453,19 @@ def map_orf_mutations_to_transcript_and_genome(orf_mutations: list[str], tx_map:
       - transcript coordinates (mRNA orientation)
       - absolute genomic coordinates (genomic orientation; REF/ALT complemented on '-' strand)
 
-    Returns (tx_rows, chrom_rows, gdna_rows):
+    Returns (tx_rows, chrom_rows, gdna_rows, aa_rows):
       tx_rows:     [(input_mut, "REF<tx_pos>ALT"), ...]
       chrom_rows: [(input_mut, "REF<abs_pos>ALT"), ...]
       gdna_rows:  [(input_mut, "REF<gdna_pos>ALT"), ...]
+      aa_rows:    [(input_mut, "AA_REF<aa_pos>AA_ALT"), ...]
     """
     transcript_seq = tx_map["transcript_seq"]
     tx_to_genome   = tx_map["tx_to_genome"]
     cds_tx_start   = tx_map["cds_tx_start"]
     strand         = tx_map["strand"]
+    orf_seq        = tx_map["orf_seq"]
 
-    tx_rows, chrom_rows, gdna_rows = [], [], []
+    tx_rows, chrom_rows, gdna_rows, aa_rows = [], [], [], []
 
     for mut in orf_mutations:
         rel_pos, nts = get_mutation_data_bioAccurate(mut)
@@ -492,7 +497,17 @@ def map_orf_mutations_to_transcript_and_genome(orf_mutations: list[str], tx_map:
         gdna_pos = gpos - tx_map["tx_start"] + 1
         gdna_rows.append((mut, f"{g_wt}{gdna_pos}{g_alt}"))
 
-    return tx_rows, chrom_rows, gdna_rows
+        # Amino-acid mapping via shared helper (handles validation/warnings)
+        try:
+            nt_mut = get_mutation_data(mut)
+            aa_info = get_mutant_aa(nt_mut, orf_seq, aaseq=None, index=0)
+            if aa_info:
+                (aa_pos, (wt_aa, mut_aa)), _ = aa_info
+                aa_rows.append((mut, f"{wt_aa}{aa_pos}{mut_aa}"))
+        except Exception:
+            continue
+
+    return tx_rows, chrom_rows, gdna_rows, aa_rows
 
 
 # CLI
@@ -509,6 +524,7 @@ def main():
     p.add_argument("--out-chromosome-mapping", required=True, help="Output directory for chromosome mapping CSVs (combined_<GENE>.csv with absolute genomic coordinates).")
     p.add_argument("--out-genomic-mapping", help="Optional output directory for gDNA mapping CSVs (relative to gene genomic slice).")
     p.add_argument("--out-transcript-mapping", help="Optional output dir for transcript mapping CSVs.")
+    p.add_argument("--out-aa-mapping", help="Optional output dir for amino-acid mapping CSVs.")
     p.add_argument("--orf", help="Optional ORF FASTA (file or directory). If omitted, ORF is inferred from transcript.")
     p.add_argument("--verbose", action="store_true", help="Print detailed ORF/mutation validation messages.")
     args = p.parse_args()
@@ -518,8 +534,10 @@ def main():
     chrom_out = Path(args.out_chromosome_mapping)
     gdna_out = Path(args.out_genomic_mapping) if args.out_genomic_mapping else None
     tmap_out = Path(args.out_transcript_mapping) if args.out_transcript_mapping else None
+    aa_out = Path(args.out_aa_mapping) if args.out_aa_mapping else None
+    aa_out = Path(args.out_aa_mapping) if args.out_aa_mapping else None
 
-    capture_verbose = args.verbose and mut_path.is_dir()
+    capture_verbose = args.verbose #and mut_path.is_dir()
     verbose_log: list[str] | None = [] if capture_verbose else None
     gene_metrics = {
         "total_genes": 0,
@@ -594,7 +612,7 @@ def main():
             print(f"  FASTA: {fasta_out / (gene + '.fasta')}")
 
             # Build mappings
-            tx_rows, chrom_rows, gdna_rows = map_orf_mutations_to_transcript_and_genome(muts, tx_map)
+            tx_rows, chrom_rows, gdna_rows, aa_rows = map_orf_mutations_to_transcript_and_genome(muts, tx_map)
 
             # Chromosome mapping CSV (required)
             write_mapping_csv(chrom_out / f"chr_mapping_{gene}.csv", "chromosome", chrom_rows)
@@ -609,6 +627,11 @@ def main():
             if tmap_out:
                 write_mapping_csv(tmap_out / f"transcript_mapping_{gene}.csv", "transcript", tx_rows)
                 print(f"  Transcript mapping: {tmap_out / ('transcript_mapping_' + gene + '.csv')}  ({len(tx_rows)} rows)")
+
+            # Amino-acid mapping CSV (optional)
+            if aa_out:
+                write_mapping_csv(aa_out / f"{gene}_nt_to_aa_mapping.csv", "aamutant", aa_rows)
+                print(f"  Amino-acid mapping: {aa_out / (gene + '_nt_to_aa_mapping.csv')}  ({len(aa_rows)} rows)")
             len_issues = tx_map.get("validation_length_issues") or []
             mismatches = tx_map.get("validation_mismatches") or []
             total_mut = len(muts)

@@ -12,6 +12,7 @@ import time
 import traceback
 import sys
 import json
+import logging
 from collections import Counter
 from pathlib import Path
 from urllib.parse import unquote
@@ -35,6 +36,37 @@ w2n = {'zero': '0', 'one': '1', 'two': '2', 'three': '3', 'four': '4', 'five': '
        'fifteen': '15', 'sixteen': '16', 'seventeen': '17', 'eighteen': '18', 'nineteen': '19', 'twenty': '20',
        'twenty-one': '21', 'twenty-two': '22'}
 
+STOPWORDS = {
+    "combined","merged","processed","final","updated","new","old","temp","test",
+    "transcript","protein","genomic","chromosome","mapping","mutations","sequences",
+    "variants","data","aa","nt","cds","orf","map","maps","reference","ref",
+    "transcripts","features","tables","table","counts","count","results","out","in",
+    "notes","draft","report","summary","v","ver","version"
+}
+
+codon_table = {'I': ['ATT', 'ATC', 'ATA'],
+               'L': ['CTT', 'CTC', 'CTA', 'CTG', 'TTA', 'TTG'],
+               'V': ['GTT', 'GTC', 'GTA', 'GTG'],
+               'F': ['TTT', 'TTC'],
+               'M': ['ATG'],
+               'C': ['TGT', 'TGC'],
+               'A': ['GCT', 'GCC', 'GCA', 'GCG'],
+               'G': ['GGT', 'GGC', 'GGA', 'GGG'],
+               'P': ['CCT', 'CCC', 'CCA', 'CCG'],
+               'T': ['ACT', 'ACC', 'ACA', 'ACG'],
+               'S': ['TCT', 'TCC', 'TCA', 'TCG', 'AGT', 'AGC'],
+               'Y': ['TAT', 'TAC'],
+               'W': ['TGG'],
+               'Q': ['CAA', 'CAG'],
+               'N': ['AAT', 'AAC'],
+               'H': ['CAT', 'CAC'],
+               'E': ['GAA', 'GAG'],
+               'D': ['GAT', 'GAC'],
+               'K': ['AAA', 'AAG'],
+               'R': ['CGT', 'CGC', 'CGA', 'CGG', 'AGA', 'AGG'],
+               'Stop': ['TAA', 'TAG', 'TGA'],
+               '-': ['---']}
+codon_to_aa = {codon: aa for aa, v in codon_table.items() for codon in v}
 
 def read_fasta(inf, aformat="FIRST", duplicate="replace"):
     """Load sequences from a FASTA file into a name→sequence dictionary."""
@@ -209,6 +241,31 @@ def get_mutation_data_bioAccurate(ntposnt):
     else:
         position = int(ntposnt[1:-1])
     return position, (original_nt, mutant_nt)
+
+def get_mutant_aa(ntmut, ntseq, aaseq=None, index=0):
+    pos_0_indexed = ntmut[0] - 1 - index
+
+    # Check if the calculated position is valid for the sequence
+    if not (0 <= pos_0_indexed < len(ntseq)):
+        return None
+
+    codon_start_pos = (pos_0_indexed // 3) * 3
+
+    # Extract the original codon and translate it
+    original_codon = ntseq[codon_start_pos: codon_start_pos + 3]
+    wtaa = codon_to_aa.get(original_codon, 'X')
+
+    mutseq = update_str(ntseq, ntmut[1][1], pos_0_indexed)
+
+    mutated_codon = mutseq[codon_start_pos: codon_start_pos + 3]
+    mutaa = codon_to_aa.get(mutated_codon, 'X')
+
+    if aaseq is not None:
+        aa_pos_0_indexed = codon_start_pos // 3
+
+    aa_position_1_based = (codon_start_pos // 3) + 1
+
+    return (aa_position_1_based, (wtaa, mutaa)), original_codon
 
 def convert_position(seq1, seq2, position1, space="-"):
     """Project a one-based index from seq1 onto seq2 while accounting for gap characters."""
@@ -618,165 +675,6 @@ def get_genome_loc(genename, annotation_file, assembly="GRCh38"):
     except Exception as e:
         print(f"Error parsing annotation file {annotation_file}: {e}", file=sys.stderr)
         return None
-
-
-def get_genome_loc3(genename, annotation_file, assembly="GRCh38"):
-    """
-    Get gene location using local annotation file.
-
-    Args:
-        genename (str): Gene symbol (e.g., "CD44")
-        annotation_file (str): Path to local annotation file
-        assembly (str): Reference assembly ("GRCh37" or "GRCh38")
-
-    Returns:
-        tuple: (chromosome, [start, end], strand) or None
-    """
-    try:
-        with open(annotation_file, 'r') as f:
-            for line in f:
-                if line.startswith('#'):
-                    continue
-
-                fields = line.strip().split('\t')
-                if len(fields) < 7:
-                    continue
-
-                # Format: NAME, CHROM, STRAND, TX_START, TX_END, EXON_START, EXON_END
-                gene_symbol = fields[0]
-                chromosome = fields[1].replace('chr', '')  # Remove 'chr' prefix if present
-                strand = fields[2]
-                tx_start = int(fields[3])
-                tx_end = int(fields[4])
-
-                if gene_symbol.upper() == genename.upper():
-                    return (chromosome, [tx_start, tx_end], strand)
-
-    except Exception as e:
-        print(f"Error parsing annotation file {annotation_file}: {e}", file=sys.stderr)
-
-    return None
-
-def get_genome_loc2(genename, assembly="GRCh38", organism="homo sapiens"):
-    """Query NCBI Gene for genomic location data when local annotations are unavailable."""
-    organism_formatted = re.sub(r'\s+', '+', organism, flags=re.MULTILINE)
-    search_url = f"https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esearch.fcgi?db=gene&term={genename}[gene]+AND+{organism_formatted}[organism]"
-    r = retry_request(requests.get, [search_url])
-
-    if not r:
-        return (None)
-
-    ids = re.findall("<Id>(\d+)</Id>", r.text)
-    for accid in ids:
-        try:
-            def fetch_gene_record():
-                return Entrez.efetch(db="gene", id=accid, retmode="xml")
-
-            handle = retry_func(fetch_gene_record, [], {})
-            if not handle:
-                continue
-
-            record = str(handle.read())
-
-            # Case-insensitive gene name matching
-            if genename.lower() not in record.lower():
-                continue
-
-            # NEW APPROACH: Extract chromosome from genomic Gene-commentary sections
-            gene_commentaries = record.split("<Gene-commentary>")
-
-            # Look for genomic commentary sections that might contain coordinate information
-            for section in gene_commentaries:
-                # Skip if this section doesn't look like a genomic section
-                if 'type value="genomic"' not in section and 'genomic' not in section.lower():
-                    continue
-
-                # Try to extract chromosome from this specific genomic section
-                chromosome = None
-
-                # Method 1: Look for chromosome information with prioritized patterns
-                # More specific patterns first to avoid false matches
-                chromosome_patterns = [
-                    r"Chromosome (\d+) Reference",  # Most specific: "Chromosome 17 Reference"
-                    r"Chromosome ([1-9]|1[0-9]|2[0-2]|X|Y) Reference",  # "Chromosome X Reference"
-                    r"Chromosome ([1-9]|1[0-9]|2[0-2]|X|Y) Alternate",  # "Chromosome 17 Alternate"
-                    r"Chromosome ([1-9]|1[0-9]|2[0-2]|X|Y) Primary",     # "Chromosome 17 Primary"
-                    r">Chromosome ([1-9]|1[0-9]|2[0-2]|X|Y)<",           # XML tags
-                    r"Chr ([1-9]|1[0-9]|2[0-2]|X|Y) ",                   # "Chr 17 "
-                    r"Chromosome ([1-9]|1[0-9]|2[0-2]|X|Y)",             # Generic fallback
-                ]
-
-                for pattern in chromosome_patterns:
-                    matches = re.findall(pattern, section, re.IGNORECASE)
-                    if matches:
-                        chromosome = matches[0]
-                        break
-
-                if not chromosome:
-                    continue
-
-                # Convert word-based chromosome names to numbers if needed
-                if chromosome.lower() in w2n:
-                    chromosome = w2n[chromosome.lower()]
-
-                # Check if this chromosome exists in our mapping
-                if str(chromosome) not in chromosome_map[assembly]:
-                    continue
-
-                gid = chromosome_map[assembly][str(chromosome)]
-
-                # Look for sections containing this RefSeq accession
-                refseq_sections = [x for x in gene_commentaries if gid.split(".")[0] in x]
-                version_sections = [x for x in refseq_sections if re.search(
-                    rf"<Gene-commentary_version>{gid.split('.')[-1]}</Gene-commentary_version>", x)]
-
-                if len(version_sections) > 0:
-                    s = version_sections[0]
-
-                    # Extract coordinates
-                    from_matches = re.findall(r"<Seq-interval_from>(\d+)</Seq-interval_from>", s)
-                    to_matches = re.findall(r"<Seq-interval_to>(\d+)</Seq-interval_to>", s)
-
-                    if not from_matches or not to_matches:
-                        continue
-
-                    r1 = int(max(from_matches, key=len))
-                    r2 = int(max(to_matches, key=len))
-
-                    # Extract strand information
-                    strand = "unknown"
-
-                    # Look for Na-strand value format
-                    na_strand_matches = re.findall(r'<Na-strand value="([^"]+)"/>', s)
-                    if na_strand_matches:
-                        na_strand = na_strand_matches[0].lower()
-                        if na_strand == "plus":
-                            strand = "+"
-                        elif na_strand == "minus":
-                            strand = "-"
-                        else:
-                            strand = na_strand
-                    else:
-                        # Fallback: Look for numeric strand format
-                        strand_matches = re.findall(r"<Seq-interval_strand>(\d+)</Seq-interval_strand>", s)
-                        if strand_matches:
-                            strand_num = int(strand_matches[0])
-                            if strand_num == 1:
-                                strand = "+"
-                            elif strand_num == 2:
-                                strand = "-"
-                            else:
-                                strand = f"unknown({strand_num})"
-
-                    return chromosome, [r1, r2], strand, gid
-
-        except KeyError as e:
-            traceback.print_exc()
-        except Exception as e:
-            print(traceback.format_exc())
-            print(e)
-    return None
-
 
 def detect_reference_build_from_gid(gid):
     """Return reference build label for a RefSeq genomic accession."""
@@ -1279,7 +1177,24 @@ def extract_mutation_from_sequence_name(seq_name):
 
     return seq_name, None
 
-def process_single_mutation_for_sequence(seq_name, predictions, mapping_dict, is_mutant=True, tool_type='netphos'):
+def load_validation_failures(log_path):
+    """
+    Public helper to expose validation log failures as a mapping suitable for filtering.
+
+    Returns:
+        dict[str, set[str]]: Uppercase gene -> set of mutation ids to skip.
+    """
+    return _collect_failures_from_logs(log_path) if log_path else {}
+
+
+def should_skip_mutation(gene, mutation_id, failure_map):
+    """Return True if the given gene/mutation should be filtered based on validation logs."""
+    if not failure_map or not gene or not mutation_id:
+        return False
+    return mutation_id.upper() in failure_map.get(gene.upper(), set())
+
+
+def process_single_mutation_for_sequence(seq_name, predictions, mapping_dict, is_mutant=True, tool_type='netphos', failure_map=None):
     """Process predictions for one sequence against its specific mutation
 
     Args:
@@ -1302,6 +1217,9 @@ def process_single_mutation_for_sequence(seq_name, predictions, mapping_dict, is
 
     # Look up this mutation in the mapping
     if mutation_id not in mapping_dict:
+        return []
+
+    if should_skip_mutation(gene, mutation_id, failure_map):
         return []
 
     aaposaa = mapping_dict[mutation_id]  # e.g., "Y110F"
@@ -1354,7 +1272,7 @@ def process_single_mutation_for_sequence(seq_name, predictions, mapping_dict, is
 
     return results
 
-def parse_predictions_with_mutation_filtering(predictions, mapping_dict, is_mutant, threshold=0.0, yes_only=False, tool_type='netphos'):
+def parse_predictions_with_mutation_filtering(predictions, mapping_dict, is_mutant, threshold=0.0, yes_only=False, tool_type='netphos', failure_map=None):
     """Universal prediction filtering logic for both NetPhos and NetNGlyc
 
     Args:
@@ -1370,6 +1288,8 @@ def parse_predictions_with_mutation_filtering(predictions, mapping_dict, is_muta
     """
     results = []
 
+    failure_map = failure_map or {}
+
     if is_mutant:
         # Group predictions by sequence name for single-mutation processing
         seq_predictions = {}
@@ -1382,7 +1302,8 @@ def parse_predictions_with_mutation_filtering(predictions, mapping_dict, is_muta
         # Process each sequence separately with its specific mutation
         for seq_name, seq_preds in seq_predictions.items():
             seq_results = process_single_mutation_for_sequence(
-                seq_name, seq_preds, mapping_dict, is_mutant=True, tool_type=tool_type
+                seq_name, seq_preds, mapping_dict, is_mutant=True, tool_type=tool_type,
+                failure_map=failure_map
             )
 
             # Apply additional filters
@@ -1390,6 +1311,9 @@ def parse_predictions_with_mutation_filtering(predictions, mapping_dict, is_muta
                 # Apply threshold filter
                 score_field = 'score' if tool_type == 'netphos' else 'potential'
                 if result[score_field] < threshold:
+                    continue
+
+                if should_skip_mutation(result['Gene'], result.get('pkey', '').split('-')[-1] if 'pkey' in result else None, failure_map):
                     continue
 
                 # Apply yes_only filter (NetPhos only)
@@ -1405,105 +1329,57 @@ def parse_predictions_with_mutation_filtering(predictions, mapping_dict, is_muta
 
     return results
 
-def extract_gene_from_filename(filename):
-    """Extract gene name from filename using intelligent pattern matching
+def strip_all_extensions(name: str) -> str:
+    # remove .csv, .csv.gz, etc.
+    return re.sub(r'(\.[^.]+)+$', '', name)
 
-    Args:
-        filename: Filename with or without extension (e.g., 'BRCA1_aa.csv', 'combined_ACADM.csv', 'CYBB_transcript_mutations.csv')
+def is_likely_gene_name(name: str) -> bool:
+    pat = re.compile(r'^[A-Za-z][A-Za-z0-9\-]{1,14}$')
+    return 2 <= len(name) <= 15 and bool(pat.match(name))
 
-    Returns:
-        str: Extracted gene name (e.g., 'BRCA1', 'ACADM', 'CYBB')
-    """
-    import re
-    from pathlib import Path
+def extract_gene_from_filename(filename: str) -> str:
+    """Return the most likely gene symbol from a filename."""
+    name = Path(filename).name
+    name = strip_all_extensions(name)
 
-    # Remove file extension if present
-    if '.' in filename:
-        filename = Path(filename).stem
+    # Fast path: choose the last gene-like token bounded by underscores
+    matches = re.findall(r'(?:^|_)([A-Z][A-Z0-9]{1,14}(?:-[A-Z0-9]+)?)(?=$|_)', name)
+    for cand in reversed(matches):
+        if is_likely_gene_name(cand):
+            return cand
 
-    # Method 1: Try to directly extract gene name patterns
-    # Look for the pattern at the beginning of the string (before the first underscore with a suffix)
-    gene_pattern = re.compile(r'^([A-Z][A-Z0-9]{1,14}(?:[-][A-Z0-9]+)?)(?:_|$)')
-    match = gene_pattern.match(filename)
+    # Token-based cleanup for flexible prefixes/suffixes like 'transcript_mapping_'
+    tokens = [t for t in name.split('_') if t]
 
-    if match and is_likely_gene_name(match.group(1)):
-        return match.group(1)
+    # strip leading stopwords
+    i = 0
+    while i < len(tokens) and tokens[i].lower() in STOPWORDS:
+        i += 1
+    # strip trailing stopwords
+    j = len(tokens)
+    while j > i and tokens[j-1].lower() in STOPWORDS:
+        j -= 1
+    core = tokens[i:j] if i < j else tokens
 
-    # Method 2: Strip known prefixes and suffixes
-    gene_name = filename
+    # pick best candidate from remaining tokens
+    candidates = [t for t in core if is_likely_gene_name(t)]
+    if candidates:
+        def rank(t):
+            score = 0
+            if t.isupper(): score += 1
+            if any(ch.isdigit() for ch in t): score += 2
+            if '-' in t: score += 2
+            return (score, len(t))
+        candidates.sort(key=rank)
+        return candidates[-1]
 
-    # Common prefixes to remove
-    prefixes = [
-        r'^combined_',
-        r'^merged_',
-        r'^processed_',
-        r'^final_',
-        r'^updated_',
-        r'^new_',
-        r'^old_',
-        r'^temp_',
-        r'^test_',
-    ]
+    # Last resort: first gene-like substring anywhere
+    m = re.search(r'([A-Za-z][A-Za-z0-9\-]{1,14})', name)
+    if m and is_likely_gene_name(m.group(1)):
+        return m.group(1)
 
-    # Common suffixes to remove (order matters - more specific first)
-    suffixes = [
-        r'_transcript_mutations$',  # Remove '_transcript_mutations' suffix
-        r'_protein_mutations$',  # Remove '_protein_mutations' suffix
-        r'_nt_to_aa_mapping$',  # Remove '_nt_to_aa_mapping' suffix
-        r'_mutations$',  # Remove '_mutations' suffix
-        r'_transcript$',  # Remove '_transcript' suffix  <-- ADD THIS
-        r'_protein$',  # Remove '_protein' suffix
-        r'_mapping$',  # Remove '_mapping' suffix
-        r'_sequences$',  # Remove '_sequences' suffix
-        r'_variants$',  # Remove '_variants' suffix
-        r'_data$',  # Remove '_data' suffix
-        r'_aa$',  # Remove '_aa' suffix
-        r'_nt$',  # Remove '_nt' suffix
-        r'_cds$',  # Remove '_cds' suffix
-        r'_orf$',  # Remove '_orf' suffix
-    ]
-
-    # Remove prefixes
-    for pattern in prefixes:
-        gene_name = re.sub(pattern, '', gene_name, flags=re.IGNORECASE)
-
-    # Remove suffixes
-    for pattern in suffixes:
-        gene_name = re.sub(pattern, '', gene_name, flags=re.IGNORECASE)
-
-    # Clean up underscores
-    gene_name = gene_name.strip('_')
-
-    # Validate and return
-    if gene_name and is_likely_gene_name(gene_name):
-        return gene_name
-
-    # Fallback to cleaned name or original if nothing worked
-    return gene_name if gene_name else Path(filename).stem
-
-def is_likely_gene_name(name):
-    """Check if a string looks like a gene name
-
-    Args:
-        name: String to check
-
-    Returns:
-        bool: True if likely a gene name
-    """
-    import re
-
-    # Gene names are typically:
-    # - 2-15 characters long
-    # - Start with a letter
-    # - Contain only letters, numbers, and occasionally hyphens
-
-    gene_pattern = re.compile(r'^[A-Za-z][A-Za-z0-9\-]{1,14}$')
-
-    # Additional check: common gene name patterns
-    if 2 <= len(name) <= 15 and gene_pattern.match(name):
-        return True
-
-    return False
+    # Fallback: basename without extensions
+    return strip_all_extensions(Path(filename).stem)
 
 def discover_mapping_files(mapping_dir):
     """Scan directory for CSV mapping files and extract gene names flexibly

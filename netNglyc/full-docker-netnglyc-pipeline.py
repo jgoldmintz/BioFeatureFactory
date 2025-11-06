@@ -23,7 +23,18 @@ from concurrent.futures import ProcessPoolExecutor, as_completed
 # Import utility functions  
 sys.path.append(os.path.join(os.path.dirname(__file__), '../dependencies'))
 
-from utility import read_fasta, get_mutation_data_bioAccurate, split_fasta_into_batches, combine_batch_outputs, discover_mapping_files, discover_fasta_files, ExtractGeneFromFASTA, parse_predictions_with_mutation_filtering
+from utility import (
+    read_fasta,
+    get_mutation_data_bioAccurate,
+    split_fasta_into_batches,
+    combine_batch_outputs,
+    discover_mapping_files,
+    discover_fasta_files,
+    ExtractGeneFromFASTA,
+    parse_predictions_with_mutation_filtering,
+    load_validation_failures,
+    should_skip_mutation,
+)
 
 def _process_single_sequence_worker(args):
     """
@@ -953,7 +964,7 @@ class RobustDockerNetNGlyc:
         
         return predictions
 
-    def parse_mutant_files(self, input_dir, threshold=0.5, mapping_dir=None, fasta_dir=None):
+    def parse_mutant_files(self, input_dir, threshold=0.5, mapping_dir=None, fasta_dir=None, failure_map=None):
         """Parse mutant NetNGlyc files using sequence names from predictions"""
         import os
         import csv
@@ -962,6 +973,7 @@ class RobustDockerNetNGlyc:
         from pathlib import Path
         
         results = []
+        failure_map = failure_map or {}
         
         if mapping_dir is None:
             print("ERROR: mapping_dir is required for mutant parsing")
@@ -1094,10 +1106,27 @@ class RobustDockerNetNGlyc:
                         ntposnt = row['mutant']  # e.g., "C3066A"
                         aaposaa = row['aamutant']  # e.g., "S1022N"
                         mapping_dict[ntposnt] = aaposaa
+                if failure_map:
+                    skip_set = {m.upper() for m in failure_map.get(gene.upper(), set())}
+                    if skip_set:
+                        before = len(mapping_dict)
+                        mapping_dict = {
+                            mut_id: aa_mut
+                            for mut_id, aa_mut in mapping_dict.items()
+                            if mut_id.upper() not in skip_set
+                        }
+                        skipped = before - len(mapping_dict)
+                        if skipped and self.verbose:
+                            print(f"  Skipping {skipped} mutations flagged in validation logs")
                 if self.verbose:
                     print(f"  Loaded mapping for {len(mapping_dict)} mutations")
             except Exception as e:
                 print(f"  Error reading mapping file {mapping_file}: {e}")
+                continue
+            
+            if not mapping_dict:
+                if self.verbose:
+                    print("  No remaining mutations to evaluate after filtering; skipping gene")
                 continue
             
             # Step 3: Parse predictions from the combined file
@@ -1112,8 +1141,13 @@ class RobustDockerNetNGlyc:
                 # Step 4: Use shared utility function for single-mutation processing
                 try:
                     gene_results = parse_predictions_with_mutation_filtering(
-                        all_predictions, mapping_dict, is_mutant=True,
-                        threshold=threshold, yes_only=False, tool_type='netnglyc'
+                        all_predictions,
+                        mapping_dict,
+                        is_mutant=True,
+                        threshold=threshold,
+                        yes_only=False,
+                        tool_type='netnglyc',
+                        failure_map=failure_map,
                     )
                     if self.verbose:
                         print(f"  Found {len(gene_results)} predictions at mutation sites")
@@ -1850,8 +1884,11 @@ def main():
                         help="Keep intermediate Docker output files for debugging (don't clean up temporary directories)")
     parser.add_argument("--verbose", action="store_true",
                         help="Enable verbose output showing detailed processing information")
+    parser.add_argument("--log",
+                        help="Validation log file or directory to skip failed mutations (mutant modes only)")
 
     args = parser.parse_args()
+    failure_map = load_validation_failures(args.log) if (args.log and args.is_mutant) else {}
 
     # Handle cache clearing
     if args.clear_cache:
@@ -1929,7 +1966,12 @@ def main():
         if args.is_mutant:
             print(f"Parsing mutant NetNGlyc files from {args.input}")
             print("Mode: Mutant parsing using wildtype logic with mapping files")
-            results = processor.parse_mutant_files(args.input, args.threshold, mapping_dir=args.mapping_dir)
+            results = processor.parse_mutant_files(
+                args.input,
+                args.threshold,
+                mapping_dir=args.mapping_dir,
+                failure_map=failure_map,
+            )
         else:
             print(f"Parsing wildtype NetNGlyc files from {args.input}")
             print(f"Mode: Wildtype parsing (using mapping files from {args.mapping_dir})")
@@ -2032,7 +2074,13 @@ def main():
                 if args.is_mutant:
                     #print("Parsing as mutant files using wildtype logic with mapping")
                     parsing_start_time = time.time()
-                    results = processor.parse_mutant_files(temp_output_dir, args.threshold, mapping_dir=args.mapping_dir, fasta_dir=args.input)
+                    results = processor.parse_mutant_files(
+                        temp_output_dir,
+                        args.threshold,
+                        mapping_dir=args.mapping_dir,
+                        fasta_dir=args.input,
+                        failure_map=failure_map,
+                    )
                     parsing_elapsed = time.time() - parsing_start_time
                     
                     # Print comprehensive summary for mutant processing

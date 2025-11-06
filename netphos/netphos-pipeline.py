@@ -22,7 +22,16 @@ from pathlib import Path
 
 # Import shared batch processing utilities
 sys.path.append(os.path.join(os.path.dirname(__file__), '../dependencies'))
-from utility import split_fasta_into_batches, combine_batch_outputs, get_mutation_data_bioAccurate_unified, discover_mapping_files, discover_fasta_files
+from utility import (
+    split_fasta_into_batches,
+    combine_batch_outputs,
+    get_mutation_data_bioAccurate_unified,
+    discover_mapping_files,
+    discover_fasta_files,
+    parse_predictions_with_mutation_filtering,
+    load_validation_failures,
+    should_skip_mutation,
+)
 
 # Use the unified function from utility.py
 def get_mutation_data_bioAccurate(aaposaa):
@@ -118,13 +127,15 @@ def write_tsv(predictions, output_file, include_pkey=False):
             else:
                 f.write(f"{pred['Gene']}\t{pred['pos']}\t{pred['amino_acid']}\t{pred['context']}\t{pred['score']}\t{pred['kinase']}\t{pred['answer']}\n")
 
-def parse_with_mutation_filtering_directory(input_path, mapping_dir, threshold=0.0, yes_only=False, is_mutant=False):
+def parse_with_mutation_filtering_directory(input_path, mapping_dir, threshold=0.0, yes_only=False, is_mutant=False, failure_map=None):
     """Parse NetPhos files from directory or single file and filter by mutation positions"""
     all_results = []
     
     if os.path.isfile(input_path):
         # Single file processing
-        results = parse_with_mutation_filtering_single_file(input_path, mapping_dir, threshold, yes_only, is_mutant)
+        results = parse_with_mutation_filtering_single_file(
+            input_path, mapping_dir, threshold, yes_only, is_mutant, failure_map=failure_map
+        )
         all_results.extend(results)
     elif os.path.isdir(input_path):
         # Directory processing - find all NetPhos output files
@@ -141,13 +152,17 @@ def parse_with_mutation_filtering_directory(input_path, mapping_dir, threshold=0
         # Process each file
         for file_path in netphos_files:
             print(f"Processing {file_path}...")
-            results = parse_with_mutation_filtering_single_file(str(file_path), mapping_dir, threshold, yes_only, is_mutant)
+            results = parse_with_mutation_filtering_single_file(
+                str(file_path), mapping_dir, threshold, yes_only, is_mutant, failure_map=failure_map
+            )
             all_results.extend(results)
     
     return all_results
 
-def parse_with_mutation_filtering_single_file(input_file, mapping_dir, threshold=0.0, yes_only=False, is_mutant=False):
+def parse_with_mutation_filtering_single_file(input_file, mapping_dir, threshold=0.0, yes_only=False, is_mutant=False, failure_map=None):
     """Parse NetPhos file and filter by mutation positions, generating pkeys"""
+
+    failure_map = failure_map or {}
     
     # First, parse all predictions from the file
     all_predictions = parse_netphos_file(input_file)
@@ -172,19 +187,18 @@ def parse_with_mutation_filtering_single_file(input_file, mapping_dir, threshold
     mapping_dict = load_nt_to_aa_mapping(mapping_file)
     print(f"Loaded {len(mapping_dict)} mutations for {gene}")
     
-    # Import shared utility functions
-    import sys
-    import os as os_module
-    sys.path.append(os_module.path.join(os_module.path.dirname(__file__), '..', 'dependencies'))
-    from utility import parse_predictions_with_mutation_filtering
-    
     # Use unified filtering logic
     if is_mutant:
         # Use new single-mutation processing for mutant sequences
         try:
             results = parse_predictions_with_mutation_filtering(
-                all_predictions, mapping_dict, is_mutant=True, 
-                threshold=threshold, yes_only=yes_only, tool_type='netphos'
+                all_predictions,
+                mapping_dict,
+                is_mutant=True,
+                threshold=threshold,
+                yes_only=yes_only,
+                tool_type='netphos',
+                failure_map=failure_map,
             )
             print(f"Predictions at mutation sites: {len(results)}")
             return results
@@ -217,6 +231,10 @@ def parse_with_mutation_filtering_single_file(input_file, mapping_dir, threshold
         else:
             target_aa = aa_tuple[0]  # Original amino acid (K for wildtype)
         
+        # Skip logged failures during mutant parsing
+        if is_mutant and should_skip_mutation(gene, mutation_id, failure_map):
+            continue
+
         # Group mutations by position for efficient lookup
         if aa_pos not in position_mutations:
             position_mutations[aa_pos] = []
@@ -615,6 +633,8 @@ def main():
                        help='Directory containing mutation mapping CSV files (enables pkey generation and mutation filtering)')
     parser.add_argument('--is-mutant', action='store_true',
                        help='Process mutant sequences (matches mutant amino acid). Default: wildtype (matches original amino acid)')
+    parser.add_argument('--log',
+                       help='Validation log file or directory to skip failed mutations (mutant mode only)')
     
     # Mode selection
     parser.add_argument('--mode', choices=['full-pipeline', 'netphos-only', 'parse-only'], default='parse-only',
@@ -680,6 +700,8 @@ def main():
     if args.yes_only and args.threshold > 0.0:
         print("Warning:  Warning: --yes-only specified, ignoring --threshold value (YES answers are already high-confidence)")
         args.threshold = 0.0  # Reset threshold when yes-only is used
+    
+    failure_map = load_validation_failures(args.log) if (args.log and args.is_mutant) else {}
     
     # Handle different processing modes
     if args.mode in ['full-pipeline', 'netphos-only']:
@@ -782,7 +804,12 @@ def main():
         sequence_type = "mutant" if args.is_mutant else "wildtype"
         print(f"Using mutation filtering mode with pkey generation (sequence_type: {sequence_type})...")
         filtered_predictions = parse_with_mutation_filtering_directory(
-            args.input, args.mapping_dir, args.threshold, args.yes_only, args.is_mutant
+            args.input,
+            args.mapping_dir,
+            args.threshold,
+            args.yes_only,
+            args.is_mutant,
+            failure_map=failure_map if args.is_mutant else None,
         )
         
         # Write output with pkeys
