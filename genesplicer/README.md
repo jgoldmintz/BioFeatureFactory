@@ -80,28 +80,28 @@ Each row represents a single SNV comparison (`pkey = GENE-mutation`). Global vie
 ### 2. Events Table (`--splice-summary.events.tsv`)
 Each row represents a donor/acceptor **cluster** (merged nearby sites) and compares top WT vs top MUT within that cluster.
 
-| Column | Description | Units/Values |
-|---|---|---|
-| `pkey` | Variant key `GENE-mutation` | — |
-| `type` | Boundary type | `donor` / `acceptor` |
-| `cluster_id` | Stable ID within `(pkey, type)` (e.g., `d1`, `a2`) | string |
-| `wt_pos` | Top WT site position in cluster | bp (absolute) or index (window) |
-| `mut_pos` | Top MUT site position in cluster | bp (absolute) or index (window) |
-| `dpos` | Positional shift: `mut_pos − wt_pos` | bp (or indices) |
-| `wt_score` | Top WT score | dimensionless |
-| `mut_score` | Top MUT score | dimensionless |
-| `dscore` | Score delta: `mut_score − wt_score` | dimensionless |
-| `pct_delta` | Relative delta: `dscore / max(|wt_score|, ε)` | dimensionless |
-| `distance_to_snv` | Min distance of (WT or MUT) site in the cluster to the SNV | bp |
-| `rank_wt` | Rank of WT site among all WT sites of this `type` (1=strongest) | integer |
-| `rank_mut` | Rank of MUT site among all MUT sites of this `type` | integer |
-| `conf_wt` | Confidence weight of WT (`0.5/0.75/1.0`) | numeric |
-| `conf_mut` | Confidence weight of MUT (`0.5/0.75/1.0`) | numeric |
-| `conf_weighted_delta` | `conf_mut·mut_score − conf_wt·wt_score` | dimensionless |
-| `cls` | Event class | `gained/lost/shifted/strengthened/weakened/none` |
-| `is_high_impact` | High Δ or high gained/lost (policy thresholds) | 0/1 |
-| `priority` | Sorting key: \|Δ\|·exp(−distance/`--distance-k`) + bonuses | numeric |
-| `in_radius` | Inside local triage radius (`distance ≤ --report-radius`) | 0/1 |
+| Column                | Description                                                                               | Units/Values                                     |
+|-----------------------|-------------------------------------------------------------------------------------------|--------------------------------------------------|
+| `pkey`                | Variant key `GENE-mutation`                                                               | —                                                |
+| `type`                | Boundary type                                                                             | `donor` / `acceptor`                             |
+| `cluster_id`          | Stable ID within `(pkey, type)` (e.g., `d1`, `a2`)                                        | string                                           |
+| `wt_pos`              | Top WT site position in cluster                                                           | bp (absolute) or index (window)                  |
+| `mut_pos`             | Top MUT site position in cluster                                                          | bp (absolute) or index (window)                  |
+| `dpos`                | Positional shift: `mut_pos − wt_pos`                                                      | bp (or indices)                                  |
+| `wt_score`            | Top WT score                                                                              | dimensionless                                    |
+| `mut_score`           | Top MUT score                                                                             | dimensionless                                    |
+| `dscore`              | Score delta: `mut_score − wt_score`                                                       | dimensionless                                    |
+| `pct_delta`           | Relative delta: $r_i = \dfrac{\text{dscore}}{\max( \\|\text{WTscore}\\|, \varepsilon)}$   | dimensionless |
+| `distance_to_snv`     | Min distance of (WT or MUT) site in the cluster to the SNV                                | bp                                               |
+| `rank_wt`             | Rank of WT site among all WT sites of this `type` (1=strongest)                           | integer                                          |
+| `rank_mut`            | Rank of MUT site among all MUT sites of this `type`                                       | integer                                          |
+| `conf_wt`             | Confidence weight of WT (`0.5/0.75/1.0`)                                                  | numeric                                          |
+| `conf_mut`            | Confidence weight of MUT (`0.5/0.75/1.0`)                                                 | numeric                                          |
+| `conf_weighted_delta` | `conf_mut·mut_score − conf_wt·wt_score`                                                   | dimensionless                                    |
+| `cls`                 | Event class                                                                               | `gained/lost/shifted/strengthened/weakened/none` |
+| `is_high_impact`      | High Δ or high gained/lost (policy thresholds)                                            | 0/1                                              |
+| `priority`            | Sorting key: $\\|\text{dscore}\\|*\text{e}^{(−distance/\text{"--distance-k"})}$ + bonuses | numeric                                          |
+| `in_radius`           | Inside local triage radius (`distance ≤ --report-radius`)                                 | 0/1                                              |
 
 **Event taxonomy**
 - `gained`: WT absent, MUT visible (≥ visibility threshold).
@@ -240,39 +240,44 @@ $H = \text{--high-cutoff}$ (default 5.0), $V = \text{--visibility-threshold}$ (d
 
 ### global_sum_weighted_abs_Δ
 Weighted aggregate magnitude emphasizing proximity (Tobler, 1970; Cressie, 1993).
-- Definition: $S_{\text{weighted}} = \sum_i w_i \cdot |\Delta_i|$, with $w_i = e^{- d_i / k}$.
-- Interpretation: exponential distance decay. Half-weight distance $d_{1/2} = k \ln 2$. Example: $k=75 \Rightarrow d_{1/2} \approx 52$ bp.
+- **Definition**: $S_{\text{weighted}} = \sum_i w_i \cdot |\Delta_i|$, with $w_i = e^{- d_i / k}$.
+- **Interpretation**: exponential distance decay. Half-weight distance $d_{1/2} = k \ln 2$. Example: $k=75 \Rightarrow d_{1/2} \approx 52$ bp.
 
 ### priority (per event)
 Sorting/ranking score for events and `top_event_*` (Keeney & Raiffa, 1993).
-- Base: $|\Delta_i| \cdot e^{- d_i / k}$.
-- Bonuses: $+2$ if $\text{class} \in \{\text{gained},\text{lost}\}$ and $\max(s_{\text{wt},i}, s_{\text{mut},i}) \ge H$; $+1$ if $\text{class}=\text{shifted}$ and $|dpos| \ge S$.
-- Definition: $\text{priority}_i = |\Delta_i| e^{- d_i / k} + 2 B_i + 1 L_i$, where $B_i=1$ for high gained/lost, $L_i=1$ for large shift; else $0$.
-- Interpretation: large, nearby effects rank highest; boosts favor confident gain/loss and sizable shifts.
+- **Base**: $|\Delta_i| \cdot e^{- d_i / k}$.
+- **Bonuses**: $+2$ if $\text{class} \in \{\text{gained},\text{lost}\}$ and $\max(s_{\text{wt},i}, s_{\text{mut},i}) \ge H$; $+1$ if $\text{class}=\text{shifted}$ and $|dpos| \ge S$.
+- **Definition**: $\text{priority}_i = |\Delta_i| e^{- d_i / k} + 2 B_i + 1 L_i$, where $B_i=1$ for high gained/lost, $L_i=1$ for large shift; else $0$.
+- **Interpretation**: large, nearby effects rank highest; boosts favor confident gain/loss and sizable shifts.
 
 ### pct_delta (per event)
 Scale-free effect size normalized by WT strength (Borenstein et al., 2009).
-- Definition: $r_i = \dfrac{\Delta_i}{\max(|s_{\text{wt},i}|, \varepsilon)}$.
-- Interpretation: compare across genes with different baselines. Heuristic bands: $\sim 0.1$ small, $\sim 0.3$ moderate, $\ge 0.5$ large.
+- **Definition**: $r_i = \dfrac{\Delta_i}{\max(|s_{\text{wt},i}|, \varepsilon)}$.
+- **Interpretation**: compare across genes with different baselines. Heuristic bands: $\sim 0.1$ small, $\sim 0.3$ moderate, $\ge 0.5$ large.
 
 ### conf_weighted_delta (per event)
 Confidence-weighted change using certainty weights (Borenstein et al., 2009).
-- Mapping: $\text{low}\rightarrow 0.5$, $\text{med}\rightarrow 0.75$, $\text{high}\rightarrow 1.0$.
-- Definition: $\text{CW}\Delta_i = c_{\text{mut},i}\, s_{\text{mut},i} - c_{\text{wt},i}\, s_{\text{wt},i}$.
-- Interpretation: downweights low-confidence calls; robust alternative to plain $\Delta$.
+- **Mapping**: $\text{low}\rightarrow 0.5$, $\text{med}\rightarrow 0.75$, $\text{high}\rightarrow 1.0$.
+- **Definition**: $\text{CW}\Delta_i = c_{\text{mut},i}\, s_{\text{mut},i} - c_{\text{wt},i}\, s_{\text{wt},i}$.
+- **Interpretation**: downweights low-confidence calls; robust alternative to plain $\Delta$.
 
 ### nearest_event_bp_any, nearest_event_bp_local
-- Definitions: $\text{nearest_any} = \min_i d_i$; $\text{nearest_local} = \min_{i: d_i \le R} d_i$.
-- Interpretation: proximity diagnostics; small values indicate local impact, large values imply distal cryptic activation (Jaganathan et al., 2019).
+- **Definitions**: 
+  - `nearest_any` $= \min_i d_i$
+  - `nearest_local` $= \min_{i: d_i \le R} d_i$
+- **Interpretation**: proximity diagnostics; small values indicate local impact, large values imply distal cryptic activation (Jaganathan et al., 2019).
 
 ### frac_effect_in_radius
 Fraction of effect mass within the local radius.
-- Definition: $\Phi = \dfrac{\sum_{d_i \le R} |\Delta_i|}{\sum_{\text{all } i} |\Delta_i|}$.
-- Interpretation: localization metric. Near $1$ → impact concentrated near SNV; near $0$ → mostly distal.
+- **Definition**: $\Phi = \dfrac{\sum_{d_i \le R} |\Delta_i|}{\sum_{\text{all } i} |\Delta_i|}$.
+- **Interpretation**: localization metric. Near $1$ → impact concentrated near SNV; near $0$ → mostly distal.
 
 ### global_max_abs_Δscore, local_max_abs_Δscore
-- Definitions: $\text{max_global} = \max_i |\Delta_i|$; $\text{max_local} = \max_{i: d_i \le R} |\Delta_i|$.
-- Interpretation: peak magnitude indicators.
+- **Definitions**: 
+  - `max_global` = $\max_i |\Delta_i|$
+  - `max local` = $\max_{i: d_i \le R} |\Delta_i|$
+- **Interpretation**: 
+  - peak magnitude indicators.
 
 ---
 
@@ -287,8 +292,8 @@ Site is **visible** if $\text{score} \ge V$. Cluster class depends on visibility
 - `none`: otherwise.
 
 ### rank_wt, rank_mut
-- Definition: rank within `(allele, type)` by descending score; ties resolved deterministically.
-- Interpretation: relative strength among all donors or all acceptors per allele.
+- **Definition**: rank within `(allele, type)` by descending score; ties resolved deterministically.
+- **Interpretation**: relative strength among all donors or all acceptors per allele.
 
 ### pct_delta, conf_weighted_delta, priority
 - Same formulas as above, computed per cluster.
@@ -298,12 +303,12 @@ Site is **visible** if $\text{score} \ge V$. Cluster class depends on visibility
 ## Sites Table fields
 
 ### distance_to_snv
-- Definition: $\text{distance} = |\text{site_pos} - \text{snv_pos}|$.
-- Interpretation: feeds distance kernel $w = e^{- d / k}$ used by weighted metrics and `priority` (Tobler, 1970; Cressie, 1993).
+- **Definition**: $\text{distance} = |$`site_pos` $-$ `snv_pos`$|$
+- **Interpretation**: feeds distance kernel $w = e^{- d / k}$ used by weighted metrics and `priority` (Tobler, 1970; Cressie, 1993).
 
 ### visible_flag
-- Definition: indicator $1$ if $\text{score} \ge V$, else $0$.
-- Interpretation: governs inclusion in class logic (e.g., gained/lost) and counts.
+- **Definition**: indicator $1$ if $\text{score} \ge V$, else $0$.
+- **Interpretation**: governs inclusion in class logic (e.g., gained/lost) and counts.
 
 ---
 
