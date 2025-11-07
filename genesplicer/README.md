@@ -303,7 +303,7 @@ Site is **visible** if $\text{score} \ge V$. Cluster class depends on visibility
 ## Sites Table fields
 
 ### distance_to_snv
-- **Definition**: `distance} = |site_pos - snv_pos|`
+- **Definition**: `distance = |site_pos - snv_pos|`
 - **Interpretation**: feeds distance kernel $w = e^{- d / k}$ used by weighted metrics and `priority` (Tobler, 1970; Cressie, 1993).
 
 ### visible_flag
