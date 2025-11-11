@@ -27,7 +27,7 @@ Modular bioinformatics framework for automated feature extraction, coordinate ma
 - **Shared utilities** in `dependencies/utility.py` provide discovery helpers, mapping loaders, and mutation filters for every pipeline.  
 - **Multiple processing modes** let you run full pipelines, single tools, or parse-only passes.  
 - **Parallel execution** leverages multiprocessing/threading tuned per tool (`ProcessPoolExecutor`, `ThreadPoolExecutor`).  
-- **Cross-platform support** via Docker images and helper scripts for Linux, macOS (Apple Silicon), and Windows via WSL2.  
+- **Cross-platform support** via Docker images and helper scripts for Linux and macOS (Apple Silicon).  
 - **Comprehensive logging** ensures validation, warnings, and errors are traceable.  
 
 ---
@@ -36,12 +36,12 @@ Modular bioinformatics framework for automated feature extraction, coordinate ma
 
 | Pipeline | Entry Point | Primary Inputs*                                                                   | Notable Outputs                                                                       |
 |----------|-------------|-----------------------------------------------------------------------------------|---------------------------------------------------------------------------------------|
-| **NetNGlyc** | `netNglyc/run_netnglyc_pipeline.py` | Gene FASTA bundle, `combined_<GENE>.csv`, SignalP 6.0 model                       | Glycosylation site predictions with SignalP-enhanced summaries                        |
-| **NetPhos** | `netphos/run_netphos_pipeline.py` | Gene FASTA bundle, `combined_<GENE>.csv`                                          | Kinase-specific phosphorylation predictions with confidence scores                    |
-| **Miranda** | `miranda/run_miranda_pipeline.py` | miRNA FASTA, transcript FASTA, `combined_<GENE>.csv`                              | Candidate miRNA binding sites with timeout-protected runs                             |
-| **GeneSplicer** | `genesplicer/run_genesplicer_pipeline.py` | Genomic FASTA slices, `combined_<GENE>.csv`                                       | Splice donor/acceptor predictions per mutation window                                 |
-| **SpliceAI** | `spliceai/run_spliceai_nextflow.sh` | Mutation CSV(s), reference genome, annotation GTF                                 | SpliceAI VCFs, parsed consequence tables, exon-aware logs                             |
-| **RNAfold** | `RNAfold/run_viennaRNA_pipeline.py` | Transcript FASTA, `combined_<GENE>.csv` (`--transcript-mapping`), reference FASTA | $ΔΔG$ summaries, Jensen–Shannon divergence metrics, per-position accessibility deltas |
+| **NetNGlyc** | `netNglyc/full-docker-netnglyc-pipeline.py` | WT & mutant protein FASTA dirs, flexible mapping CSV dir, SignalP 6.0 install      | Glycosylation calls with SignalP-aware summaries                                      |
+| **NetPhos** | `netphos/netphos-pipeline.py` | WT/mutant protein FASTA dirs plus mapping CSV dir (Dockerized NetPhos/APE)       | Kinase-specific phosphorylation predictions with cached summaries                     |
+| **Miranda** | `miranda/run_miranda_pipeline.py` | WT transcript FASTA, MirandA binary, miRNA DB, optional mutation metadata/logs     | Δ-based miRNA binding summaries, events, and per-site audits                          |
+| **GeneSplicer** | `genesplicer/genesplicer_ensemble.py` | Genomic FASTA slices, mutation CSV dir, GeneSplicer binary & models                | Donor/acceptor delta summaries, event tables, detailed site audits                    |
+| **SpliceAI** | `spliceai/spliceai-pipeline-controller.py` | Mutation CSVs or pre-built VCFs, reference genome, SpliceAI annotation             | SpliceAI VCFs, parsed consequence tables, adaptive restart + tracking logs            |
+| **RNAfold** | `RNAfold/run_viennaRNA_pipeline.py` | Transcript FASTA, transcript-mapping CSV dir, reference FASTA                     | $ΔΔG$ summaries, Jensen–Shannon divergence metrics, per-position accessibility deltas |
 
 Each script auto-discovers dependencies via `dependencies/utility.py` if the repository layout is preserved.
 
@@ -53,46 +53,45 @@ Each script auto-discovers dependencies via `dependencies/utility.py` if the rep
 
 ### NetNGlyc Pipeline
 
-N-linked glycosylation site prediction with optional SignalP 6.0 integration.
+N-linked glycosylation site prediction with modern SignalP 6.0 integration.
 
-- Dockerized NetNGlyc 1.0 wrapped with modern SignalP predictions.  
-- Single-mutation processing for precise context windows.  
-- Batch orchestration with automatic mode selection for full runs vs. reprocessing.  
-- Aggregated results include SignalP confidence alongside glycosylation calls.  
+- Dockerized NetNGlyc 1.0/SignalP 6.0 stack that runs on Intel + Apple Silicon.  
+- On Linux hosts the pipeline auto-detects native `netNglyc` installations (`--native-netnglyc-bin`, `--force-native`) and falls back to Docker otherwise.  
+- Intelligent FASTA/mapping discovery (any filename/extension) for WT + mutant protein sets.  
+- Per-mutation glyco calls plus SignalP confidence summaries suitable for modeling.  
 
 ### NetPhos Pipeline
 
-Phosphorylation site prediction for serine, threonine, and tyrosine residues.
+Kinase-specific phosphorylation site prediction using the NetPhos/APE system.
 
-- Dockerized NetPhos 3.1 bundled with the APE scoring system.  
-- Per-mutation windowing prevents overscoring due to nearby variants.  
-- Kinase-specific probability outputs and consolidated CSV summaries.  
-- Shared filtering logic mirrors NetNGlyc mutation handling.  
+- On Linux hosts the pipeline auto-detects native APE/NetPhos installations (`--native-ape-path`, `--force-native`), while macOS/Windows reuse the shared NetNGlyc container.  
+- Flexible FASTA/mapping discovery identical to NetNGlyc; supports WT vs mutant comparisons.  
+- Produces kinase-aware probability tables with caching for repeated runs.  
 
 ### Miranda Pipeline
 
-miRNA target site prediction suite.
+WT↔MUT miRNA binding analysis with Δ-based metrics.
 
-- Wraps the `miranda` executable with timeout protection and retry logic.  
-- Offers raw output retention or cleanup depending on storage constraints.  
-- Produces per-mutation binding site calls ready for downstream filtering.  
+- Processes each WT transcript once, reuses its MirandA hits for every mutant, then evaluates mutants in parallel.  
+- Emits summary/events/site tables with Δ-score, competitive binding, and distance-weighted impact metrics.  
+- Validation-aware filtering plus live progress output for large mutation sets.  
 
 ### GeneSplicer Pipeline
 
-Splice site prediction using GeneSplicer.
+WT↔ALT ensemble delta caller for splice donor/acceptor sites.
 
-- ThreadPoolExecutor-managed batching keeps CPU utilization steady.  
-- Temporary file handling cleans up intermediate outputs automatically.  
-- Emits donor/acceptor score tables aligned with exon-aware coordinates.  
+- Runs GeneSplicer on full genomic context (or windowed mode) per gene, compares WT vs ALT, and clusters events.  
+- Generates summary, events, and sites tables with positional shifts, confidence scoring, and QC flags.  
+- Deterministic batching and append-safe outputs enable reproducible re-runs.  
 
 ### SpliceAI Pipeline
 
-Deep learning-based splice site prediction with Nextflow automation.
+Deep learning-based splice site prediction orchestrated by an adaptive controller.
 
-- Converts mutation CSVs into per-gene VCFs and launches SpliceAI.  
-- Handles TensorFlow race conditions for reproducible parallel runs.  
-- Supports RefSeq-to-Ensembl chromosome conversions via exon-aware mappings.  
-- Provides both raw SpliceAI scores and parsed annotations.  
+- `spliceai-pipeline-controller.py` wraps `nextflow run main.nf`, so one command handles VCF generation, SpliceAI inference, and result parsing.  
+- Automatically launches the live tracker and monitors `.nextflow.log` for rapid `exit 134` events; when ≤6 genes thrash, it restarts with `--maxforks tail_maxforks` (default 1) to finish deterministically.  
+- Supports both mutation-driven runs (auto-build per-gene VCFs) and reuse of pre-built VCFs via `--input_vcf_path --skip_vcf_generation`.  
+- Outputs raw SpliceAI VCFs plus exon-aware parsed consequence tables for downstream modeling.  
 
 ### RNAfold Pipeline
 
@@ -119,7 +118,7 @@ Secondary structure impact analysis via ViennaRNA.
 
 ## End-to-End Data Preparation Workflow
 
-Prepare mutation-driven analyses once, then reuse generated assets across pipelines.
+For the vast majority of the pipelines in this repository properly mapped mutations are required for biologically accurate predictions. Therefore running the `exon_aware_mapping.py` first is highly recommended. 
 
 1. **Generate exon-aware assets**
 
@@ -135,7 +134,7 @@ Prepare mutation-driven analyses once, then reuse generated assets across pipeli
 ```
 
    - Produces per-gene ORF, transcript, and genomic FASTA bundles.  
-   - Emits chromosome, genomic-slice, and transcript mapping CSVs (`combined_<GENE>.csv` variants).  
+   - Emits chromosome, genomic-slice, and transcript mapping CSVs (`*{GENE}*.csv`).  
    - Logs validation issues (missing exons, mismatched coordinates).  
 
 2. **Consume validation logs automatically**
@@ -150,7 +149,7 @@ Prepare mutation-driven analyses once, then reuse generated assets across pipeli
 
 4. **Stage outputs for pipelines**
 
-   - Place FASTA bundles and `combined_<GENE>.csv` files into directories used by each pipeline.  
+   - Place FASTA bundles and `*{GENE}*.csv` mapping files into directories used by each pipeline.  
    - NetNGlyc and NetPhos need ORF FASTAs and mapping CSVs.  
    - RNAfold also requires transcript mappings when run with `--transcript-mapping`.  
 

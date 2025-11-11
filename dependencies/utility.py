@@ -17,6 +17,8 @@ from collections import Counter
 from pathlib import Path
 from urllib.parse import unquote
 from Bio import Entrez
+from typing import Dict, List, Tuple
+
 chromosome_map = {
     "GRCh37": {"1": "NC_000001.10", "2": "NC_000002.11", "3": "NC_000003.11", "4": "NC_000004.11", "5": "NC_000005.9",
                "6": "NC_000006.11", "7": "NC_000007.13", "8": "NC_000008.10", "9": "NC_000009.11", "10": "NC_000010.10",
@@ -815,7 +817,7 @@ def download_reference_genome(build, cache_dir="./reference_cache"):
         print(f"Error downloading reference genome: {e}", file=sys.stderr)
         return None
 
-def load_mapping(mapping_file, mapType='transcript'):
+def load_mapping(mapping_file: str, mapType: str ='transcript') -> Dict[str, str]:
     """Load a two-column mapping CSV (mutant→mapping) using the specified column name."""
 
     mapping = {}
@@ -1518,3 +1520,37 @@ def validate_fasta_content(file_path):
 
     except Exception:
         return False
+
+def load_wt_sequences(input_dir: str, wt_header: str = "transcript") -> Dict[str, str]:
+    """
+    Load WT sequences (configured by wt_header) into memory keyed by gene symbol.
+    """
+    input_path = Path(input_dir)
+    if not input_path.exists():
+        raise FileNotFoundError(f"WT fasta directory not found: {input_dir}")
+
+    sequences: Dict[str, str] = {}
+    fasta_files = sorted([f for f in input_path.iterdir() if f.is_file() and f.suffix.lower() in (".fa", ".fasta", ".fna")])
+    print(f"[WT] Scanning {len(fasta_files)} WT FASTA files")
+    for fasta_file in fasta_files:
+        data = read_fasta(str(fasta_file))
+        if not data:
+            continue
+
+        seq = None
+        if wt_header in data and data[wt_header] and data[wt_header].strip():
+            seq = data[wt_header].strip()
+        else:
+            non_empty = [(h, s) for h, s in data.items() if s and s.strip()]
+            if non_empty:
+                seq = max(non_empty, key=lambda kv: len(kv[1]))[1].strip()
+
+        if not seq:
+            continue
+
+        gene = extract_gene_from_filename(fasta_file.name) or fasta_file.stem
+        sequences[gene.upper()] = seq
+
+    header_label = wt_header.upper() if wt_header else "SEQUENCES"
+    print(f"[WT] Loaded {len(sequences)} WT {header_label} into memory")
+    return sequences

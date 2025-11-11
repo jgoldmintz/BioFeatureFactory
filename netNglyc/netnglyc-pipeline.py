@@ -6,6 +6,7 @@ NetNGlyc analyzes FULL sequence with SignalP context
 """
 
 import os
+import csv
 import subprocess
 import tempfile
 import shutil
@@ -18,6 +19,8 @@ import platform
 from datetime import datetime
 import logging
 from concurrent.futures import ProcessPoolExecutor, as_completed
+from typing import Optional
+from Bio.Seq import Seq
 
 
 # Import utility functions  
@@ -26,6 +29,7 @@ sys.path.append(os.path.join(os.path.dirname(__file__), '../dependencies'))
 from utility import (
     read_fasta,
     get_mutation_data_bioAccurate,
+    write_fasta,
     split_fasta_into_batches,
     combine_batch_outputs,
     discover_mapping_files,
@@ -34,7 +38,327 @@ from utility import (
     parse_predictions_with_mutation_filtering,
     load_validation_failures,
     should_skip_mutation,
+    load_wt_sequences,
+    trim_muts,
+    get_mutant_aa,
+    update_str,
+    extract_gene_from_filename,
+    extract_mutation_from_sequence_name,
 )
+
+
+def translate_orf_sequence(nt_sequence: str) -> str:
+    """Translate a nucleotide ORF into an amino acid sequence, trimming trailing stops."""
+    if not nt_sequence:
+        return ""
+    cleaned = nt_sequence.strip().upper().replace("U", "T")
+    if not cleaned:
+        return ""
+    aa_seq = str(Seq(cleaned).translate(to_stop=False))
+    return aa_seq.rstrip('*').strip()
+
+
+def load_wt_sequence_map(input_path: str, wt_header: str = "ORF"):
+    """
+    Load WT nucleotide sequences from a file or directory using shared utility helpers.
+
+    Returns:
+        tuple(dict, tempfile.TemporaryDirectory | None): (gene -> nt sequence, temp dir holder)
+    """
+    source = Path(input_path)
+    temp_dir = None
+
+    if source.is_dir():
+        load_path = str(source)
+    elif source.is_file():
+        temp_dir = tempfile.TemporaryDirectory(prefix="netnglyc_wt_src_")
+        shutil.copy2(str(source), os.path.join(temp_dir.name, source.name))
+        load_path = temp_dir.name
+    else:
+        raise FileNotFoundError(f"Input FASTA path not found: {input_path}")
+
+    sequences = load_wt_sequences(load_path, wt_header=wt_header)
+    return sequences, temp_dir
+
+
+def infer_aamutation_from_nt(mutant_id: str, nt_sequence: str):
+    """Infer the amino-acid mutation string (e.g., K543E) from a nucleotide mutation."""
+    nt_info = get_mutation_data_bioAccurate(mutant_id)
+    if nt_info[0] is None:
+        return None
+    aa_info = get_mutant_aa(nt_info, nt_sequence)
+    if not aa_info:
+        return None
+    (aa_pos, (wt_aa, mut_aa)), _ = aa_info
+    if not wt_aa or not mut_aa:
+        return None
+    aa_pos = int(aa_pos)
+    return aa_pos, wt_aa, mut_aa
+
+
+def build_mutant_sequences_for_gene(
+    gene_name: str,
+    nt_sequence: str,
+    aa_sequence: str,
+    mapping_file: Optional[str],
+    log_path: Optional[str],
+    failure_map: Optional[dict],
+):
+    """Return a dict of {header: sequence} for all mutants of a given gene."""
+    if not mapping_file or not os.path.exists(mapping_file):
+        return {}
+
+    allowed_mutations = None
+    if log_path:
+        try:
+            allowed_mutations = {
+                entry.split(',')[0].strip().upper()
+                for entry in trim_muts(mapping_file, log=log_path, gene_name=gene_name)
+                if entry
+            }
+        except Exception:
+            allowed_mutations = None
+
+    mutant_sequences = {}
+    try:
+        with open(mapping_file, 'r') as handle:
+            reader = csv.DictReader(handle)
+            mutant_keys = ['mutant', 'mutation', 'nt_mutation', 'ntmutant']
+            aa_keys = ['aamutant', 'aa_mutation', 'amino_acid_mutation', 'protein_mutation']
+
+            for row in reader:
+                mutant_id = ""
+                for key in mutant_keys:
+                    if key in row and row[key]:
+                        mutant_id = row[key].strip()
+                        break
+                if not mutant_id:
+                    continue
+
+                mutant_clean = mutant_id.replace(" ", "")
+                if allowed_mutations and mutant_clean.upper() not in allowed_mutations:
+                    continue
+                if should_skip_mutation(gene_name, mutant_clean, failure_map):
+                    continue
+
+                aa_string = ""
+                for key in aa_keys:
+                    if key in row and row[key]:
+                        aa_string = row[key].strip()
+                        break
+
+                pos = None
+                wt_aa = mut_aa = None
+                if aa_string:
+                    pos, nts = get_mutation_data_bioAccurate(aa_string)
+                    if pos is not None and nts:
+                        wt_aa, mut_aa = nts
+                if pos is None or not wt_aa or not mut_aa:
+                    inferred = infer_aamutation_from_nt(mutant_clean, nt_sequence)
+                    if inferred is None:
+                        continue
+                    pos, wt_aa, mut_aa = inferred
+
+                idx = int(pos) - 1
+                if idx < 0 or idx >= len(aa_sequence):
+                    continue
+                if wt_aa and aa_sequence[idx].upper() != wt_aa.upper():
+                    # Skip if reference AA does not match translated ORF
+                    continue
+
+                header = f"{gene_name}-{mutant_clean}"
+                mutant_sequences[header] = update_str(aa_sequence, mut_aa, idx)
+    except Exception as exc:
+        print(f"Warning: Failed to synthesize mutants for {gene_name} ({mapping_file}): {exc}")
+        return {}
+
+    return mutant_sequences
+
+
+def synthesize_gene_fastas(wt_sequences, mapping_lookup, sequence_root, log_path=None, failure_map=None):
+    """Create WT and mutant FASTAs for each gene, returning the directories and summary."""
+    sequence_root = Path(sequence_root)
+    wt_dir = sequence_root / "wt"
+    mut_dir = sequence_root / "mut"
+    wt_dir.mkdir(parents=True, exist_ok=True)
+    mut_dir.mkdir(parents=True, exist_ok=True)
+
+    summary = []
+    for gene_name, nt_seq in wt_sequences.items():
+        gene_name = gene_name.upper()
+        nt_seq_upper = nt_seq.strip().upper()
+        aa_seq = translate_orf_sequence(nt_seq_upper)
+        if not aa_seq:
+            print(f"Skipping {gene_name}: unable to translate ORF")
+            continue
+
+        wt_header = f"{gene_name}-wt"
+        wt_path = wt_dir / f"{gene_name}-wt.fasta"
+        write_fasta(wt_path, {wt_header: aa_seq})
+
+        mapping_file = mapping_lookup.get(gene_name.upper())
+        mutant_sequences = build_mutant_sequences_for_gene(
+            gene_name,
+            nt_seq_upper,
+            aa_seq,
+            mapping_file,
+            log_path,
+            failure_map,
+        )
+
+        mut_path = None
+        if mutant_sequences:
+            mut_path = mut_dir / f"{gene_name}_aa.fasta"
+            write_fasta(mut_path, mutant_sequences)
+
+        summary.append({
+            "gene": gene_name,
+            "wt_path": str(wt_path),
+            "mut_path": str(mut_path) if mut_path else None,
+            "mutant_count": len(mutant_sequences),
+        })
+
+    return wt_dir, mut_dir, summary
+
+
+def normalize_mutation_id(mut_id: str) -> str:
+    """Normalize mutation identifiers to a consistent format used in headers/pkeys."""
+    return (mut_id or "").replace(" ", "").strip().upper()
+
+
+def parse_signalp_summary(file_path: str):
+    """Extract per-sequence SignalP info from NetNGlyc output footer."""
+    summary = {}
+    try:
+        with open(file_path, "r") as handle:
+            for line in handle:
+                line = line.strip()
+                if not line.startswith("# ") or "Signal peptide" not in line:
+                    continue
+                payload = line[2:]
+                if ":" not in payload:
+                    continue
+                seq_id, desc = payload.split(":", 1)
+                seq_id = seq_id.strip()
+                desc = desc.strip()
+                has_signal = "Signal peptide detected" in desc
+                cleavage = None
+                probability = None
+                if "probability" in desc:
+                    try:
+                        prob_str = desc.split("probability:")[-1].strip(") ")
+                        probability = float(prob_str)
+                    except ValueError:
+                        probability = None
+                if "cleavage at position" in desc:
+                    try:
+                        cleavage_token = desc.split("cleavage at position", 1)[1]
+                        cleavage = int(cleavage_token.split()[0])
+                    except (ValueError, IndexError):
+                        cleavage = None
+                summary[seq_id] = {
+                    "has_signal": has_signal,
+                    "probability": probability,
+                    "cleavage_site": cleavage,
+                }
+    except FileNotFoundError:
+        pass
+    return summary
+
+
+def load_mutation_index(mapping_lookup):
+    """Build quick lookup of expected mutations per gene from mapping CSV files."""
+    mutation_index: dict[str, set[str]] = {}
+    for gene, mapping_file in mapping_lookup.items():
+        gene_key = gene.upper()
+        mutation_index.setdefault(gene_key, set())
+        try:
+            with open(mapping_file, "r") as handle:
+                reader = csv.DictReader(handle)
+                for row in reader:
+                    mutant = (
+                        row.get("mutant")
+                        or row.get("mutation")
+                        or row.get("nt_mutation")
+                        or row.get("ntmutant")
+                        or ""
+                    ).strip()
+                    if mutant:
+                        mutation_index[gene_key].add(normalize_mutation_id(mutant))
+        except OSError:
+            continue
+    return mutation_index
+
+
+def normalize_gene_symbol(name: str) -> str:
+    """Normalize a candidate gene token to uppercase canonical form."""
+    cleaned = name.strip()
+    cleaned = cleaned.replace("_wt", "").replace("-wt", "").replace("_WT", "").replace("-WT", "")
+    gene = extract_gene_from_filename(cleaned) or cleaned
+    return gene.upper()
+
+
+def iter_netnglyc_output_files(directory: Path):
+    """Yield NetNGlyc output files (combined and per-sequence) from a directory."""
+    patterns = ["*-netnglyc.out", "seq_*_output.out"]
+    for pattern in patterns:
+        for file_path in directory.glob(pattern):
+            if file_path.is_file():
+                yield file_path
+
+
+def load_signalp_cache(cache_root):
+    """Load cached SignalP summaries from json files under the cache root."""
+    cache_data = {}
+    bases = []
+    if cache_root:
+        bases.append(Path(cache_root))
+        bases.append(Path(cache_root) / ".signalp6_cache")
+    bases.append(Path(os.path.expanduser("~")) / ".signalp6_cache")
+    seen_dirs: set[Path] = set()
+    for base in bases:
+        if not base or not base.exists():
+            continue
+        for pred_file in base.glob("*_sp6_output/prediction_results.txt"):
+            parent = pred_file.parent
+            if parent in seen_dirs:
+                continue
+            seen_dirs.add(parent)
+            try:
+                with open(pred_file, "r") as handle:
+                    for line in handle:
+                        if not line or line.startswith("#"):
+                            continue
+                        parts = line.strip().split("\t")
+                        if len(parts) < 4:
+                            parts = line.strip().split()
+                        if len(parts) < 4:
+                            continue
+                        seq_id = parts[0].strip()
+                        prediction = parts[1].strip().upper()
+                        sp_prob = None
+                        try:
+                            sp_prob = float(parts[3]) if parts[3] else None
+                        except (ValueError, IndexError):
+                            sp_prob = None
+                        cleavage = None
+                        if len(parts) > 4 and parts[4]:
+                            token = parts[4].strip()
+                            try:
+                                if "-" in token:
+                                    cleavage = int(token.split("-")[0])
+                                else:
+                                    cleavage = int(token)
+                            except ValueError:
+                                cleavage = None
+                        cache_data[seq_id] = {
+                            "has_signal": prediction.startswith("SP"),
+                            "probability": sp_prob,
+                            "cleavage_site": cleavage,
+                        }
+            except OSError:
+                continue
+    return cache_data
 
 def _process_single_sequence_worker(args):
     """
@@ -863,6 +1187,8 @@ class RobustDockerNetNGlyc:
                     if len(parts) >= 5:
                         try:
                             seq_name = parts[0]
+                            if seq_name not in predictions_by_sequence:
+                                predictions_by_sequence[seq_name] = []
                             position = int(parts[1])
                             sequon = parts[2]  # e.g., NKSE
                             potential = float(parts[3])
@@ -974,9 +1300,21 @@ class RobustDockerNetNGlyc:
         
         results = []
         failure_map = failure_map or {}
+        wt_sequences = {}
+        wt_temp_holder = None
+        
+        if fasta_dir:
+            try:
+                wt_sequences, wt_temp_holder = load_wt_sequence_map(fasta_dir, wt_header="ORF")
+            except Exception as exc:
+                if self.verbose:
+                    print(f"Warning: unable to load WT sequences for mutant inference: {exc}")
+                wt_sequences = {}
         
         if mapping_dir is None:
             print("ERROR: mapping_dir is required for mutant parsing")
+            if wt_temp_holder:
+                wt_temp_holder.cleanup()
             return results
         
         # Import shared utility functions
@@ -993,26 +1331,23 @@ class RobustDockerNetNGlyc:
         # Group files by gene for batch combination
         gene_files = {}
         
-        # Process regular files
+        # Build gene→files map by parsing names directly (avoid reading .out as FASTA)
         for file_path in regular_files:
             filename = file_path.stem  # Remove .out extension
             if '_aa-netnglyc' in filename:
-                gene = ExtractGeneFromFASTA(str(file_path))
-                if gene and gene not in gene_files:
-                    gene_files[gene] = []
+                gene = extract_gene_from_filename(filename)
                 if gene:
-                    gene_files[gene].append(file_path)
+                    gene = gene.upper()
+                    gene_files.setdefault(gene, []).append(file_path)
         
-        # Process batch files  
+        # Process batch files using the same filename-based gene extraction
         for file_path in batch_files:
             filename = file_path.stem  # Remove .out extension
-            # Extract gene from batch file content
             if '_aa-netnglyc-batch-' in filename:
-                gene = ExtractGeneFromFASTA(str(file_path))
-                if gene and gene not in gene_files:
-                    gene_files[gene] = []
+                gene = extract_gene_from_filename(filename)
                 if gene:
-                    gene_files[gene].append(file_path)
+                    gene = gene.upper()
+                    gene_files.setdefault(gene, []).append(file_path)
         
         #print(f"Found files for {len(gene_files)} genes:")
         for gene, files in gene_files.items():
@@ -1100,11 +1435,33 @@ class RobustDockerNetNGlyc:
             # Read mapping file
             mapping_dict = {}
             try:
+                wt_nt_seq = wt_sequences.get(gene.upper(), "").upper() if wt_sequences else ""
                 with open(mapping_file, 'r') as f:
                     reader = csv.DictReader(f)
                     for row in reader:
-                        ntposnt = row['mutant']  # e.g., "C3066A"
-                        aaposaa = row['aamutant']  # e.g., "S1022N"
+                        ntposnt = (
+                            row.get('mutant')
+                            or row.get('mutation')
+                            or row.get('nt_mutation')
+                            or row.get('ntmutant')
+                            or ""
+                        ).strip()
+                        if not ntposnt:
+                            continue
+                        aaposaa = (
+                            row.get('aamutant')
+                            or row.get('aa_mutation')
+                            or row.get('amino_acid_mutation')
+                            or row.get('protein_mutation')
+                            or ""
+                        ).strip()
+                        if not aaposaa and wt_nt_seq:
+                            inferred = infer_aamutation_from_nt(ntposnt, wt_nt_seq)
+                            if inferred:
+                                aa_pos, wt_aa, mut_aa = inferred
+                                aaposaa = f"{wt_aa}{aa_pos}{mut_aa}"
+                        if not aaposaa:
+                            continue
                         mapping_dict[ntposnt] = aaposaa
                 if failure_map:
                     skip_set = {m.upper() for m in failure_map.get(gene.upper(), set())}
@@ -1163,6 +1520,8 @@ class RobustDockerNetNGlyc:
                 print(f"  Error parsing NetNGlyc output {combined_file_path}: {e}")
                 continue
         
+        if wt_temp_holder:
+            wt_temp_holder.cleanup()
         return results
 
     def parse_wildtype_files(self, input_dir, mapping_dir, threshold=0.5):
@@ -1240,6 +1599,450 @@ class RobustDockerNetNGlyc:
                     print(f"Skipped {stop_codons_skipped} mutations with stop codons for {gene}")
         
         return results
+
+    def collect_wt_sites(self, directories, threshold, signalp_cache=None):
+        """Collect WT site predictions across provided directories."""
+        wt_sites_by_gene: dict[str, list[dict]] = {}
+        wt_signalp: dict[str, dict] = {}
+        site_rows = []
+        directories = [Path(d) for d in directories if d]
+        signalp_cache = signalp_cache or {}
+        for directory in directories:
+            if not directory.exists():
+                continue
+            for file_path in iter_netnglyc_output_files(directory):
+                predictions_by_seq = self.parse_netnglyc_multisequence_output(
+                    str(file_path), threshold=0.0
+                )
+                signalp_map = parse_signalp_summary(str(file_path))
+                for seq_name, predictions in predictions_by_seq.items():
+                    gene_key = normalize_gene_symbol(seq_name)
+                    seq_signalp = (
+                        signalp_map.get(seq_name)
+                        or signalp_cache.get(seq_name)
+                        or {}
+                    )
+                    for pred in predictions:
+                        jury_score = self._parse_jury_score(pred["jury_agreement"])
+                        row = {
+                            "pkey": f"{gene_key}-WT",
+                            "Gene": gene_key,
+                            "allele": "WT",
+                            "seq_name": seq_name,
+                            "position": pred["position"],
+                            "sequon": pred["sequon"],
+                            "potential": pred["potential"],
+                            "jury_agreement": pred["jury_agreement"],
+                            "jury_agreement_score": jury_score,
+                            "n_glyc_result": pred["n_glyc_result"],
+                            "n_glyc_result_code": self._encode_n_glyc_result(
+                                pred["n_glyc_result"]
+                            ),
+                            "signalp_has_signal": self._encode_optional_bool(
+                                seq_signalp.get("has_signal")
+                            ),
+                            "signalp_probability": seq_signalp.get("probability"),
+                            "signalp_cleavage": seq_signalp.get("cleavage_site"),
+                            "above_threshold": self._encode_bool(
+                                pred["potential"] >= threshold
+                            ),
+                        }
+                        site_rows.append(row)
+                        wt_sites_by_gene.setdefault(gene_key, []).append(row)
+                    if seq_name.lower().endswith("-wt") and seq_signalp:
+                        wt_signalp[gene_key] = seq_signalp
+                    elif gene_key not in wt_signalp and seq_signalp:
+                        wt_signalp[gene_key] = seq_signalp
+        return wt_sites_by_gene, wt_signalp, site_rows
+
+    def collect_mutant_sites(self, directories, threshold, mutation_index=None, signalp_cache=None):
+        """Collect mutant site predictions keyed by pkey."""
+        mut_sites_by_pkey: dict[str, list[dict]] = {}
+        mut_signalp: dict[str, dict] = {}
+        pkey_gene_map: dict[str, str] = {}
+        site_rows = []
+        directories = [Path(d) for d in directories if d]
+        mutation_index = mutation_index or {}
+        signalp_cache = signalp_cache or {}
+        for directory in directories:
+            if not directory.exists():
+                continue
+            for file_path in iter_netnglyc_output_files(directory):
+                stem = file_path.stem
+                if "-wt-netnglyc" in stem:
+                    continue
+                predictions_by_seq = self.parse_netnglyc_multisequence_output(
+                    str(file_path), threshold=0.0
+                )
+                signalp_map = parse_signalp_summary(str(file_path))
+                for seq_name, predictions in predictions_by_seq.items():
+                    gene_name, mutation_id = extract_mutation_from_sequence_name(seq_name)
+                    if not mutation_id:
+                        continue
+                    gene_key = (gene_name or "").upper()
+                    mut_id_norm = normalize_mutation_id(mutation_id)
+                    if mutation_index and gene_key in mutation_index:
+                        if mut_id_norm not in mutation_index[gene_key]:
+                            continue
+                    pkey = f"{gene_key}-{mut_id_norm}"
+                    seq_signalp = signalp_map.get(seq_name, {})
+                    if not seq_signalp:
+                        seq_signalp = signalp_cache.get(seq_name, {})
+                    pkey_gene_map[pkey] = gene_key
+                    mut_signalp[pkey] = seq_signalp
+                    for pred in predictions:
+                        jury_score = self._parse_jury_score(pred["jury_agreement"])
+                        row = {
+                            "pkey": pkey,
+                            "Gene": gene_key,
+                            "allele": "MUT",
+                            "seq_name": seq_name,
+                            "position": pred["position"],
+                            "sequon": pred["sequon"],
+                            "potential": pred["potential"],
+                            "jury_agreement": pred["jury_agreement"],
+                            "jury_agreement_score": jury_score,
+                            "n_glyc_result": pred["n_glyc_result"],
+                            "n_glyc_result_code": self._encode_n_glyc_result(
+                                pred["n_glyc_result"]
+                            ),
+                            "signalp_has_signal": self._encode_optional_bool(
+                                seq_signalp.get("has_signal")
+                            ),
+                            "signalp_probability": seq_signalp.get("probability"),
+                            "signalp_cleavage": seq_signalp.get("cleavage_site"),
+                            "above_threshold": self._encode_bool(
+                                pred["potential"] >= threshold
+                            ),
+                        }
+                        site_rows.append(row)
+                        mut_sites_by_pkey.setdefault(pkey, []).append(row)
+        return mut_sites_by_pkey, mut_signalp, site_rows, pkey_gene_map
+
+    def _classify_netnglyc_event(self, wt_site, mut_site, threshold, delta_threshold=0.05):
+        wt_potential = wt_site["potential"] if wt_site else None
+        mut_potential = mut_site["potential"] if mut_site else None
+        above_wt = wt_potential is not None and wt_potential >= threshold
+        above_mut = mut_potential is not None and mut_potential >= threshold
+        if above_wt and above_mut:
+            delta = mut_potential - wt_potential
+            if delta >= delta_threshold:
+                return "strengthened"
+            if delta <= -delta_threshold:
+                return "weakened"
+            return "stable"
+        if above_wt and not above_mut:
+            return "lost"
+        if not above_wt and above_mut:
+            return "gained"
+        if wt_site or mut_site:
+            return "subthreshold"
+        return "no_site"
+
+    def _encode_bool(self, value):
+        return 1 if value else 0
+
+    def _encode_optional_bool(self, value):
+        if value is None:
+            return None
+        return 1 if value else 0
+
+    def _parse_jury_score(self, jury_string):
+        if not jury_string or "/" not in jury_string:
+            return None
+        cleaned = jury_string.strip().strip("()")
+        try:
+            num, den = cleaned.split("/")
+            num = float(num)
+            den = float(den)
+            if den == 0:
+                return None
+            return num / den
+        except (ValueError, ZeroDivisionError):
+            return None
+
+    def _encode_n_glyc_result(self, result):
+        scale = {
+            "+++": 3,
+            "++": 2,
+            "+": 1,
+            "-": -1,
+            "--": -2,
+            "---": -3,
+        }
+        return scale.get((result or "").strip(), 0)
+
+    def _encode_classification(self, classification):
+        mapping = {
+            "gained": 2,
+            "strengthened": 1,
+            "stable": 0,
+            "subthreshold": -1,
+            "lost": -2,
+            "weakened": -1,
+            "no_site": 0,
+        }
+        return mapping.get(classification, 0)
+
+    def _summarize_netnglyc_variant(
+        self,
+        gene,
+        pkey,
+        wt_sites,
+        mut_sites,
+        wt_sig,
+        mut_sig,
+        threshold,
+    ):
+        events = []
+        wt_by_pos = {site["position"]: site for site in wt_sites}
+        mut_by_pos = {site["position"]: site for site in mut_sites}
+        all_positions = sorted(set(wt_by_pos.keys()) | set(mut_by_pos.keys()))
+        for pos in all_positions:
+            wt_site = wt_by_pos.get(pos)
+            mut_site = mut_by_pos.get(pos)
+            wt_potential = wt_site["potential"] if wt_site else None
+            mut_potential = mut_site["potential"] if mut_site else None
+            delta = None
+            if wt_potential is not None or mut_potential is not None:
+                delta = (mut_potential or 0.0) - (wt_potential or 0.0)
+            classification = self._classify_netnglyc_event(wt_site, mut_site, threshold)
+            cleavage = wt_sig.get("cleavage_site") if wt_sig else None
+            if cleavage is None and mut_sig:
+                cleavage = mut_sig.get("cleavage_site")
+            post_cleavage = None
+            if cleavage is not None:
+                post_cleavage = pos >= cleavage
+            events.append(
+                {
+                    "pkey": pkey,
+                    "Gene": gene,
+                    "position": pos,
+                    "wt_potential": wt_potential,
+                    "mut_potential": mut_potential,
+                    "delta": delta,
+                    "classification": classification,
+                    "wt_sequon": wt_site["sequon"] if wt_site else None,
+                    "mut_sequon": mut_site["sequon"] if mut_site else None,
+                    "wt_above_threshold": self._encode_bool(
+                        wt_potential is not None and wt_potential >= threshold
+                    ),
+                    "mut_above_threshold": self._encode_bool(
+                        mut_potential is not None and mut_potential >= threshold
+                    ),
+                    "classification_code": self._encode_classification(classification),
+                    "post_cleavage": self._encode_bool(post_cleavage),
+                }
+            )
+        n_sites_wt = sum(1 for site in wt_sites if site["potential"] >= threshold)
+        n_sites_mut = sum(1 for site in mut_sites if site["potential"] >= threshold)
+        classification_counts = {
+            "gained": 0,
+            "lost": 0,
+            "strengthened": 0,
+            "weakened": 0,
+            "stable": 0,
+        }
+        deltas = []
+        post_cleavage_delta = 0.0
+        for event in events:
+            cls = event["classification"]
+            if cls in classification_counts:
+                classification_counts[cls] += 1
+            if event["delta"] is not None:
+                abs_delta = abs(event["delta"])
+                deltas.append(abs_delta)
+                if event["post_cleavage"]:
+                    post_cleavage_delta += abs_delta
+        sum_abs_delta = sum(deltas)
+        max_abs_delta = max(deltas) if deltas else 0.0
+        top_event = None
+        if events:
+            top_event = max(
+                events,
+                key=lambda ev: (abs(ev["delta"] or 0), ev["classification"] == "gained"),
+            )
+        frac_post_cleavage = (
+            (post_cleavage_delta / sum_abs_delta) if sum_abs_delta > 0 else 0.0
+        )
+        qc_flags = []
+        if not wt_sites:
+            qc_flags.append("missing_wt")
+        if not mut_sites:
+            qc_flags.append("missing_mut")
+        if sum_abs_delta == 0 and (n_sites_wt or n_sites_mut):
+            qc_flags.append("no_delta")
+        if wt_sig is None and mut_sig is None:
+            qc_flags.append("no_signalp")
+        summary = {
+            "pkey": pkey,
+            "Gene": gene,
+            "n_sites_wt": n_sites_wt,
+            "n_sites_mut": n_sites_mut,
+            "count_gained": classification_counts["gained"],
+            "count_lost": classification_counts["lost"],
+            "count_strengthened": classification_counts["strengthened"],
+            "count_weakened": classification_counts["weakened"],
+            "count_stable": classification_counts["stable"],
+            "max_abs_delta": max_abs_delta,
+            "sum_abs_delta": sum_abs_delta,
+            "top_event_type": top_event["classification"] if top_event else None,
+            "top_event_delta": top_event["delta"] if top_event else None,
+            "top_event_position": top_event["position"] if top_event else None,
+            "top_event_classification_code": self._encode_classification(
+                top_event["classification"]
+            )
+            if top_event
+            else None,
+            "wt_signalp_has_signal": self._encode_optional_bool(
+                wt_sig.get("has_signal") if wt_sig else None
+            ),
+            "wt_signalp_probability": None
+            if wt_sig is None
+            else wt_sig.get("probability"),
+            "wt_signalp_cleavage": None
+            if wt_sig is None
+            else wt_sig.get("cleavage_site"),
+            "mut_signalp_has_signal": self._encode_optional_bool(
+                mut_sig.get("has_signal") if mut_sig else None
+            ),
+            "mut_signalp_probability": None
+            if mut_sig is None
+            else mut_sig.get("probability"),
+            "mut_signalp_cleavage": None
+            if mut_sig is None
+            else mut_sig.get("cleavage_site"),
+            "frac_effect_post_cleavage": frac_post_cleavage,
+            "qc_flags": ",".join(qc_flags) if qc_flags else "",
+        }
+        for event in events:
+            event["wt_above_threshold"] = self._encode_bool(
+                event["wt_above_threshold"]
+            )
+            event["mut_above_threshold"] = self._encode_bool(
+                event["mut_above_threshold"]
+            )
+            event["post_cleavage"] = self._encode_optional_bool(event["post_cleavage"])
+            event["classification_code"] = self._encode_classification(
+                event["classification"]
+            )
+        return summary, events
+
+    def _write_tsv(self, path, fieldnames, rows):
+        directory = os.path.dirname(path)
+        if directory:
+            os.makedirs(directory, exist_ok=True)
+        with open(path, "w", newline="") as handle:
+            writer = csv.DictWriter(handle, fieldnames=fieldnames, delimiter="\t")
+            writer.writeheader()
+            writer.writerows(rows)
+
+    def build_netnglyc_ensemble(
+        self,
+        wt_dirs,
+        mut_dirs,
+        mapping_lookup,
+        threshold,
+        summary_path,
+        signalp_cache=None,
+    ):
+        mutation_index = load_mutation_index(mapping_lookup)
+        signalp_cache = signalp_cache or load_signalp_cache(self.cache_dir)
+        wt_sites_by_gene, wt_signalp, wt_site_rows = self.collect_wt_sites(
+            wt_dirs, threshold, signalp_cache=signalp_cache
+        )
+        (
+            mut_sites_by_pkey,
+            mut_signalp,
+            mut_site_rows,
+            pkey_gene_map,
+        ) = self.collect_mutant_sites(
+            mut_dirs, threshold, mutation_index, signalp_cache=signalp_cache
+        )
+        sites_rows = wt_site_rows + mut_site_rows
+        expected_pkeys = set(mut_sites_by_pkey.keys())
+        for gene, mutation_ids in mutation_index.items():
+            for mut_id in mutation_ids:
+                expected_pkeys.add(f"{gene}-{mut_id}")
+                pkey_gene_map.setdefault(f"{gene}-{mut_id}", gene)
+        summary_rows = []
+        events_rows = []
+        for pkey in sorted(expected_pkeys):
+            gene = pkey_gene_map.get(pkey)
+            if not gene:
+                gene = pkey.split("-", 1)[0]
+            wt_sites = wt_sites_by_gene.get(gene, [])
+            mut_sites = mut_sites_by_pkey.get(pkey, [])
+            wt_sig = wt_signalp.get(gene)
+            mut_sig = mut_signalp.get(pkey)
+            summary, events = self._summarize_netnglyc_variant(
+                gene, pkey, wt_sites, mut_sites, wt_sig or {}, mut_sig or {}, threshold
+            )
+            summary_rows.append(summary)
+            events_rows.extend(events)
+        events_fields = [
+            "pkey",
+            "Gene",
+            "position",
+            "wt_potential",
+            "mut_potential",
+            "delta",
+            "classification",
+            "classification_code",
+            "wt_sequon",
+            "mut_sequon",
+            "wt_above_threshold",
+            "mut_above_threshold",
+            "post_cleavage",
+        ]
+        summary_fields = [
+            "pkey",
+            "Gene",
+            "n_sites_wt",
+            "n_sites_mut",
+            "count_gained",
+            "count_lost",
+            "count_strengthened",
+            "count_weakened",
+            "count_stable",
+            "max_abs_delta",
+            "sum_abs_delta",
+            "top_event_type",
+            "top_event_classification_code",
+            "top_event_delta",
+            "top_event_position",
+            "wt_signalp_has_signal",
+            "wt_signalp_probability",
+            "wt_signalp_cleavage",
+            "mut_signalp_has_signal",
+            "mut_signalp_probability",
+            "mut_signalp_cleavage",
+            "frac_effect_post_cleavage",
+            "qc_flags",
+        ]
+        sites_fields = [
+            "pkey",
+            "Gene",
+            "allele",
+            "seq_name",
+            "position",
+            "sequon",
+            "potential",
+            "jury_agreement",
+            "jury_agreement_score",
+            "n_glyc_result",
+            "n_glyc_result_code",
+            "signalp_has_signal",
+            "signalp_probability",
+            "signalp_cleavage",
+            "above_threshold",
+        ]
+        summary_path = Path(summary_path)
+        events_path = summary_path.with_suffix(".events.tsv")
+        sites_path = summary_path.with_suffix(".sites.tsv")
+        self._write_tsv(str(summary_path), summary_fields, summary_rows)
+        self._write_tsv(str(events_path), events_fields, events_rows)
+        self._write_tsv(str(sites_path), sites_fields, sites_rows)
 
     def save_parsed_results(self, results, output_file):
         """Save parsed results to TSV file"""
@@ -1846,6 +2649,109 @@ def clear_all_caches(cache_dir=None):
     return cleared
 
 
+def run_full_pipeline_mode(args, failure_map, parser):
+    """Execute the full NetNGlyc pipeline: synthesize FASTAs, run NetNGlyc, parse outputs."""
+    if not args.input or not args.output:
+        parser.error("For full-pipeline mode: both input (FASTA file/directory) and output (TSV file) are required")
+
+    if not args.mapping_dir:
+        parser.error("For full-pipeline mode: --mapping-dir is REQUIRED (directory containing mutation mapping CSV files)")
+
+    temp_output_dir = tempfile.mkdtemp(prefix="netnglyc_outputs_")
+    temp_sequence_dir = tempfile.mkdtemp(prefix="netnglyc_sequences_")
+    wt_temp_holder = None
+
+    try:
+        wt_sequences, wt_temp_holder = load_wt_sequence_map(args.input, wt_header="ORF")
+        if not wt_sequences:
+            parser.error(f"No WT ORF sequences were found in {args.input}")
+
+        mapping_lookup = {
+            gene.upper(): path for gene, path in discover_mapping_files(args.mapping_dir).items()
+        }
+        if not mapping_lookup:
+            parser.error(f"No mapping CSV files found in {args.mapping_dir}")
+
+        wt_fasta_dir, mut_fasta_dir, build_summary = synthesize_gene_fastas(
+            wt_sequences,
+            mapping_lookup,
+            temp_sequence_dir,
+            log_path=args.log,
+            failure_map=failure_map,
+        )
+
+        wt_fastas = sorted(Path(wt_fasta_dir).glob("*.fasta"))
+        if not wt_fastas:
+            parser.error("Failed to synthesize any WT FASTA files for NetNGlyc")
+        mut_fastas = sorted(Path(mut_fasta_dir).glob("*.fasta"))
+
+        print("\n=== FASTA synthesis summary ===")
+        for entry in build_summary:
+            mut_msg = f"{entry['mutant_count']} mutants" if entry['mutant_count'] else "no mutants"
+            print(f"  {entry['gene']}: WT -> {entry['wt_path']} | Mutants -> {mut_msg}")
+        print("=" * 60)
+
+        wt_outputs_dir = Path(temp_output_dir) / "wt"
+        mut_outputs_dir = Path(temp_output_dir) / "mut"
+        wt_outputs_dir.mkdir(parents=True, exist_ok=True)
+        mut_outputs_dir.mkdir(parents=True, exist_ok=True)
+
+        processing_mode = "single" if args.single_file else args.processing_mode
+
+        with RobustDockerNetNGlyc(
+            docker_image=args.docker_image,
+            use_signalp=True,
+            max_workers=args.workers,
+            cache_dir=args.cache_dir,
+            docker_timeout=args.batch_timeout,
+            keep_intermediates=args.keep_intermediates,
+            verbose=args.verbose
+        ) as processor:
+
+            print("\nRunning NetNGlyc on WT amino acid FASTAs...")
+            wt_results_summary = processor.process_directory(
+                str(wt_fasta_dir),
+                str(wt_outputs_dir),
+                processing_mode=processing_mode
+            )
+            print(f"WT NetNGlyc runs completed: {wt_results_summary['success']}/{wt_results_summary['total']}")
+
+            if mut_fastas:
+                print("\nRunning NetNGlyc on mutant amino acid FASTAs...")
+                mut_results_summary = processor.process_directory(
+                    str(mut_fasta_dir),
+                    str(mut_outputs_dir),
+                    processing_mode=processing_mode
+                )
+                print(f"Mutant NetNGlyc runs completed: {mut_results_summary['success']}/{mut_results_summary['total']}")
+            else:
+                print("No mutant FASTA files were generated; skipping mutant NetNGlyc execution")
+
+            print("\nBuilding NetNGlyc ensemble outputs...")
+            signalp_cache = load_signalp_cache(args.cache_dir)
+            processor.build_netnglyc_ensemble(
+                wt_dirs=[str(wt_outputs_dir)],
+                mut_dirs=[str(mut_outputs_dir)],
+                mapping_lookup=mapping_lookup,
+                threshold=args.threshold,
+                summary_path=args.output,
+                signalp_cache=signalp_cache,
+            )
+            print(f"NetNGlyc ensemble outputs written to {args.output}")
+
+    finally:
+        if wt_temp_holder:
+            wt_temp_holder.cleanup()
+        if args.keep_intermediates:
+            print(f"WT/Mutant FASTAs saved in {temp_sequence_dir}")
+            print(f"Raw NetNGlyc outputs saved in {temp_output_dir}")
+        else:
+            shutil.rmtree(temp_sequence_dir, ignore_errors=True)
+            shutil.rmtree(temp_output_dir, ignore_errors=True)
+
+    return 0
+
+
 def main():
     import argparse
 
@@ -1865,10 +2771,8 @@ def main():
                         help="Clear all cached results and exit (no other args required)")
     parser.add_argument("--mode", choices=["process", "parse", "full-pipeline"], default="process",
                         help="Processing mode: 'process' (run NetNGlyc only), 'parse' (parse existing outputs), 'full-pipeline' (process + parse)")
-    parser.add_argument("--mapping-dir", 
-                        help="Directory containing mutation mapping CSV files (REQUIRED for wildtype parsing in parse/full-pipeline modes)")
-    parser.add_argument("--is-mutant", action="store_true",
-                        help="Parse mutant files vs wildtype files (affects parsing logic)")
+    parser.add_argument("--mapping-dir",
+                        help="Directory containing mutation mapping CSV files (REQUIRED for parsing modes)")
     parser.add_argument("--threshold", type=float, default=0.5,
                         help="Minimum glycosylation potential threshold for predictions (default: 0.5)")
     parser.add_argument("--batch-size", type=int, default=100,
@@ -1888,7 +2792,7 @@ def main():
                         help="Validation log file or directory to skip failed mutations (mutant modes only)")
 
     args = parser.parse_args()
-    failure_map = load_validation_failures(args.log) if (args.log and args.is_mutant) else {}
+    failure_map = load_validation_failures(args.log) if args.log else {}
 
     # Handle cache clearing
     if args.clear_cache:
@@ -1904,48 +2808,45 @@ def main():
 
     if args.test:
         print("Running test mode...")
-        test_fasta = "test_abcb1.fasta"
-        test_output = "test_abcb1_netnglyc.out"
+        test_root = tempfile.mkdtemp(prefix="netnglyc_test_")
+        fasta_dir = Path(test_root) / "wt"
+        mapping_dir = Path(test_root) / "mapping"
+        fasta_dir.mkdir(parents=True, exist_ok=True)
+        mapping_dir.mkdir(parents=True, exist_ok=True)
 
-        # Create test file with ABCB1 fragment
-        with open(test_fasta, 'w') as f:
-            f.write(">ABCB1_HUMAN\n")
-            f.write("MDLEGDRNGGAKKKNFFKLNNKSEKDKKEKKPTVSVFSMFRYSNWLDKLYMVVGTLAAI\n")
-            f.write("IHGAGLPLMMLVFGEMTDIFANAGNLEDLMSNITNRSDINDTGFFMNLEEDMTRYAYY\n")
+        test_fasta_path = fasta_dir / "ABCB1_nt.fasta"
+        test_mapping_path = mapping_dir / "ABCB1_mapping.csv"
+        test_output_tsv = Path("test_abcb1_results.tsv")
+        if test_output_tsv.exists():
+            test_output_tsv.unlink()
 
-        with RobustDockerNetNGlyc(
-                docker_image=args.docker_image,
-                use_signalp=True,
-                cache_dir=args.cache_dir,
-                docker_timeout=args.batch_timeout,
-                verbose=args.verbose
-        ) as processor:
-            success, output, error = processor.process_single_fasta(
-                test_fasta, test_output, 0
-            )
+        test_nt_sequence = (
+            "ATGGATCTGGAAGGTGATCGTAATGGTGGTGCTAAAAAAAAAAATTTTTTTAAACTGAAT"
+        )
 
-            if success:
-                print("\nTest successful!")
-                with open(test_output, 'r') as f:
-                    content = f.read()
-                    if "NITN" in content:
-                        print("Found expected NITN glycosylation site")
+        with open(test_fasta_path, 'w') as handle:
+            handle.write(">orf\n")
+            handle.write(test_nt_sequence + "\n")
 
-                    # Check if SignalP was properly integrated
-                    if "SignalP is not configured" not in content:
-                        print("SignalP integration working!")
-                    else:
-                        print("WARNING: SignalP stub not recognized by NetNGlyc (but analysis still works)")
+        with open(test_mapping_path, 'w', newline='') as handle:
+            writer = csv.writer(handle)
+            writer.writerow(["mutant", "aamutant"])
+            writer.writerow(["G10A", ""])
+            writer.writerow(["A22G", "N8D"])
 
-                    print("\nOutput preview:")
-                    print(content[:1000])
-            else:
-                print(f"Test failed: {error}")
+        test_args = argparse.Namespace(**vars(args))
+        test_args.input = str(fasta_dir)
+        test_args.output = str(test_output_tsv)
+        test_args.mapping_dir = str(mapping_dir)
+        test_args.mode = "full-pipeline"
+        test_args.test = False
 
-        # Clean up
-        if os.path.exists(test_fasta):
-            os.remove(test_fasta)
-        return 0 if success else 1
+        try:
+            run_full_pipeline_mode(test_args, {}, parser)
+            print(f"\nTest pipeline completed successfully. Parsed TSV: {test_output_tsv}")
+            return 0
+        finally:
+            shutil.rmtree(test_root, ignore_errors=True)
 
     # Handle parsing mode
     if args.mode == "parse":
@@ -1956,157 +2857,38 @@ def main():
         if not args.mapping_dir:
             parser.error("For parse mode: --mapping-dir is REQUIRED (directory containing mutation mapping CSV files)")
         
+        mapping_lookup = discover_mapping_files(args.mapping_dir)
         processor = RobustDockerNetNGlyc(
-            docker_image=args.docker_image, 
-            use_signalp=False, 
+            docker_image=args.docker_image,
+            use_signalp=False,
+            cache_dir=args.cache_dir,
             docker_timeout=args.batch_timeout,
-            verbose=args.verbose
+            verbose=args.verbose,
         )
-        
-        if args.is_mutant:
-            print(f"Parsing mutant NetNGlyc files from {args.input}")
-            print("Mode: Mutant parsing using wildtype logic with mapping files")
-            results = processor.parse_mutant_files(
-                args.input,
-                args.threshold,
-                mapping_dir=args.mapping_dir,
-                failure_map=failure_map,
-            )
-        else:
-            print(f"Parsing wildtype NetNGlyc files from {args.input}")
-            print(f"Mode: Wildtype parsing (using mapping files from {args.mapping_dir})")
-            results = processor.parse_wildtype_files(args.input, args.mapping_dir, args.threshold)
-            
-        processor.save_parsed_results(results, args.output)
+        input_path = Path(args.input)
+        wt_dirs = []
+        mut_dirs = []
+        if (input_path / "wt").exists():
+            wt_dirs.append(str(input_path / "wt"))
+        wt_dirs.append(str(input_path))
+        if (input_path / "mut").exists():
+            mut_dirs.append(str(input_path / "mut"))
+        mut_dirs.append(str(input_path))
+
+        signalp_cache = load_signalp_cache(args.cache_dir)
+        processor.build_netnglyc_ensemble(
+            wt_dirs=wt_dirs,
+            mut_dirs=mut_dirs,
+            mapping_lookup=mapping_lookup,
+            threshold=args.threshold,
+            summary_path=args.output,
+            signalp_cache=signalp_cache,
+        )
+        print(f"Wrote NetNGlyc ensemble summary to {args.output}")
         return 0
         
     elif args.mode == "full-pipeline":
-        if not args.input or not args.output:
-            parser.error("For full-pipeline mode: both input (FASTA file/directory) and output (TSV file) are required")
-        
-        # Validate full-pipeline mode requirements
-        if not args.is_mutant and not args.mapping_dir:
-            parser.error("For wildtype full-pipeline (without --is-mutant): --mapping-dir is REQUIRED (directory containing mutation mapping CSV files)")
-        
-        # Create temporary directory for NetNGlyc outputs
-        import tempfile
-        temp_output_dir = tempfile.mkdtemp(prefix="netnglyc_outputs_")
-        
-        try:
-            # Step 1: Process FASTA files
-            #print("Step 1: Processing FASTA files with NetNGlyc...")
-            
-            with RobustDockerNetNGlyc(
-                docker_image=args.docker_image,
-                use_signalp=True,
-                max_workers=args.workers,
-                cache_dir=args.cache_dir,
-                docker_timeout=args.batch_timeout,
-                keep_intermediates=args.keep_intermediates,
-                verbose=args.verbose
-            ) as processor:
-                
-                if os.path.isfile(args.input):
-                    # Single file - use intelligent processing mode selection  
-                    input_basename = os.path.basename(args.input)
-                    # Remove any FASTA extension and add -netnglyc.out
-                    for ext in ['.fasta', '.fa', '.fas', '.fna']:
-                        if input_basename.lower().endswith(ext):
-                            input_basename = input_basename[:-len(ext)]
-                            break
-                    output_file = os.path.join(temp_output_dir, f"{input_basename}-netnglyc.out")
-                    
-                    # Detect optimal processing mode
-                    if args.single_file:
-                        processing_mode = "single"
-                        #print("User forced single-file processing (no batching)")
-                    else:
-                        processing_mode = processor.detect_processing_mode(args.input, args.processing_mode)
-                    
-                    # Execute based on detected/selected mode
-                    if processing_mode == "single":
-                        #print("Using single Docker container processing")
-                        success, output, error = processor.process_single_fasta(args.input, output_file, 0)
-                    elif processing_mode == "parallel":
-                        #print(f"Using parallel Docker containers (max workers: {args.workers})")
-                        success, output, error = processor.process_parallel_docker(
-                            args.input, output_file, args.workers
-                        )
-                    elif processing_mode == "batch":
-                        #print(f"Using batch processing (batch size: {args.batch_size})")
-                        success, output, error = processor.process_fasta_batched(
-                            args.input, output_file, args.batch_size, 0
-                        )
-                    elif processing_mode == "sequential":
-                        #print("Using sequential processing (one-by-one)")
-                        # For sequential, use single processing but could add specific logic
-                        success, output, error = processor.process_single_fasta(args.input, output_file, 0)
-                    else:
-                        print(f"Unknown processing mode: {processing_mode}, defaulting to single")
-                        success, output, error = processor.process_single_fasta(args.input, output_file, 0)
-                    
-                    # Validate output if processing succeeded
-                    if success:
-                        with open(output_file, 'r') as f:
-                            output_content = f.read()
-                        
-                        expected_seq_count = processor.count_sequences_in_fasta(args.input)
-                        is_valid, warnings, prediction_count = processor.validate_netnglyc_output(
-                            output_content, expected_seq_count
-                        )
-                        
-                        
-                        print(f"Processing successful: {prediction_count} predictions found")
-                    else:
-                        print(f"NetNGlyc processing failed: {error}")
-                        return 1
-                else:
-                    # Directory processing with intelligent mode detection
-                    results = processor.process_directory(args.input, temp_output_dir, processing_mode=args.processing_mode)
-                    print(f"NetNGlyc processing: {results['success']}/{results['total']} files successful")
-                    
-                    if results['failed'] > 0:
-                        print(f"Warning: {results['failed']} files failed NetNGlyc processing")
-                
-                # Step 2: Parse the generated outputs
-                #print("Step 2: Parsing NetNGlyc outputs...")
-                
-                if args.is_mutant:
-                    #print("Parsing as mutant files using wildtype logic with mapping")
-                    parsing_start_time = time.time()
-                    results = processor.parse_mutant_files(
-                        temp_output_dir,
-                        args.threshold,
-                        mapping_dir=args.mapping_dir,
-                        fasta_dir=args.input,
-                        failure_map=failure_map,
-                    )
-                    parsing_elapsed = time.time() - parsing_start_time
-                    
-                    # Print comprehensive summary for mutant processing
-                    print(f"\n{'=' * 60}")
-                    print(f"Mutant Processing Summary:")
-                    print(f"   • Total predictions found: {len(results)}")
-                    print(f"   • Parsing time: {parsing_elapsed / 60:.1f} minutes")
-                    print(f"   • Threshold used: {args.threshold}")
-                    if args.mapping_dir:
-                        print(f"   • Filtered to mutation positions only")
-                    print("=" * 60)
-                else:
-                    #print("Parsing as wildtype files")
-                    results = processor.parse_wildtype_files(temp_output_dir, args.mapping_dir, args.threshold)
-                    
-                processor.save_parsed_results(results, args.output)
-                
-        finally:
-            # Cleanup temporary directory (unless keeping intermediates for debugging)
-            if args.keep_intermediates:
-                print(f"Raw output files can be viewed in {temp_output_dir}")
-            else:
-                import shutil
-                shutil.rmtree(temp_output_dir, ignore_errors=True)
-            
-        return 0
+        return run_full_pipeline_mode(args, failure_map, parser)
 
     # Normal processing mode - validate required arguments  
     if not args.input or not args.output:

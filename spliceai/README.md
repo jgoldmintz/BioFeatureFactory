@@ -9,6 +9,7 @@ This Nextflow-based pipeline provides automated SpliceAI splice site prediction 
 - **Exon-Aware Mapping**: Coordinate system conversion between ORF, transcript, genomic, and chromosome space
 - **Automated SpliceAI Execution**: Parallel splice prediction with TensorFlow race condition mitigation
 - **Intelligent Result Parsing**: Extract predictions with mutation-specific pkey mapping and validation log filtering
+- **Live Progress Tracking**: Optional monitor that reports per-gene SpliceAI progress in real time
 
 ### TensorFlow Stability Enhancements
 - **Race Condition Prevention**: Environment variables to control TensorFlow threading
@@ -33,7 +34,7 @@ This Nextflow-based pipeline provides automated SpliceAI splice site prediction 
 ### Input Requirements
 
 #### Mutation CSV Files
-- Provide the path via `--mutations_path` (directory or single file). Legacy alias: `--mutations_dir`
+- Provide the path via `--mutations_path` (directory or single file).
 - Each CSV must be named `<gene_id>_mutations.csv` (case-insensitive) so the gene ID seeds downstream channels
 - Directory mode scans every matching CSV and emits `<gene_id>.vcf` per input
 - File mode reuses the single CSV for one gene
@@ -100,50 +101,36 @@ python3 annot_to_spliceai.py \
     -o annotation_ncbi.txt
 ```
 
-### 3. Run Complete Pipeline
-The commands below show typical invocations; replace the sample paths with your own locations.
+### 3. Run the Pipeline
+Use the controller as the single entry point. The commands below show typical invocations; replace the sample paths with your own locations.
+
 ```bash
-nextflow run main.nf \
+python spliceai-pipeline-controller.py \
     --mutations_path mutations/ \
     --reference_genome /path/to/reference.fna \
     --annotation_file annotation_ncbi.txt \
     --transcript_mapping_path mappings/transcript/ \
-    --genomic_mapping_path mappings/genomic/ \
     --chromosome_mapping_path mappings/chromosome/ \
+    --genomic_mapping_path mappings/genomic/ \
     --output_dir results/ \
-    --vcf_output_dir vcf_cache/
-
-nextflow run main.nf \
-    --input_vcf_dir vcf_files/ \
-    --skip_vcf_generation \
-    --reference_genome /path/to/reference.fna \
-    --annotation_file annotation_ncbi.txt \
-    --transcript_mapping_path mappings/transcript.csv \
-    --genomic_mapping_path mappings/genomic.csv \
-    --output_dir results/
-
-nextflow run main.nf \
-    --input_vcf_file ABCB1.vcf \
-    --reference_genome /path/to/reference.fna \
-    --annotation_file annotation_ncbi.txt \
-    --transcript_mapping_path mappings/transcript.csv \
-    --genomic_mapping_path mappings/genomic.csv \
-    --output_dir results/
+    --initial_maxforks 3
 ```
+
+- To reuse existing VCFs (single file or directory) instead of generating them, supply `--input_vcf_path /path/to/vcfs --skip_vcf_generation` and omit `--mutations_path`.
+- To generate new VCFs from mutation CSVs, provide `--mutations_path` and omit `--input_vcf_path`; the controller builds VCFs automatically before running SpliceAI.
+- The controller launches Nextflow, streams logs, runs the progress tracker, and automatically drops to `--maxforks tail_maxforks` when the tail genes hit rapid TensorFlow exit‑134 errors.
 
 ## Processing Modes
 
 ### Input Mode Selection
-- **`--mutations_path`**: Process mutation CSV files (directory mode or single CSV). Legacy alias: `--mutations_dir`
-- **`--input_vcf_dir`**: Process pre-existing VCF directory (requires `--skip_vcf_generation`)
-- **`--input_vcf_file`**: Process single VCF file (implied skip)
-- **`--skip_vcf_generation`**: Skip VCF generation when using `--input_vcf_dir`
+- **`--mutations_path`**: Process mutation CSV files (directory mode or single CSV).
+- **`--input_vcf_path`**: Process pre-existing VCFs. Accepts either a single `.vcf` or a directory of `.vcf` files; requires `--skip_vcf_generation`.
+- **`--skip_vcf_generation`**: Signals that VCFs already exist and should be reused (requires `--input_vcf_path`).
 
 ### VCF Source Selection
-- Provide `--mutations_path` when you want the pipeline to generate VCFs. Omit `--skip_vcf_generation` in this mode.
-- Use `--skip_vcf_generation` with either `--input_vcf_dir` or `--input_vcf_file` when VCFs already exist.
-- Supply only `--input_vcf_file` to run a single VCF; the gene ID is inferred from the basename.
-- When neither `--input_vcf_dir` nor `--input_vcf_file` is provided, VCFs are built from `--mutations_path`.
+- Provide `--mutations_path` when you want the pipeline to generate VCFs. Leave `--skip_vcf_generation` unset in this mode.
+- Use `--skip_vcf_generation --input_vcf_path /path/to/vcfs` when VCFs already exist. If the path is a directory, every `*.vcf` is processed; if it is a file, only that gene is run.
+- When `--input_vcf_path` is omitted, VCFs are built from `--mutations_path`.
 
 ### VCF Generation Options
 - **`--chromosome_format`**: Output chromosome format (`refseq`, `simple`, `ucsc`)
@@ -152,9 +139,13 @@ nextflow run main.nf \
 - **`--vcf_output_dir`**: Publish intermediate VCFs, bgzipped files, and indexes to a dedicated directory
 
 ### SpliceAI Execution Control
-- **`--splice_threshold`**: Minimum delta score threshold (default: 0.0)
-- **`--retry_jitter`**: Maximum retry delay in seconds (default: 10)
-- **`--maxforks`**: Limit concurrent SpliceAI tasks (default: 0 = unbounded, automatically capped at available CPU cores)
+- **`--initial_maxforks`** *(controller)*: Max concurrent `run_spliceai` tasks for the first pass (default: 3).
+- **`--tail_maxforks`** *(controller)*: Maxforks applied after the controller detects rapid tail retries (default: 1).
+- **`--tail_threshold`**, **`--rapid_window_minutes`**, **`--rapid_gap_minutes`** *(controller)*: Heuristics that define “tail mode” and the frequency of exit‑134 failures that triggers a restart.
+- **`--splice_threshold`** *(pipeline)*: Minimum delta score threshold passed to the parser (default: 0.0).
+- **`--retry_jitter`** *(pipeline)*: Maximum retry delay for `run_spliceai` (default: 10).
+- **`--maxforks`** *(pipeline)*: Final limit enforced inside Nextflow (the controller sets this to `initial_maxforks` or `tail_maxforks` depending on the phase).
+- The progress tracker runs automatically; disable it with `--disable_tracker` if you do not want the live `processed/total` table.
 
 ### Validation and Filtering
 - **`--validation_log`**: Path to validation log for filtering failed mutations
@@ -230,6 +221,21 @@ python3 spliceai-parser.py \
     --log validation.log
 ```
 
+### Live Progress Tracker
+The controller launches `spliceai-tracker.py` automatically so you always see the live `processed/total` table. Disable it with `--disable_tracker` if you prefer a quiet log.
+
+You can also run the tracker manually if you want to monitor a previously started run:
+
+```bash
+python3 spliceai-tracker.py \
+  --mutations-path /path/to/mutations_dir \
+  --work-root /path/to/work \
+  --poll-seconds 5 \
+  --log-file tracker.log
+```
+
+The tracker is observational only; stop it with `Ctrl+C` when running manually. The controller cleans it up automatically when the pipeline finishes or restarts.
+
 ## Troubleshooting
 
 ### Common Issues
@@ -271,10 +277,18 @@ python3 ../dependencies/exon_aware_mapping.py \
 ### Performance Optimization
 ```bash
 # For large datasets, adjust cache and retry settings
-nextflow run main.nf \
+python spliceai-pipeline-controller.py \
+    --mutations_path /path/to/mutations \
+    --reference_genome /path/to/reference.fna \
+    --annotation_file annotation_ncbi.txt \
+    --transcript_mapping_path mappings/transcript/ \
+    --chromosome_mapping_path mappings/chromosome/ \
+    --genomic_mapping_path mappings/genomic/ \
+    --output_dir results/ \
     --clear_vcf_cache \
     --retry_jitter 20 \
-    [other parameters]
+    --initial_maxforks 4 \
+    --tail_maxforks 1
 ```
 
 ## Prerequisites
