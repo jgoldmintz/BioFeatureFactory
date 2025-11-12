@@ -406,13 +406,14 @@ def get_docker_platform_args():
 class SignalP6Handler:
     """Handle SignalP 6 predictions on the host before Docker NetNGlyc"""
 
-    def __init__(self, cache_dir=None, verbose=False):
+    def __init__(self, cache_dir=None, verbose=False, logger=None):
         if cache_dir is None:
             cache_dir = os.path.join(os.path.expanduser("~"), ".signalp6_cache")
         self.cache_dir = cache_dir
         os.makedirs(self.cache_dir, exist_ok=True)
         self.last_output_dir = None  # Store the output directory path
         self.verbose = verbose
+        self.logger = logger
         # Check SignalP availability once at initialization
         self.signalp6_available = self.check_signalp6_available()
 
@@ -459,13 +460,15 @@ class SignalP6Handler:
         cache_dir = os.path.join(self.cache_dir, f"{cache_key}_sp6_output")
 
         if os.path.exists(cache_file) and os.path.exists(cache_dir):
-            print(f"Using cached SignalP 6 results for {os.path.basename(fasta_file)}")
+            if self.verbose:
+                print(f"Using cached SignalP 6 results for {os.path.basename(fasta_file)}")
             with open(cache_file, 'r') as f:
                 return json.load(f), cache_dir
 
         if not self.signalp6_available:
             error_msg = "ERROR: SignalP 6.0 is required but not available. Please install SignalP 6.0 and ensure it's in your PATH."
-            print(error_msg)
+            if self.logger:
+                self.logger.error(error_msg)
             print(error_msg, file=sys.stderr)
             raise Exception("SignalP 6.0 not available - required for NetNGlyc processing with SignalP integration")
 
@@ -546,7 +549,10 @@ class SignalP6Handler:
                 print(f"SignalP 6 failed: {result.stderr[:200]}")
 
         except Exception as e:
-            print(f"SignalP 6 error: {e}")
+            if self.logger:
+                self.logger.error(f"SignalP 6 error: {e}")
+            else:
+                print(f"SignalP 6 error: {e}")
         finally:
             # Clean up temp dir if one was created
             if temp_dir and temp_dir != signalp_output_dir:
@@ -576,7 +582,12 @@ class RobustDockerNetNGlyc:
         self.verbose = verbose
 
         # Initialize SignalP handler
-        self.signalp_handler = SignalP6Handler(cache_dir=cache_dir, verbose=self.verbose) if use_signalp else None
+        if use_signalp:
+            self.signalp_handler = SignalP6Handler(
+                cache_dir=cache_dir, verbose=self.verbose, logger=getattr(self, "error_logger", None)
+            )
+        else:
+            self.signalp_handler = None
 
         # Initialize cache
         if cache_dir is None:
@@ -1653,6 +1664,12 @@ class RobustDockerNetNGlyc:
                         wt_signalp[gene_key] = seq_signalp
                     elif gene_key not in wt_signalp and seq_signalp:
                         wt_signalp[gene_key] = seq_signalp
+        for gene, sites in wt_sites_by_gene.items():
+            if not sites and self.verbose:
+                print(f"[WARN] {gene}: missing WT predictions in provided outputs")
+        for gene, sites in wt_sites_by_gene.items():
+            if not sites and hasattr(self, "error_logger"):
+                self.error_logger.error(f"WT parser: {gene} missing predictions in provided outputs")
         return wt_sites_by_gene, wt_signalp, site_rows
 
     def collect_mutant_sites(self, directories, threshold, mutation_index=None, signalp_cache=None):
@@ -1717,6 +1734,12 @@ class RobustDockerNetNGlyc:
                         }
                         site_rows.append(row)
                         mut_sites_by_pkey.setdefault(pkey, []).append(row)
+        for pkey, sites in mut_sites_by_pkey.items():
+            if not sites and self.verbose:
+                print(f"[WARN] {pkey}: missing mutant predictions in provided outputs")
+        for pkey, sites in mut_sites_by_pkey.items():
+            if not sites and hasattr(self, "error_logger"):
+                self.error_logger.error(f"MUT parser: {pkey} missing predictions in provided outputs")
         return mut_sites_by_pkey, mut_signalp, site_rows, pkey_gene_map
 
     def _classify_netnglyc_event(self, wt_site, mut_site, threshold, delta_threshold=0.05):
