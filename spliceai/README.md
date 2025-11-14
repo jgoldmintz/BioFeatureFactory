@@ -8,6 +8,7 @@ This Nextflow-based pipeline provides automated SpliceAI splice site prediction 
 - **VCF Generation**: Convert snv CSV files to SpliceAI-compatible VCF format
 - **Exon-Aware Mapping**: Coordinate system conversion between ORF, transcript, genomic, and chromosome space
 - **Automated SpliceAI Execution**: Parallel splice prediction with TensorFlow race condition mitigation
+- **Intelligent Isoform Management**: Hybrid stratified sampling for genes with >50 isoforms (configurable) to prevent catastrophic slowdowns
 - **Intelligent Result Parsing**: Extract predictions with mutation-specific pkey mapping and validation log filtering
 - **Live Progress Tracking**: Optional monitor that reports per-gene SpliceAI progress in real time
 
@@ -26,10 +27,12 @@ This Nextflow-based pipeline provides automated SpliceAI splice site prediction 
 ## Required Files and Setup
 
 ### Essential Pipeline Files
-- **`main.nf`** - Nextflow pipeline with TensorFlow threading controls and multi-input support
-- **`../dependencies/vcf_converter.py`** - Robust SNP to VCF converter with RefSeq support (packaged in dependencies but runnable standalone)
-- **`spliceai-parser.py`** - Advanced VCF parser with pkey mapping and log filtering
+- **`spliceai-pipeline-controller.py`** - Main entry point with adaptive restart logic and progress tracking
+- **`bin/main.nf`** - Nextflow pipeline with TensorFlow threading controls and multi-input support
+- **`bin/filter_annotation.py`** - Hybrid stratified sampling filter for high-isoform genes
+- **`bin/spliceai-parser.py`** - Advanced VCF parser with pkey mapping and log filtering
 - **`annot_to_spliceai.py`** - GTF to SpliceAI annotation format converter
+- **`../dependencies/vcf_converter.py`** - Robust SNP to VCF converter with RefSeq support
 
 ### Input Requirements
 
@@ -85,9 +88,8 @@ python3 annot_to_spliceai.py \
 
 ### 1. Prerequisites
 ```bash
-# Ensure SpliceAI conda environment is available
-conda activate ssnvs_prediction_tool
-spliceai -h  # Verify SpliceAI installation
+# Verify SpliceAI installation
+spliceai -h
 
 # Ensure Nextflow is installed
 nextflow -version
@@ -141,11 +143,17 @@ python spliceai-pipeline-controller.py \
 ### SpliceAI Execution Control
 - **`--initial_maxforks`** *(controller)*: Max concurrent `run_spliceai` tasks for the first pass (default: 3).
 - **`--tail_maxforks`** *(controller)*: Maxforks applied after the controller detects rapid tail retries (default: 1).
-- **`--tail_threshold`**, **`--rapid_window_minutes`**, **`--rapid_gap_minutes`** *(controller)*: Heuristics that define “tail mode” and the frequency of exit‑134 failures that triggers a restart.
+- **`--tail_threshold`**, **`--rapid_window_minutes`**, **`--rapid_gap_minutes`** *(controller)*: Heuristics that define "tail mode" and the frequency of exit‑134 failures that triggers a restart.
 - **`--splice_threshold`** *(pipeline)*: Minimum delta score threshold passed to the parser (default: 0.0).
 - **`--retry_jitter`** *(pipeline)*: Maximum retry delay for `run_spliceai` (default: 10).
 - **`--maxforks`** *(pipeline)*: Final limit enforced inside Nextflow (the controller sets this to `initial_maxforks` or `tail_maxforks` depending on the phase).
 - The progress tracker runs automatically; disable it with `--disable_tracker` if you do not want the live `processed/total` table.
+- **`--partial_cache_dir`** *(pipeline/controller)*: Directory to persist per-gene SpliceAI VCF fragments so retries only process remaining variants (default: `./partials` relative to the repo).
+- **`--clear_partial_cache`** *(controller)*: Remove the cache directory before launching when you want to rerun everything from scratch.
+
+### Isoform Management
+- **`--forceAll_isoforms`** *(pipeline)*: Process all transcript isoforms regardless of count. By default, genes with more than `max_isoforms_per_gene` isoforms are filtered using hybrid stratified sampling to prevent catastrophic slowdowns.
+- **`--max_isoforms_per_gene`** *(pipeline)*: Threshold for applying isoform filtering (default: 50). Genes exceeding this count trigger hybrid sampling: the top 10 longest isoforms (capturing canonical/MANE transcripts) plus 40 randomly selected from the remainder. Uses deterministic seeding based on gene name hash for reproducibility. Note that filtered genes bypass the partial cache to ensure consistency.
 
 ### Validation and Filtering
 - **`--validation_log`**: Path to validation log for filtering failed mutations
@@ -171,22 +179,34 @@ export TF_CPP_MIN_LOG_LEVEL=3
 - **Staggered Execution**: 5-20 second delays prevent simultaneous model loading
 - **Retry Logic**: Exponential backoff with jitter for failed processes
 - **Error Recovery**: Automatic retry up to 3 attempts per sample
+- **Partial Result Cache**: Each gene’s SpliceAI VCF is cached (default `partials/`). Retries prune already-processed variants before re-running SpliceAI, and successful runs merge the cache into the final `${gene}.spliceai.vcf`. The controller automatically harvests any surviving `<gene>.spliceai.vcf` files from `work/` into this cache before every launch. Override via `--partial_cache_dir` (pipeline/controller) or clear it up front with `--clear_partial_cache`.
 
 ## Output Format
 
 ### SpliceAI Results TSV
-```csv
-pkey	gene	chrom	pos	ref	alt	allele	block_label	ds_ag	ds_al	ds_dg	ds_dl	dp_ag	dp_al	dp_dg	dp_dl	max_delta_score
-ABCB1-C123T	ABCB1	NC_000007.14	87504250	C	T	C	A	0.05	0.12	0.03	0.08	-15	25	-8	12	0.12
-ABCB1-G456A	ABCB1	NC_000007.14	87504456	G	A	G	B	0.15	0.02	0.25	0.04	5	-18	10	-22	0.25
-```
+Tab-delimited file with one row per variant per isoform block.
 
-### Key Fields
-- `pkey`: Mutation identifier (`{GENE}-{MUTATION_ID}`)
-- `ds_ag/ds_al/ds_dg/ds_dl`: Delta scores for acceptor gain/loss, donor gain/loss
-- `dp_ag/dp_al/dp_dg/dp_dl`: Distance to predicted sites
-- `max_delta_score`: Highest delta score for the variant
-- `block_label`: SpliceAI evaluates variants across transcript isoforms and emits one “transcript block” per isoform in the VCF INFO field. The parser preserves this order, labelling the first four unique score vectors as `A`, `B`, `C`, and `D`. Additional isoforms—or isoforms whose predictions match an earlier block exactly—are labelled `dup`. This highlights isoform-specific splicing differences while collapsing redundant outputs. For example, in `Data/spliceai/AR_spliceai_results.tsv`, variant `AR-G1130A` appears twice: block `A` captures the first AR isoform, whereas block `dup` represents other isoforms with identical scores.
+| Column | Description | Units/Values |
+|--------|-------------|--------------|
+| `pkey` | Unique variant identifier in the form `GENE-MUTATION_ID` (from transcript mapping CSV) | string |
+| `gene` | Gene symbol | string |
+| `chrom` | Chromosome identifier (format matches annotation file: RefSeq, simple, or UCSC) | string |
+| `pos` | Genomic position (1-based) | integer |
+| `ref` | Reference allele | A/C/G/T |
+| `alt` | Alternate allele | A/C/G/T |
+| `allele` | Allele designation from SpliceAI (typically matches ref) | A/C/G/T |
+| `block_label` | Isoform block identifier. First four unique score vectors labeled `A`, `B`, `C`, `D`; additional or duplicate score vectors labeled `dup`. Highlights isoform-specific splicing differences while collapsing redundant predictions. | A/B/C/D/dup |
+| `ds_ag` | Delta score for acceptor gain. Probability that the variant creates a new acceptor splice site. | float (0–1) |
+| `ds_al` | Delta score for acceptor loss. Probability that the variant disrupts an existing acceptor splice site. | float (0–1) |
+| `ds_dg` | Delta score for donor gain. Probability that the variant creates a new donor splice site. | float (0–1) |
+| `ds_dl` | Delta score for donor loss. Probability that the variant disrupts an existing donor splice site. | float (0–1) |
+| `dp_ag` | Distance to predicted acceptor gain site (negative = upstream, positive = downstream). 0 if no acceptor gain predicted. | integer (nt) |
+| `dp_al` | Distance to predicted acceptor loss site (negative = upstream, positive = downstream). 0 if no acceptor loss predicted. | integer (nt) |
+| `dp_dg` | Distance to predicted donor gain site (negative = upstream, positive = downstream). 0 if no donor gain predicted. | integer (nt) |
+| `dp_dl` | Distance to predicted donor loss site (negative = upstream, positive = downstream). 0 if no donor loss predicted. | integer (nt) |
+| `max_delta_score` | Maximum delta score across all four categories (ds_ag, ds_al, ds_dg, ds_dl). Useful for ranking variant impact. | float (0–1) |
+
+**Note on `block_label`**: SpliceAI evaluates variants across transcript isoforms and emits one "transcript block" per isoform in the VCF INFO field. The parser preserves this order, labeling the first four unique score vectors as `A`, `B`, `C`, and `D`. Additional isoforms—or isoforms whose predictions match an earlier block exactly—are labeled `dup`. This highlights isoform-specific splicing differences while collapsing redundant outputs. For example, variant `AR-G1130A` may appear twice: block `A` captures the first AR isoform, whereas block `dup` represents other isoforms with identical scores.
 
 ## Advanced Usage
 
@@ -274,7 +294,69 @@ python3 ../dependencies/exon_aware_mapping.py \
     --out-fasta /path/to/output_fastas/
 ```
 
+#### Extremely Slow Processing (High-Isoform Genes)
+```bash
+# Symptom: Pipeline running for many hours with minimal progress on specific genes
+# Cause: Genes with 100+ isoforms (e.g., BRCA1 with 368 isoforms) create massive I/O bottlenecks
+# Solution: The pipeline now automatically filters high-isoform genes by default
+# Check filtering logs in the work directory:
+grep "FILTER" work/*/*/.command.log
+
+# Example output:
+# [FILTER] BRCA1: 368 isoforms -> 50 (top 10 longest + 40 random, seed=1234567890)
+
+# To force processing all isoforms (warning: may take days for genes like BRCA1):
+python spliceai-pipeline-controller.py \
+    --mutations_path /path/to/mutations \
+    --reference_genome /path/to/reference.fna \
+    --annotation_file annotation_ncbi.txt \
+    --transcript_mapping_path mappings/transcript/ \
+    --chromosome_mapping_path mappings/chromosome/ \
+    --genomic_mapping_path mappings/genomic/ \
+    --output_dir results/ \
+    --forceAll_isoforms
+```
+
 ### Performance Optimization
+
+#### Managing High-Isoform Genes
+By default, the pipeline automatically handles genes with excessive isoform counts (>50) using hybrid stratified sampling. This prevents catastrophic slowdowns without sacrificing biological relevance. For most use cases, the default settings are optimal.
+
+```bash
+# Default behavior: automatic filtering for genes with >50 isoforms
+python spliceai-pipeline-controller.py \
+    --mutations_path /path/to/mutations \
+    --reference_genome /path/to/reference.fna \
+    --annotation_file annotation_ncbi.txt \
+    --transcript_mapping_path mappings/transcript/ \
+    --chromosome_mapping_path mappings/chromosome/ \
+    --genomic_mapping_path mappings/genomic/ \
+    --output_dir results/
+
+# Force processing of ALL isoforms (not recommended for genes like BRCA1 with 300+ isoforms)
+python spliceai-pipeline-controller.py \
+    --mutations_path /path/to/mutations \
+    --reference_genome /path/to/reference.fna \
+    --annotation_file annotation_ncbi.txt \
+    --transcript_mapping_path mappings/transcript/ \
+    --chromosome_mapping_path mappings/chromosome/ \
+    --genomic_mapping_path mappings/genomic/ \
+    --output_dir results/ \
+    --forceAll_isoforms
+
+# Custom isoform threshold: apply filtering for genes with >100 isoforms
+python spliceai-pipeline-controller.py \
+    --mutations_path /path/to/mutations \
+    --reference_genome /path/to/reference.fna \
+    --annotation_file annotation_ncbi.txt \
+    --transcript_mapping_path mappings/transcript/ \
+    --chromosome_mapping_path mappings/chromosome/ \
+    --genomic_mapping_path mappings/genomic/ \
+    --output_dir results/ \
+    --max_isoforms_per_gene 100
+```
+
+#### Large Dataset Optimization
 ```bash
 # For large datasets, adjust cache and retry settings
 python spliceai-pipeline-controller.py \

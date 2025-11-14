@@ -10,6 +10,7 @@ Totals come from the mutation CSVs, while progress comes from the growing
 import argparse
 import gzip
 import pathlib
+import re
 import sys
 import time
 from datetime import datetime
@@ -111,6 +112,9 @@ def find_mut_file(gene: str, index: Dict[str, pathlib.Path]) -> Optional[pathlib
     return None
 
 
+GENE_ARG_RE = re.compile(r"--gene\s+([A-Za-z0-9_.-]+)")
+
+
 def active_tasks(work_root: pathlib.Path) -> Iterable[Tuple[str, pathlib.Path]]:
     for sub in work_root.glob("*/*"):
         if not (sub / ".command.run").exists():
@@ -121,12 +125,16 @@ def active_tasks(work_root: pathlib.Path) -> Iterable[Tuple[str, pathlib.Path]]:
         if not cmd_path.exists():
             continue
         cmd = cmd_path.read_text()
-        marker = '-O "'
-        idx = cmd.find(marker)
-        if idx == -1:
-            continue
-        rest = cmd[idx + len(marker) :]
-        gene = rest.split(".spliceai.vcf", 1)[0]
+        gene = None
+        match = GENE_ARG_RE.search(cmd)
+        if match:
+            gene = match.group(1)
+        else:
+            marker = '-O "'
+            idx = cmd.find(marker)
+            if idx != -1:
+                rest = cmd[idx + len(marker) :]
+                gene = rest.split(".spliceai.vcf", 1)[0]
         if gene:
             yield gene, sub
 

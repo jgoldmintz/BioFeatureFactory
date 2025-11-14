@@ -22,8 +22,11 @@
   params.clear_vcf_cache            = false
   params.validate_mapping           = false
   params.chromosome_format          = 'refseq'
-  params.retry_jitter               = 10
-  params.maxforks                   = 0
+params.retry_jitter               = 10
+params.maxforks                   = 0
+params.partial_cache_dir          = null
+params.forceAll_isoforms          = false
+params.max_isoforms_per_gene      = 50
 
   // legacy aliases
   if (!params.transcript_mapping_path && params.transcript_mapping_dir)
@@ -62,8 +65,12 @@
       println "DEBUG: clear_vcf_cache = ${params.clear_vcf_cache}"
       println "DEBUG: chromosome_format = ${params.chromosome_format}"
       println "DEBUG: maxforks = ${params.maxforks} (CPU count: ${cpu_count})"
-      println "DEBUG: skip_vcf_generation = ${params.skip_vcf_generation}"
+    println "DEBUG: skip_vcf_generation = ${params.skip_vcf_generation}"
+    println "DEBUG: partial_cache_dir = ${params.partial_cache_dir ?: "${projectDir}/../partials"}"
+    println "DEBUG: forceAll_isoforms = ${params.forceAll_isoforms}"
+    println "DEBUG: max_isoforms_per_gene = ${params.max_isoforms_per_gene}"
 
+    def partial_cache_dir = params.partial_cache_dir ?: "${projectDir}/../partials"
       def resolveMap = { String pathParam, String geneId, boolean allowMissing ->
           if (!pathParam) return [null, false]
 
@@ -148,11 +155,14 @@
       }
 
       compress_and_index(vcf_source)
-      run_spliceai(
-          compress_and_index.out,
-          file(params.reference_genome),
-          file(params.annotation_file)
-      )
+    run_spliceai(
+        compress_and_index.out,
+        file(params.reference_genome),
+        file(params.annotation_file),
+        partial_cache_dir,
+        params.forceAll_isoforms,
+        params.max_isoforms_per_gene
+    )
 
       def parser_in = run_spliceai.out.map { gene_id, spliceai_vcf ->
           def (t_map, t_ok) = resolveMap(params.transcript_mapping_path, gene_id, false)
@@ -197,7 +207,7 @@
       def chromFormat = params.chromosome_format ?: 'refseq'
       """
       set -euo pipefail
-      python3 ${projectDir}/../dependencies/vcf_converter.py \\
+      python3 ${projectDir}/../../dependencies/vcf_converter.py \\
         -m "${mutations_csv}" \\
         -o . \\
         --chromosome-format "${chromFormat}" \\
@@ -225,26 +235,29 @@
       """
   }
 
-  process run_spliceai {
-      maxForks params.maxforks.toInteger()
-      errorStrategy 'retry'
-      maxRetries 3
-      publishDir params.vcf_output_dir ?: '.', mode: 'copy', pattern: '*.spliceai.vcf*', enabled: params.vcf_output_dir != null
+process run_spliceai {
+    maxForks params.maxforks.toInteger()
+    errorStrategy 'retry'
+    maxRetries 3
+    publishDir params.vcf_output_dir ?: '.', mode: 'copy', pattern: '*.spliceai.vcf*', enabled: params.vcf_output_dir != null
       tag { gene_id }
 
       input:
       tuple val(gene_id), path(vcf_gz), path(vcf_tbi)
       val reference_genome
-      val annotation_file
+    val annotation_file
+    val partial_cache_dir
+    val forceAll_isoforms
+    val max_isoforms_per_gene
 
-      output:
-      tuple val(gene_id), path("${gene_id}.spliceai.vcf")
+    output:
+    tuple val(gene_id), path("${gene_id}.spliceai.vcf")
 
-      script:
-      def stagger = new Random(task.hashCode()).nextInt(15) + 5
-      def jitter  = (task.attempt > 1) ? new Random().nextInt(params.retry_jitter ?: 10) : 0
-      """
-      set -euo pipefail
+    script:
+    def stagger = new Random(task.hashCode()).nextInt(15) + 5
+    def jitter  = (task.attempt > 1) ? new Random().nextInt(params.retry_jitter ?: 10) : 0
+    """
+    set -euo pipefail
       echo "[run_spliceai] ${task.name} delay ${stagger}s (attempt ${task.attempt})"
       sleep ${stagger}
       if [[ ${task.attempt} -gt 1 ]]; then
@@ -257,13 +270,37 @@
       export TF_NUM_INTRAOP_THREADS=1
       export OMP_NUM_THREADS=1
 
-      spliceai \\
-        -I "${vcf_gz}" \\
-        -O "${gene_id}.spliceai.vcf" \\
-        -R "${reference_genome}" \\
-        -A "${annotation_file}"
-      """
-  }
+      # Check isoform count and apply filtering if needed
+      ISOFORM_COUNT=\$(grep -c "^${gene_id}\t" "${annotation_file}" || echo 0)
+      echo "[run_spliceai] ${gene_id}: \$ISOFORM_COUNT isoforms detected"
+
+      if [[ "${forceAll_isoforms}" == "false" ]] && [[ \$ISOFORM_COUNT -gt ${max_isoforms_per_gene} ]]; then
+        echo "[run_spliceai] ${gene_id}: Applying hybrid filter (\$ISOFORM_COUNT > ${max_isoforms_per_gene})"
+        python3 ${projectDir}/filter_annotation.py \\
+          --annotation "${annotation_file}" \\
+          --gene "${gene_id}" \\
+          --max-isoforms ${max_isoforms_per_gene} \\
+          --output "${gene_id}_filtered_annotation.txt" \\
+          --log-file filter.log
+        ANNOTATION_TO_USE="${gene_id}_filtered_annotation.txt"
+        SKIP_CACHE="--skip-cache"
+      else
+        echo "[run_spliceai] ${gene_id}: Using full annotation (no filtering)"
+        ANNOTATION_TO_USE="${annotation_file}"
+        SKIP_CACHE=""
+      fi
+
+    python3 ${projectDir}/run_spliceai_cached.py \\
+      --gene ${gene_id} \\
+      --vcf "${vcf_gz}" \\
+      --reference "${reference_genome}" \\
+      --annotation "\$ANNOTATION_TO_USE" \\
+      --cache "${partial_cache_dir}" \\
+      --prune "${projectDir}/prune_vcf.py" \\
+      --merge "${projectDir}/merge_vcfs.py" \\
+      \$SKIP_CACHE
+    """
+}
 
   process parse_results {
       publishDir "${params.output_dir ?: '.'}", mode: 'copy'

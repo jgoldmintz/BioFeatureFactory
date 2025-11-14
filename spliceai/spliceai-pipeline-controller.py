@@ -18,6 +18,7 @@ import collections
 import datetime as dt
 import os
 import re
+import shutil
 import subprocess
 import sys
 import time
@@ -25,8 +26,8 @@ from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
 HERE = Path(__file__).resolve().parent
-NEXTFLOW_SCRIPT = HERE / "main.nf"
-TRACKER_SCRIPT = HERE / "spliceai-tracker.py"
+NEXTFLOW_SCRIPT = HERE / "bin/main.nf"
+TRACKER_SCRIPT = HERE / "bin/spliceai-tracker.py"
 LOG_PATH = HERE / ".nextflow.log"
 WORK_ROOT = HERE / "work"
 
@@ -57,6 +58,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--validate_mapping", action="store_true")
     parser.add_argument("--maxforks", type=int, default=0,
                         help="Base maxforks value (controller supplies per run; 0=Nextflow default)")
+    parser.add_argument("--partial_cache_dir", type=Path, default=HERE / "partials",
+                        help="Directory for caching partial SpliceAI outputs (default: ./partials)")
+    parser.add_argument("--clear_partial_cache", action="store_true",
+                        help="Delete the partial cache directory before launching")
+    parser.add_argument("--forceAll_isoforms", action="store_true",
+                        help="Process all isoforms regardless of count (default: apply filtering for genes >50 isoforms)")
+    parser.add_argument("--max_isoforms_per_gene", type=int, default=50,
+                        help="Maximum isoforms per gene before hybrid filtering is applied (default: 50)")
 
     # Controller knobs
     parser.add_argument("--initial_maxforks", type=int, default=3,
@@ -156,6 +165,9 @@ def build_nextflow_cmd(args: argparse.Namespace, maxforks: int, resume_flag: boo
     add_flag("clear_vcf_cache", args.clear_vcf_cache)
     add_flag("validate_mapping", args.validate_mapping)
     add_param("maxforks", maxforks if maxforks else args.maxforks)
+    add_param("partial_cache_dir", args.partial_cache_dir)
+    add_flag("forceAll_isoforms", args.forceAll_isoforms)
+    add_param("max_isoforms_per_gene", args.max_isoforms_per_gene)
     return cmd
 
 
@@ -309,6 +321,41 @@ def monitor_and_maybe_restart(
         tracker.stop()
 
 
+def harvest_partials_from_work(args: argparse.Namespace) -> int:
+    cache_dir = args.partial_cache_dir
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    harvested = 0
+    for sub in WORK_ROOT.glob("*/*"):
+        cmd_path = sub / ".command.sh"
+        if not cmd_path.exists():
+            continue
+        try:
+            text = cmd_path.read_text()
+        except OSError:
+            continue
+        if "run_spliceai" not in text:
+            continue
+        marker = '-O "'
+        if marker not in text:
+            continue
+        gene = text.split(marker, 1)[1].split(".spliceai.vcf", 1)[0].strip()
+        if not gene:
+            continue
+        candidate = sub / f"{gene}.spliceai.vcf"
+        if not candidate.exists() or candidate.stat().st_size == 0:
+            continue
+        dest = cache_dir / f"{gene}.partial.vcf"
+        try:
+            if (not dest.exists()) or candidate.stat().st_mtime > dest.stat().st_mtime:
+                shutil.copy2(candidate, dest)
+                harvested += 1
+        except OSError:
+            continue
+    if harvested:
+        print(f"[controller] Harvested {harvested} partial SpliceAI VCF(s) into {cache_dir}")
+    return harvested
+
+
 def run_controller(args: argparse.Namespace):
     gene_ids = discover_gene_ids(args)
     failure_history: Dict[str, List[dt.datetime]] = collections.defaultdict(list)
@@ -316,7 +363,12 @@ def run_controller(args: argparse.Namespace):
     resume_flag = args.resume
     tracker = TrackerRunner(args)
 
+    if args.clear_partial_cache and args.partial_cache_dir.exists():
+        print(f"[controller] Clearing partial cache at {args.partial_cache_dir}")
+        shutil.rmtree(args.partial_cache_dir)
+
     while True:
+        harvest_partials_from_work(args)
         cmd = build_nextflow_cmd(args, current_max, resume_flag)
         print(f"[controller] Launching: {' '.join(cmd)}", flush=True)
         nf_proc = subprocess.Popen(cmd, cwd=str(HERE))
