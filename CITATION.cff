@@ -1,6 +1,6 @@
 cff-version: 1.2.0
 message: "If you use BioFeatureFactory in your work, please cite it as below."
-title: "BioFeatureFactory: an open framework for multi-modal variant feature engineering"
+title: "BioFeatureFactory: Modular bioinformatics framework for automated feature extraction, coordinate mapping, and predictive modeling using gene- and variant-level inputs."
 type: software
 authors:
   - family-names: Goldmintz
