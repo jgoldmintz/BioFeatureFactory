@@ -1,0 +1,25 @@
+cff-version: 1.2.0
+message: "If you use BioFeatureFactory in your work, please cite it as below."
+title: "BioFeatureFactory: an open framework for multi-modal variant feature engineering"
+type: software
+authors:
+  - family-names: Goldmintz
+    given-names: Jacob
+repository-code: "https://github.com/jgoldmintz/biofeaturefactory"
+license: "AGPL-3.0-or-later"
+version: "0.1.0"
+date-released: "2025-11-25"
+keywords:
+  - bioinformatics
+  - genomics
+  - variant annotation
+  - feature engineering
+  - pipelines
+preferred-citation:
+  type: software
+  title: "BioFeatureFactory"
+  authors:
+    - family-names: Goldmintz
+      given-names: Jacob
+  year: 2025
+  notes: "Pre-publication software citation. Replace with journal citation when available."
