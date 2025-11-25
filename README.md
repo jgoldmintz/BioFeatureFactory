@@ -169,10 +169,10 @@ For the vast majority of the pipelines in this repository properly mapped mutati
 
 ## Citation
 
-If you use BioFeatureFactory or any of its pipelines, please cite:
+####
 
 ### BioFeatureFactory
-Goldmintz J. *BioFeatureFactory: Python toolkit for automated biological feature extraction.* GitHub repository. <https://github.com/jgoldmintz/BioFeatureFactory>
+For citation details, see [CITING.md](CITING.md) and [CITATION.cff](CITATION.cff)
 
 ### Pipeline-Specific Citations
 
@@ -188,7 +188,8 @@ Goldmintz J. *BioFeatureFactory: Python toolkit for automated biological feature
 
 ## License
 
-This project is licensed under the MIT License. See [LICENSE](LICENSE) for details.
+BioFeatureFactory is distributed under the GNU Affero General Public License v3.0 (AGPL-3.0).
+See the [LICENSE](LICENSE) file for details.
 
 ---
 
