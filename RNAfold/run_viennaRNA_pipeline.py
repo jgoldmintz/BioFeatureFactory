@@ -1,5 +1,5 @@
 # BioFeatureFactory
-# Copyright (C) 2023–2025  Jacob Goldmintz
+# Copyright (C) 2023–2026  Jacob Goldmintz
 #
 # This program is free software: you can redistribute it and/or modify
 # it under the terms of the GNU Affero General Public License as
@@ -31,7 +31,7 @@ import RNA
 
 os.environ["OMP_NUM_THREADS"] = "1"
 
-DEP_DIR = os.path.normpath(os.path.join(os.path.dirname(__file__), '..', 'dependencies'))
+DEP_DIR = os.path.normpath(os.path.join(os.path.dirname(__file__), '..', 'utils'))
 sys.path.insert(0, DEP_DIR)
 from utility import (
     _collect_failures_from_logs,

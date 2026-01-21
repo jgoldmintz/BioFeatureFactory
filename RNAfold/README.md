@@ -64,16 +64,16 @@ Each row represents a single nucleotide position within the analyzed window.
 | `delta_u` | Per-position change in unpaired probability (Alt – Ref). Positive values indicate increased accessibility in the alternate structure.    | float |
 | `change_flag` | 1 if \|Δu\| ≥ τ (τ = 0.05 default) else 0. Marks positions with deterministic meaningful shifts.                       | 0/1 |
 | `direction` | Sign of Δu: 1 = increased unpaired probability, –1 = decreased, 0 = unchanged. Indicates direction of accessibility change.              | –1/0/1 |
-| `mfe_change_flag` | 1 if base-pairing status differs between Ref/Alt MFE structures (paired ↔ unpaired).                                                     | 0/1 |
-| `mfe_change_dir` | Encodes the type of base-pairing change: 0 = unpaired→paired, 1 = paired→unpaired. Indicates structural opening or closing at that base. | 0/1 |
+| `mfe_change_flag` | 1 if base-pairing status differs between Ref/Alt MFE structures (paired <-> unpaired).                                                     | 0/1 |
+| `mfe_change_dir` | Encodes the type of base-pairing change: 0 = unpaired->paired, 1 = paired->unpaired. Indicates structural opening or closing at that base. | 0/1 |
 
 ---
 
 ## Interpretation
 
 - **ΔΔG (MFE / Ensemble)**  
-  - Positive ΔΔG → Alt structure is less stable (higher energy).  
-  - Negative ΔΔG → Alt structure is more stable (lower energy).  
+  - Positive ΔΔG -> Alt structure is less stable (higher energy).  
+  - Negative ΔΔG -> Alt structure is more stable (lower energy).  
   - Ensemble ΔΔG captures thermodynamic stability averaged across all possible folds, while MFE ΔΔG isolates the most stable structure.
 
 - **JSD_unpaired_bits**  
@@ -145,9 +145,9 @@ For each position, the pipeline computes:
 
 $\Delta u_i = u_i^{(\text{alt})} - u_i^{(\text{ref})}$
 
-- **Positive $Δu$** → base becomes more accessible (region opens).  
-- **Negative $Δu$** → base becomes more paired (region closes).  
-- $Δu ≈ 0$ → no local structural change.
+- **Positive $Δu$** -> base becomes more accessible (region opens).  
+- **Negative $Δu$** -> base becomes more paired (region closes).  
+- $Δu ≈ 0$ -> no local structural change.
 
 The parameter **$τ$ (tau)** is a *magnitude threshold* applied to $|\Delta u|$ to define significant changes.  
 By default, $τ = 0.05$ ($≥5%$ change in unpaired probability).  
@@ -159,5 +159,11 @@ This threshold filters out small fluctuations due to ensemble sampling noise, al
 - DNA sequences (A,C,G,T) are automatically converted to RNA (A,C,G,U).  
 - Default temperature is 37 °C. All energies are in kcal/mol.  
 - Boltzmann sampling is stochastic; minor variation across runs is expected.  
-- `OMP_NUM_THREADS=1` prevents oversubscription during multiprocessing.  
+- `OMP_NUM_THREADS=1` prevents oversubscription during multiprocessing.
 - All genes write to shared summary and per-position output files for streamlined aggregation.
+
+---
+
+## License
+
+This project is licensed under the AGPL-3.0 License - see the [LICENSE](../LICENSE) file in the root BioFeatureFactory directory for details.

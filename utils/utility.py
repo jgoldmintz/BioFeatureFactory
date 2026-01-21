@@ -1,5 +1,5 @@
 # BioFeatureFactory
-# Copyright (C) 2023–2025  Jacob Goldmintz
+# Copyright (C) 2023–2026  Jacob Goldmintz
 #
 # This program is free software: you can redistribute it and/or modify
 # it under the terms of the GNU Affero General Public License as
@@ -499,8 +499,16 @@ def _prepare_custom_annotation(genename, annotation_file):
     return None
 
 
-def _prepare_structured_annotation(genename, annotation_file, assembly, fmt):
-    """Extract gene and transcript features from RefSeq/Ensembl-style GTF or GFF3 files."""
+def _prepare_structured_annotation(genename, annotation_file, assembly, fmt, transcript_id=None):
+    """Extract gene and transcript features from RefSeq/Ensembl-style GTF or GFF3 files.
+
+    Args:
+        genename: Gene symbol to look up.
+        annotation_file: Path to annotation file.
+        assembly: Reference assembly.
+        fmt: Detected annotation format ('gtf' or 'gff3').
+        transcript_id: Optional specific transcript ID to force selection of.
+    """
     gene_upper = genename.upper()
     target_gene_ids = set()
     target_transcripts = {}
@@ -563,22 +571,22 @@ def _prepare_structured_annotation(genename, annotation_file, assembly, fmt):
                 elif feature_lc == "gene" and gene_section_active:
                     break
 
-                transcript_id = None
+                current_tid = None
 
                 if feature_lc in transcript_features:
-                    transcript_id = attrs.get("transcript_id") or attrs.get("ID")
+                    current_tid = attrs.get("transcript_id") or attrs.get("ID")
                 elif feature_lc == "cds" and not attrs.get("transcript_id") and attrs.get("Parent"):
                     possible = [val for val in parent_values if not val.startswith("gene-")]
                     if possible:
-                        transcript_id = possible[0]
+                        current_tid = possible[0]
 
                 if feature_lc == "gene" and matches_symbol and not target_gene_ids:
                     target_gene_ids.update(attr_gene_ids)
 
                 if feature_lc in transcript_features and (matches or bool(set(parent_values).intersection(target_gene_ids)) or (attrs.get("gene_id") and attrs.get("gene_id") in target_gene_ids)):
-                    if not transcript_id:
+                    if not current_tid:
                         continue
-                    rec = target_transcripts.setdefault(transcript_id, {
+                    rec = target_transcripts.setdefault(current_tid, {
                         "chrom": None,
                         "strand": strand if strand in "+-" else None,
                         "exons": [],
@@ -663,7 +671,24 @@ def _prepare_structured_annotation(genename, annotation_file, assembly, fmt):
     if not candidates:
         return None
 
-    _, best_tid, best = max(candidates, key=lambda x: x[0])
+    # If a specific transcript_id is requested, try to find it among candidates
+    if transcript_id:
+        # Try exact match first
+        match = [c for c in candidates if c[1] == transcript_id]
+        if not match:
+            # Try matching without version suffix (e.g., NM_022162 matches NM_022162.3)
+            tid_base = transcript_id.rsplit('.', 1)[0]
+            match = [c for c in candidates if c[1].rsplit('.', 1)[0] == tid_base]
+        if match:
+            _, best_tid, best = match[0]
+        else:
+            available = sorted(set(c[1] for c in candidates))
+            raise ValueError(
+                f"Transcript '{transcript_id}' not found for gene '{genename}'. "
+                f"Available transcripts: {available}"
+            )
+    else:
+        _, best_tid, best = max(candidates, key=lambda x: x[0])
 
     return {
         "chrom": best["chrom"],
@@ -677,8 +702,20 @@ def _prepare_structured_annotation(genename, annotation_file, assembly, fmt):
     }
 
 
-def get_genome_loc(genename, annotation_file, assembly="GRCh38"):
-    """Return gene coordinates and exon structure from supported annotation formats."""
+def get_genome_loc(genename, annotation_file, assembly="GRCh38", transcript_id=None):
+    """Return gene coordinates and exon structure from supported annotation formats.
+
+    Args:
+        genename: Gene symbol to look up.
+        annotation_file: Path to annotation file (GTF/GFF3/custom).
+        assembly: Reference assembly (GRCh37 or GRCh38).
+        transcript_id: Optional specific transcript ID to force selection of
+            (e.g., NM_022162.3). If provided and found, this transcript is
+            selected instead of auto-selection based on priority scoring.
+
+    Returns:
+        dict with chrom, strand, tx_start, tx_end, exons, transcript_id, etc.
+    """
     fmt = _detect_annotation_format(annotation_file)
 
     if fmt == "custom":
@@ -689,7 +726,7 @@ def get_genome_loc(genename, annotation_file, assembly="GRCh38"):
             return None
 
     try:
-        return _prepare_structured_annotation(genename, annotation_file, assembly, fmt)
+        return _prepare_structured_annotation(genename, annotation_file, assembly, fmt, transcript_id=transcript_id)
     except Exception as e:
         print(f"Error parsing annotation file {annotation_file}: {e}", file=sys.stderr)
         return None
@@ -1570,3 +1607,603 @@ def load_wt_sequences(input_dir: str, wt_header: str = "transcript") -> Dict[str
     header_label = wt_header.upper() if wt_header else "SEQUENCES"
     print(f"[WT] Loaded {len(sequences)} WT {header_label} into memory")
     return sequences
+
+
+# =============================================================================
+# Codon Usage Functions
+# =============================================================================
+
+def get_codon_counts(seq):
+    """
+    Compute codon and codon-pair statistics from a nucleotide sequence.
+
+    Returns:
+        tuple: (codondata, codonpairdata) dictionaries containing:
+            - codondata['counts']: Raw codon counts
+            - codondata['RSCU']: Relative Synonymous Codon Usage
+            - codondata['W']: Relative adaptiveness (codon frequency / max synonymous frequency)
+            - codonpairdata['counts']: Raw bicodon counts
+            - codonpairdata['RSCPU']: Relative Synonymous Codon Pair Usage
+            - codonpairdata['CPS']: Codon Pair Score (ln of observed/expected)
+            - codonpairdata['noln CPS']: CPS without natural log
+            - codonpairdata['W_CP']: Relative adaptiveness for codon pairs
+    """
+    import numpy as np
+
+    codondata = {
+        "counts": {codon: 0 for codon in codon_to_aa.keys()},
+        "RSCU": {codon: 0 for codon in codon_to_aa.keys()}
+    }
+    codonpairdata = {
+        "counts": {codon1 + codon2: 0 for codon1 in codon_to_aa.keys() for codon2 in codon_to_aa.keys()},
+        "RSCPU": {codon1 + codon2: 0 for codon1 in codon_to_aa.keys() for codon2 in codon_to_aa.keys()},
+        "noln CPS": {},
+        "CPS": {}
+    }
+
+    # Ensure sequence length is a multiple of 3
+    seq_len_multiple_of_3 = (len(seq) // 3) * 3
+
+    for i in range(0, seq_len_multiple_of_3, 3):
+        codon = seq[i:i + 3]
+        if len(codon) == 3 and codon in codondata["counts"]:
+            codondata["counts"][codon] += 1
+
+        if i + 6 <= seq_len_multiple_of_3:
+            bicodon = seq[i:i + 6]
+            if bicodon in codonpairdata["counts"]:
+                codonpairdata["counts"][bicodon] += 1
+
+    # Calculate RSCU for each codon
+    for codon1 in codondata["counts"].keys():
+        aa = codon_to_aa.get(codon1)
+        if not aa or aa == 'Stop' or aa == '-':
+            codondata["RSCU"][codon1] = np.nan
+            continue
+        syn_codons = codon_table.get(aa, [])
+        numsyn = sum(codondata["counts"].get(c, 0) for c in syn_codons)
+        try:
+            codondata["RSCU"][codon1] = codondata["counts"][codon1] / (numsyn / len(syn_codons))
+        except ZeroDivisionError:
+            codondata["RSCU"][codon1] = np.nan
+
+    # Calculate W (relative adaptiveness) for codons
+    codondata["W"] = {}
+    for codon1 in codondata["RSCU"].keys():
+        aa = codon_to_aa.get(codon1)
+        if not aa or aa == 'Stop' or aa == '-' or np.isnan(codondata["RSCU"].get(codon1, np.nan)):
+            codondata["W"][codon1] = np.nan
+            continue
+        syn_codons = codon_table.get(aa, [])
+        max_rscu = max([codondata["RSCU"].get(c, 0) for c in syn_codons] or [1])
+        codondata["W"][codon1] = codondata["RSCU"][codon1] / max_rscu if max_rscu > 0 else np.nan
+
+    # Calculate RSCPU for codon pairs
+    for cp1 in codonpairdata["counts"].keys():
+        codon_a, codon_b = cp1[:3], cp1[3:]
+        aa1 = codon_to_aa.get(codon_a)
+        aa2 = codon_to_aa.get(codon_b)
+
+        if not aa1 or not aa2 or aa1 in ('Stop', '-') or aa2 in ('Stop', '-'):
+            codonpairdata["RSCPU"][cp1] = np.nan
+            continue
+
+        syn_cp_codons1 = codon_table.get(aa1, [])
+        syn_cp_codons2 = codon_table.get(aa2, [])
+
+        numsyn = sum(codonpairdata["counts"].get(cpa + cpb, 0)
+                     for cpa in syn_cp_codons1 for cpb in syn_cp_codons2)
+        syn_cp_count = len(syn_cp_codons1) * len(syn_cp_codons2)
+
+        try:
+            codonpairdata["RSCPU"][cp1] = codonpairdata["counts"][cp1] / (numsyn / syn_cp_count)
+        except ZeroDivisionError:
+            codonpairdata["RSCPU"][cp1] = np.nan
+
+        # Calculate CPS
+        try:
+            expected_count = codondata["counts"].get(codon_a, 0) * codondata["counts"].get(codon_b, 0)
+            if expected_count == 0:
+                raise ZeroDivisionError
+            noln_cps = codonpairdata["counts"][cp1] / expected_count
+            codonpairdata["noln CPS"][cp1] = noln_cps
+            codonpairdata["CPS"][cp1] = math.log(noln_cps)
+        except (ZeroDivisionError, ValueError):
+            codonpairdata["noln CPS"][cp1] = np.nan
+            codonpairdata["CPS"][cp1] = np.nan
+
+    # Calculate W_CP for codon pairs
+    codonpairdata["W_CP"] = {}
+    for cp1 in codonpairdata["RSCPU"].keys():
+        if np.isnan(codonpairdata["RSCPU"].get(cp1, np.nan)):
+            codonpairdata["W_CP"][cp1] = np.nan
+            continue
+        codon_a, codon_b = cp1[:3], cp1[3:]
+        aa1 = codon_to_aa.get(codon_a)
+        aa2 = codon_to_aa.get(codon_b)
+        if not aa1 or not aa2:
+            codonpairdata["W_CP"][cp1] = np.nan
+            continue
+        syn_cp_codons1 = codon_table.get(aa1, [])
+        syn_cp_codons2 = codon_table.get(aa2, [])
+        max_rscpu = max([codonpairdata["RSCPU"].get(cpa + cpb, 0)
+                         for cpa in syn_cp_codons1 for cpb in syn_cp_codons2] or [1])
+        codonpairdata["W_CP"][cp1] = codonpairdata["RSCPU"][cp1] / max_rscpu if max_rscpu > 0 else np.nan
+
+    return codondata, codonpairdata
+
+
+# Human tRNA adaptation weights (tAI)
+# Based on tRNA gene copy numbers and wobble pairing efficiency
+# Sources: dos Reis et al. 2004, Tuller et al. 2010
+# Format: codon -> tAI weight (0-1 scale, normalized)
+HUMAN_TAI_WEIGHTS = {
+    'TTT': 0.344, 'TTC': 1.000, 'TTA': 0.051, 'TTG': 0.344,
+    'TCT': 0.344, 'TCC': 0.688, 'TCA': 0.172, 'TCG': 0.086,
+    'TAT': 0.344, 'TAC': 1.000, 'TAA': 0.000, 'TAG': 0.000,
+    'TGT': 0.344, 'TGC': 1.000, 'TGA': 0.000, 'TGG': 1.000,
+    'CTT': 0.172, 'CTC': 0.516, 'CTA': 0.086, 'CTG': 1.000,
+    'CCT': 0.344, 'CCC': 0.688, 'CCA': 0.344, 'CCG': 0.172,
+    'CAT': 0.344, 'CAC': 1.000, 'CAA': 0.344, 'CAG': 1.000,
+    'CGT': 0.086, 'CGC': 0.344, 'CGA': 0.086, 'CGG': 0.172,
+    'ATT': 0.516, 'ATC': 1.000, 'ATA': 0.086, 'ATG': 1.000,
+    'ACT': 0.344, 'ACC': 1.000, 'ACA': 0.344, 'ACG': 0.172,
+    'AAT': 0.344, 'AAC': 1.000, 'AAA': 0.344, 'AAG': 1.000,
+    'AGT': 0.172, 'AGC': 1.000, 'AGA': 0.172, 'AGG': 0.172,
+    'GTT': 0.344, 'GTC': 0.688, 'GTA': 0.172, 'GTG': 1.000,
+    'GCT': 0.516, 'GCC': 1.000, 'GCA': 0.344, 'GCG': 0.172,
+    'GAT': 0.344, 'GAC': 1.000, 'GAA': 0.344, 'GAG': 1.000,
+    'GGT': 0.344, 'GGC': 1.000, 'GGA': 0.344, 'GGG': 0.344,
+    '---': 0.000,
+}
+
+# Human reference W values for CAI calculation
+# Based on highly expressed genes (Sharp & Li 1987, adapted for human)
+HUMAN_REFERENCE_W = {
+    'TTT': 0.45, 'TTC': 1.00, 'TTA': 0.07, 'TTG': 0.13,
+    'TCT': 0.44, 'TCC': 0.53, 'TCA': 0.26, 'TCG': 0.11,
+    'TAT': 0.43, 'TAC': 1.00, 'TAA': 1.00, 'TAG': 0.23,
+    'TGT': 0.45, 'TGC': 1.00, 'TGA': 0.47, 'TGG': 1.00,
+    'CTT': 0.13, 'CTC': 0.20, 'CTA': 0.07, 'CTG': 1.00,
+    'CCT': 0.52, 'CCC': 0.63, 'CCA': 0.51, 'CCG': 0.18,
+    'CAT': 0.41, 'CAC': 1.00, 'CAA': 0.25, 'CAG': 1.00,
+    'CGT': 0.18, 'CGC': 0.43, 'CGA': 0.14, 'CGG': 0.25,
+    'ATT': 0.36, 'ATC': 1.00, 'ATA': 0.16, 'ATG': 1.00,
+    'ACT': 0.37, 'ACC': 1.00, 'ACA': 0.42, 'ACG': 0.18,
+    'AAT': 0.46, 'AAC': 1.00, 'AAA': 0.42, 'AAG': 1.00,
+    'AGT': 0.29, 'AGC': 1.00, 'AGA': 0.45, 'AGG': 0.42,
+    'GTT': 0.18, 'GTC': 0.29, 'GTA': 0.11, 'GTG': 1.00,
+    'GCT': 0.45, 'GCC': 1.00, 'GCA': 0.38, 'GCG': 0.19,
+    'GAT': 0.46, 'GAC': 1.00, 'GAA': 0.42, 'GAG': 1.00,
+    'GGT': 0.35, 'GGC': 1.00, 'GGA': 0.46, 'GGG': 0.35,
+    '---': 0.00,
+}
+
+
+def compute_cai(seq, w_values=None):
+    """
+    Compute Codon Adaptation Index (CAI) for a sequence.
+
+    CAI = geometric mean of W values across all codons
+    CAI = exp((1/L) * sum(ln(W_i)))
+
+    Args:
+        seq: Nucleotide sequence (in-frame ORF)
+        w_values: Dict of codon -> W values. If None, uses HUMAN_REFERENCE_W
+
+    Returns:
+        float: CAI value (0-1), or None if cannot compute
+    """
+    import numpy as np
+
+    if w_values is None:
+        w_values = HUMAN_REFERENCE_W
+
+    seq = seq.upper().replace('U', 'T')
+    seq_len = (len(seq) // 3) * 3
+
+    log_w_sum = 0.0
+    codon_count = 0
+
+    for i in range(0, seq_len, 3):
+        codon = seq[i:i+3]
+        if codon in ('TAA', 'TAG', 'TGA', '---'):  # Skip stops and gaps
+            continue
+        w = w_values.get(codon)
+        if w is None or w <= 0:
+            continue
+        log_w_sum += np.log(w)
+        codon_count += 1
+
+    if codon_count == 0:
+        return None
+
+    return np.exp(log_w_sum / codon_count)
+
+
+def compute_tai(seq, tai_weights=None):
+    """
+    Compute tRNA Adaptation Index (tAI) for a sequence.
+
+    tAI = geometric mean of tRNA adaptation weights across all codons.
+
+    Args:
+        seq: Nucleotide sequence (in-frame ORF)
+        tai_weights: Dict of codon -> tAI weights. If None, uses HUMAN_TAI_WEIGHTS
+
+    Returns:
+        float: tAI value (0-1), or None if cannot compute
+    """
+    import numpy as np
+
+    if tai_weights is None:
+        tai_weights = HUMAN_TAI_WEIGHTS
+
+    seq = seq.upper().replace('U', 'T')
+    seq_len = (len(seq) // 3) * 3
+
+    log_tai_sum = 0.0
+    codon_count = 0
+
+    for i in range(0, seq_len, 3):
+        codon = seq[i:i+3]
+        if codon in ('TAA', 'TAG', 'TGA', '---'):  # Skip stops and gaps
+            continue
+        w = tai_weights.get(codon)
+        if w is None or w <= 0:
+            continue
+        log_tai_sum += np.log(w)
+        codon_count += 1
+
+    if codon_count == 0:
+        return None
+
+    return np.exp(log_tai_sum / codon_count)
+
+
+def get_codon_tai(codon, tai_weights=None):
+    """Get tAI weight for a single codon."""
+    if tai_weights is None:
+        tai_weights = HUMAN_TAI_WEIGHTS
+    return tai_weights.get(codon.upper().replace('U', 'T'), None)
+
+
+def get_codon_cai_w(codon, w_values=None):
+    """Get CAI W value (reference adaptiveness) for a single codon."""
+    if w_values is None:
+        w_values = HUMAN_REFERENCE_W
+    return w_values.get(codon.upper().replace('U', 'T'), None)
+
+
+def extract_codon_with_bicodons(ntposnt, seq):
+    """
+    Extract codon and bicodons for a given SNP, respecting biological constraints.
+
+    Biology rules:
+    - First codon: only forward bicodon possible (codon1 + codon2)
+    - Last codon: only reverse bicodon possible (codon_n-1 + codon_n)
+    - Middle codons: both forward and reverse bicodons possible
+
+    Args:
+        ntposnt (str): SNP notation (e.g., "A123G") - 1-based position
+        seq (str): DNA sequence
+
+    Returns:
+        tuple: (original_codon, forward_bicodon, reverse_bicodon, pos_in_codon, pos, codon_number)
+               where bicodons may be empty strings if not biologically possible
+    """
+    pos, mut = get_mutation_data_bioAccurate(ntposnt)
+    if pos is None:
+        return None, "", "", 0, 0, 0
+
+    # Convert to 0-based indexing
+    pos_0_indexed = pos - 1
+    pos_in_codon = pos_0_indexed % 3
+
+    # Find the codon start position and codon number
+    codon_start_pos = (pos_0_indexed // 3) * 3
+    codon_number = (pos_0_indexed // 3) + 1  # 1-based codon numbering
+
+    # Calculate total number of complete codons in sequence
+    total_codons = len(seq) // 3
+
+    # Extract the original codon containing the mutation
+    original_codon = seq[codon_start_pos:codon_start_pos + 3]
+
+    # Initialize bicodons
+    forward_bicodon = ""
+    reverse_bicodon = ""
+
+    # Determine which bicodons are biologically possible
+    is_first_codon = (codon_number == 1)
+    is_last_codon = (codon_number == total_codons)
+
+    # Forward bicodon (current codon + following codon)
+    # Possible for first and middle codons, but not last codon
+    if not is_last_codon and codon_start_pos + 6 <= len(seq):
+        following_codon = seq[codon_start_pos + 3:codon_start_pos + 6]
+        if len(following_codon) == 3:
+            forward_bicodon = original_codon + following_codon
+
+    # Reverse bicodon (preceding codon + current codon)
+    # Possible for middle and last codons, but not first codon
+    if not is_first_codon and codon_start_pos >= 3:
+        preceding_codon = seq[codon_start_pos - 3:codon_start_pos]
+        if len(preceding_codon) == 3:
+            reverse_bicodon = preceding_codon + original_codon
+
+    return original_codon, forward_bicodon, reverse_bicodon, pos_in_codon, pos, codon_number
+
+
+# =============================================================================
+# MSA Generation and Processing Utilities
+# =============================================================================
+
+def run_jackhmmer(query_fasta, database, output_sto, jackhmmer_binary,
+                  iterations=5, evalue_inclusion=1e-3, threads=4):
+    """
+    Run jackhmmer iterative search against a sequence database.
+
+    Args:
+        query_fasta: Path to query protein sequence (FASTA)
+        database: Path to UniRef90 or similar database
+        output_sto: Path for Stockholm output
+        jackhmmer_binary: Path to jackhmmer executable
+        iterations: Number of search iterations
+        evalue_inclusion: E-value threshold for inclusion
+        threads: Number of CPU threads
+
+    Returns:
+        Path to Stockholm output file
+    """
+    cmd = [
+        jackhmmer_binary,
+        '-N', str(iterations),
+        '--incE', str(evalue_inclusion),
+        '-A', output_sto,
+        '--cpu', str(threads),
+        '--noali',
+        query_fasta,
+        database
+    ]
+
+    result = subprocess.run(cmd, capture_output=True, text=True)
+
+    if result.returncode != 0:
+        raise RuntimeError(f"jackhmmer failed: {result.stderr}")
+
+    return Path(output_sto)
+
+
+def parse_stockholm(stockholm_file):
+    """
+    Parse Stockholm format MSA file.
+
+    Args:
+        stockholm_file: Path to Stockholm file
+
+    Returns:
+        dict: {seq_id: sequence} mapping
+    """
+    from collections import defaultdict
+    current_seqs = defaultdict(str)
+
+    with open(stockholm_file, 'r') as f:
+        for line in f:
+            line = line.rstrip()
+            if line.startswith('#') or line.startswith('//') or not line:
+                continue
+            parts = line.split()
+            if len(parts) >= 2:
+                seq_id = parts[0]
+                seq = parts[1]
+                current_seqs[seq_id] += seq
+
+    return dict(current_seqs)
+
+
+def stockholm_to_a2m(msa, focus_seq_id):
+    """
+    Convert Stockholm MSA to A2M format.
+
+    A2M format:
+    - Uppercase: match states (aligned to query)
+    - Lowercase: insertions relative to query
+    - '-': deletions (gaps in sequence, not in query)
+    - '.': gaps in query (insertions in other sequences)
+
+    Args:
+        msa: dict {seq_id: sequence}
+        focus_seq_id: ID of the focus/query sequence
+
+    Returns:
+        dict: {seq_id: a2m_sequence}
+    """
+    if focus_seq_id not in msa:
+        for seq_id in msa:
+            if focus_seq_id in seq_id or seq_id in focus_seq_id:
+                focus_seq_id = seq_id
+                break
+        else:
+            raise ValueError(f"Focus sequence '{focus_seq_id}' not found in MSA")
+
+    focus_seq = msa[focus_seq_id]
+    match_columns = [i for i, c in enumerate(focus_seq) if c not in '-.']
+
+    a2m_msa = {}
+    for seq_id, seq in msa.items():
+        a2m_seq = []
+        for i, c in enumerate(seq):
+            if i in match_columns:
+                if c in '-.':
+                    a2m_seq.append('-')
+                else:
+                    a2m_seq.append(c.upper())
+            else:
+                if c in '-.':
+                    a2m_seq.append('.')
+                else:
+                    a2m_seq.append(c.lower())
+        a2m_msa[seq_id] = ''.join(a2m_seq)
+
+    return a2m_msa
+
+
+def filter_msa_by_gaps(msa, max_seq_gaps=0.4, max_col_gaps=0.6):
+    """
+    Filter MSA by removing gappy sequences and columns.
+
+    Args:
+        msa: dict {seq_id: sequence}
+        max_seq_gaps: Maximum fraction of gaps allowed per sequence
+        max_col_gaps: Maximum fraction of gaps allowed per column
+
+    Returns:
+        dict: Filtered MSA
+    """
+    if not msa:
+        return {}
+
+    # Remove sequences with too many gaps
+    filtered_seqs = {}
+    for seq_id, seq in msa.items():
+        gap_count = seq.count('-') + seq.count('.') + seq.count('!')
+        gap_frac = gap_count / len(seq) if len(seq) > 0 else 1.0
+        if gap_frac <= max_seq_gaps:
+            filtered_seqs[seq_id] = seq
+
+    if not filtered_seqs:
+        return {}
+
+    # Identify columns with too many gaps
+    seq_list = list(filtered_seqs.values())
+    seq_len = len(seq_list[0])
+    n_seqs = len(seq_list)
+
+    cols_to_keep = []
+    for i in range(seq_len):
+        col = [s[i] for s in seq_list]
+        gap_count = sum(1 for c in col if c in '-.')
+        gap_frac = gap_count / n_seqs
+        if gap_frac <= max_col_gaps:
+            cols_to_keep.append(i)
+
+    # Remove gappy columns
+    final_msa = {}
+    for seq_id, seq in filtered_seqs.items():
+        new_seq = ''.join(seq[i] for i in cols_to_keep)
+        final_msa[seq_id] = new_seq
+
+    return final_msa
+
+
+def compute_sequence_weights(msa, identity_threshold=0.8):
+    """
+    Compute sequence weights based on clustering at identity threshold.
+
+    Used for N_eff calculation. Weight = 1 / number of neighbors.
+
+    Args:
+        msa: dict {seq_id: sequence}
+        identity_threshold: Clustering threshold (0.8 = 80% identity)
+
+    Returns:
+        dict: {seq_id: weight}
+    """
+    seq_ids = list(msa.keys())
+    n_seqs = len(seq_ids)
+
+    if n_seqs == 0:
+        return {}
+
+    seqs = [msa[sid] for sid in seq_ids]
+    neighbor_counts = [1] * n_seqs
+
+    for i in range(n_seqs):
+        for j in range(i + 1, n_seqs):
+            matches = sum(1 for a, b in zip(seqs[i], seqs[j])
+                         if a == b and a not in '-.')
+            aligned = sum(1 for a, b in zip(seqs[i], seqs[j])
+                         if a not in '-.' and b not in '-.')
+            if aligned > 0:
+                identity = matches / aligned
+                if identity >= identity_threshold:
+                    neighbor_counts[i] += 1
+                    neighbor_counts[j] += 1
+
+    weights = {seq_ids[i]: 1.0 / neighbor_counts[i] for i in range(n_seqs)}
+    return weights
+
+
+def compute_neff(msa, identity_threshold=0.8):
+    """
+    Compute effective number of sequences (N_eff).
+
+    N_eff = sum of sequence weights, where weight = 1/n_neighbors.
+    Higher N_eff indicates more diverse MSA with better evolutionary signal.
+
+    Args:
+        msa: dict {seq_id: sequence}
+        identity_threshold: Clustering threshold
+
+    Returns:
+        float: N_eff value
+    """
+    weights = compute_sequence_weights(msa, identity_threshold)
+    return sum(weights.values())
+
+
+def validate_msa_quality(msa, min_neff_ratio=10, query_length=None, focus_seq_id=None):
+    """
+    Validate MSA quality for EVmutation analysis.
+
+    Args:
+        msa: dict {seq_id: sequence}
+        min_neff_ratio: Minimum N_eff / L ratio (default: 10)
+        query_length: Length of query sequence (computed if not provided)
+        focus_seq_id: ID of focus sequence (for length calculation)
+
+    Returns:
+        dict: Quality metrics including pass/fail status
+    """
+    if not msa:
+        return {'pass': False, 'error': 'Empty MSA'}
+
+    # Get query length
+    if query_length is None:
+        if focus_seq_id and focus_seq_id in msa:
+            query_length = len(msa[focus_seq_id].replace('-', '').replace('.', ''))
+        else:
+            first_seq = next(iter(msa.values()))
+            query_length = len(first_seq.replace('-', '').replace('.', ''))
+
+    # Compute N_eff
+    neff = compute_neff(msa)
+    neff_ratio = neff / query_length if query_length > 0 else 0
+    min_neff = min_neff_ratio * query_length
+
+    return {
+        'pass': neff >= min_neff,
+        'n_sequences': len(msa),
+        'n_eff': round(neff, 1),
+        'n_eff_ratio': round(neff_ratio, 2),
+        'query_length': query_length,
+        'min_neff_required': min_neff
+    }
+
+
+def write_a2m(msa, output_path, focus_seq_id=None):
+    """
+    Write MSA to A2M format file.
+
+    Args:
+        msa: dict {seq_id: sequence}
+        output_path: Output file path
+        focus_seq_id: If provided, write focus sequence first
+    """
+    with open(output_path, 'w') as f:
+        if focus_seq_id and focus_seq_id in msa:
+            f.write(f">{focus_seq_id}\n{msa[focus_seq_id]}\n")
+        for seq_id, seq in msa.items():
+            if seq_id != focus_seq_id:
+                f.write(f">{seq_id}\n{seq}\n")

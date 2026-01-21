@@ -8,23 +8,28 @@ Modular bioinformatics framework for automated feature extraction, coordinate ma
 3. [Pipeline Summaries](#pipeline-summaries)
    - [NetNGlyc](#netnglyc-pipeline)
    - [NetPhos](#netphos-pipeline)
+   - [NetMHC](#netmhc-pipeline)
+   - [NetSurfP3](#netsurfp3-pipeline)
    - [Miranda](#miranda-pipeline)
    - [GeneSplicer](#genesplicer-pipeline)
    - [SpliceAI](#spliceai-pipeline)
    - [RNAfold](#rnafold-pipeline)
+   - [AlphaFold3](#alphafold3-pipeline)
+   - [EVmutation](#evmutation-pipeline)
+   - [Codon Usage](#codon-usage-pipeline)
+   - [Rare Codon](#rare-codon-pipeline)
 4. [Shared Infrastructure & Pathing](#shared-infrastructure--pathing)
 5. [End-to-End Data Preparation Workflow](#end-to-end-data-preparation-workflow)
-6. [Upcoming Pipelines](#upcoming-pipelines)
-7. [Citation](#citation)
-8. [License](#license)
-9. [Support](#support)
+6. [Citation](#citation)
+7. [License](#license)
+8. [Support](#support)
 
 ---
 
 ## Architecture Overview
 
 - **Unified mutation processing** keeps mutant sequence analysis consistent across pipelines.  
-- **Shared utilities** in `dependencies/utility.py` provide discovery helpers, mapping loaders, and mutation filters for every pipeline.  
+- **Shared utilities** in `utils/utility.py` provide discovery helpers, mapping loaders, and mutation filters for every pipeline.  
 - **Multiple processing modes** let you run full pipelines, single tools, or parse-only passes.  
 - **Parallel execution** leverages multiprocessing/threading tuned per tool (`ProcessPoolExecutor`, `ThreadPoolExecutor`).  
 - **Cross-platform support** via Docker images and helper scripts for Linux and macOS (Apple Silicon).  
@@ -34,16 +39,22 @@ Modular bioinformatics framework for automated feature extraction, coordinate ma
 
 ## Pipeline Quick-Start Matrix
 
-| Pipeline | Entry Point | Primary Inputs*                                                                   | Notable Outputs                                                                       |
-|----------|-------------|-----------------------------------------------------------------------------------|---------------------------------------------------------------------------------------|
-| **NetNGlyc** | `netNglyc/full-docker-netnglyc-pipeline.py` | WT & mutant protein FASTA dirs, flexible mapping CSV dir, SignalP 6.0 install      | Glycosylation calls with SignalP-aware summaries                                      |
-| **NetPhos** | `netphos/netphos-pipeline.py` | WT/mutant protein FASTA dirs plus mapping CSV dir (Dockerized NetPhos/APE)       | Kinase-specific phosphorylation predictions with cached summaries                     |
-| **Miranda** | `miranda/run_miranda_pipeline.py` | WT transcript FASTA, MirandA binary, miRNA DB, optional mutation metadata/logs     | Δ-based miRNA binding summaries, events, and per-site audits                          |
-| **GeneSplicer** | `genesplicer/genesplicer_ensemble.py` | Genomic FASTA slices, mutation CSV dir, GeneSplicer binary & models                | Donor/acceptor delta summaries, event tables, detailed site audits                    |
-| **SpliceAI** | `spliceai/spliceai-pipeline-controller.py` | Mutation CSVs or pre-built VCFs, reference genome, SpliceAI annotation             | SpliceAI VCFs, parsed consequence tables, adaptive restart + tracking logs            |
-| **RNAfold** | `RNAfold/run_viennaRNA_pipeline.py` | Transcript FASTA, transcript-mapping CSV dir, reference FASTA                     | $ΔΔG$ summaries, Jensen–Shannon divergence metrics, per-position accessibility deltas |
+| Pipeline | Entry Point | Primary Inputs* | Notable Outputs |
+|----------|-------------|-----------------|-----------------|
+| **NetNGlyc** | `netNglyc/netnglyc-pipeline.py` | WT & mutant protein FASTA, mapping CSV dir, SignalP 6.0 | Glycosylation calls with SignalP-aware summaries |
+| **NetPhos** | `netphos/netphos-pipeline.py` | WT/mutant protein FASTA, mapping CSV dir | Kinase-specific phosphorylation predictions |
+| **NetMHC** | `netMHC/netmhc-pipeline.py` | WT/mutant protein FASTA, mapping CSV dir, HLA alleles | MHC binding predictions, epitope gain/loss |
+| **NetSurfP3** | `NetSurfP3/netsurfp3-pipeline.py` | WT/mutant protein FASTA, mapping CSV dir | RSA, secondary structure, disorder predictions |
+| **Miranda** | `miranda/miranda-ensemble.py` | WT transcript FASTA, MirandA binary, miRNA DB | Δ-based miRNA binding summaries |
+| **GeneSplicer** | `genesplicer/genesplicer_ensemble.py` | Genomic FASTA, mutation CSV dir, GeneSplicer binary | Donor/acceptor delta summaries |
+| **SpliceAI** | `spliceai/spliceai-pipeline-controller.py` | Mutation CSVs or VCFs, reference genome | SpliceAI VCFs, parsed consequence tables |
+| **RNAfold** | `RNAfold/run_viennaRNA_pipeline.py` | Transcript FASTA, transcript-mapping CSV dir | ΔΔG summaries, accessibility deltas |
+| **AlphaFold3** | `alphafold3/alphafold3_pipeline.py` | Mutation CSV, RBP binding data (POSTAR3/eCLIP) | RNA-RBP structure predictions, PAE metrics |
+| **EVmutation** | `EVmutation/evmutation-pipeline.py` | Protein MSA, plmc binary | Epistatic mutation effect scores |
+| **Codon Usage** | `codon_usage/codon-usage-pipeline.py` | ORF FASTA, mutation CSV | RSCU, CAI, tAI, codon pair scores |
+| **Rare Codon** | `rare_codon/rare-codon-pipeline.py` | Codon MSA, codon usage file | Rare codon enrichment p-values |
 
-Each script auto-discovers dependencies via `dependencies/utility.py` if the repository layout is preserved.
+Each script auto-discovers dependencies via `utils/utility.py` if the repository layout is preserved.
 
 *_Either single files or directories (for bulk processing) are accepted inputs_
 
@@ -70,7 +81,7 @@ Kinase-specific phosphorylation site prediction using the NetPhos/APE system.
 
 ### Miranda Pipeline
 
-WT↔MUT miRNA binding analysis with Δ-based metrics.
+WT<->MUT miRNA binding analysis with Δ-based metrics.
 
 - Processes each WT transcript once, reuses its MirandA hits for every mutant, then evaluates mutants in parallel.  
 - Emits summary/events/site tables with Δ-score, competitive binding, and distance-weighted impact metrics.  
@@ -78,7 +89,7 @@ WT↔MUT miRNA binding analysis with Δ-based metrics.
 
 ### GeneSplicer Pipeline
 
-WT↔ALT ensemble delta caller for splice donor/acceptor sites.
+WT<->ALT ensemble delta caller for splice donor/acceptor sites.
 
 - Runs GeneSplicer on full genomic context (or windowed mode) per gene, compares WT vs ALT, and clusters events.  
 - Generates summary, events, and sites tables with positional shifts, confidence scoring, and QC flags.  
@@ -97,20 +108,65 @@ Deep learning-based splice site prediction orchestrated by an adaptive controlle
 
 Secondary structure impact analysis via ViennaRNA.
 
-- Compares reference vs. alternate 151-nt (configurable) windows around each variant.  
-- Computes $ΔΔG$, minimum free energy shifts, and Boltzmann ensemble statistics.  
-- Calculates Jensen–Shannon divergence on base accessibility ($Δu$) with configurable τ thresholding.  
-- Outputs:
-  - **Summary**: per-mutation $ΔΔG$, MFE change flags, divergence metrics, and ensemble statistics.  
-  - **Ensemble Summary**: per-position $Δu$ values highlighting nucleotides crossing $τ$. 
-- Designed for transcript-level mappings; invoke with `--transcript-mapping` to feed exon-aware outputs directly.  
+- Compares reference vs. alternate 151-nt (configurable) windows around each variant.
+- Computes ΔΔG, minimum free energy shifts, and Boltzmann ensemble statistics.
+- Calculates Jensen-Shannon divergence on base accessibility with configurable τ thresholding.
+- Outputs per-mutation ΔΔG, MFE change flags, divergence metrics, and ensemble statistics.
+
+### NetMHC Pipeline
+
+MHC class I and II binding prediction for WT vs mutant sequences.
+
+- Predicts peptide-MHC binding across multiple HLA alleles.
+- Identifies gained/lost epitopes and binding strength changes.
+- Supports netMHCpan, netMHC, and netMHCII tools via Docker.
+
+### NetSurfP3 Pipeline
+
+Protein structure feature prediction using NetSurfP-3.0.
+
+- Predicts relative surface accessibility (RSA), secondary structure, and disorder.
+- Compares WT vs mutant structural changes at mutation sites.
+- Requires cloning NetSurfP-3.0 library from GitHub.
+
+### AlphaFold3 Pipeline
+
+RNA-RBP interaction structure prediction using AlphaFold3 or Boltz-1.
+
+- Queries POSTAR3/ENCODE eCLIP data for RBPs near mutations.
+- Predicts RNA-protein complex structures for WT and mutant alleles.
+- Computes PAE-based binding metrics and interface contacts.
+
+### EVmutation Pipeline
+
+Evolutionary mutation effect prediction using epistatic models.
+
+- Fits Potts model to protein MSA via plmc.
+- Predicts fitness effects of amino acid substitutions.
+- Requires cloning EVmutation library from GitHub.
+
+### Codon Usage Pipeline
+
+Codon optimality metrics for translational efficiency analysis.
+
+- Computes RSCU, CAI, tAI for single codons.
+- Calculates codon pair scores (CPS, RSCPU) for bicodons.
+- Quantifies changes in translational efficiency.
+
+### Rare Codon Pipeline
+
+Rare codon enrichment detection using sliding window analysis.
+
+- Identifies regions enriched/depleted in rare codons.
+- Uses evolutionary conservation from codon-aware MSAs.
+- Requires downloading cg_cotrans library from Shakhnovich Lab.
 
 ---
 
 ## Shared Infrastructure & Pathing
 
-- `dependencies/utility.py` serves as the core helper module for NetNGlyc, NetPhos, Miranda, GeneSplicer, SpliceAI preprocessors, and RNAfold.  
-- Each pipeline appends `../dependencies` to `sys.path` at runtime.  
+- `utils/utility.py` serves as the core helper module for NetNGlyc, NetPhos, Miranda, GeneSplicer, SpliceAI preprocessors, and RNAfold.  
+- Each pipeline appends `../utils` to `sys.path` at runtime.  
 - Helpers include directory discovery (`get_input_dir`, `get_output_dir`), mutation CSV loaders, exon-aware mapping filters, FASTA retrieval utilities, and logging wrappers.  
 - `docker/` contains Dockerfiles and compose snippets for NetNGlyc and NetPhos. 
 
@@ -123,19 +179,32 @@ For the vast majority of the pipelines in this repository properly mapped mutati
 1. **Generate exon-aware assets**
 
 ```bash
-   python3 dependencies/exon_aware_mapping.py \
+   python3 utils/exon_aware_mapping.py \
      --mutations /path/to/mutations/ \
      --annotation /path/to/annotations.gtf \
      --reference /path/to/reference_genome.fa \
      --out-fasta /path/to/output_fastas/ \
      --out-chromosome-mapping /path/to/chromosome_mappings/ \
      --out-genomic-mapping /path/to/genomic_mappings/ \
-     --out-transcript-mapping /path/to/transcript_mappings/
+     --out-transcript-mapping /path/to/transcript_mappings/ \
+     --out-aa-mapping /path/to/aa_mappings/ \
+     --orf /path/to/orf_fastas/ \
+     --force-cds transcript_overrides.csv \
+     --verbose
 ```
 
-   - Produces per-gene ORF, transcript, and genomic FASTA bundles.  
-   - Emits chromosome, genomic-slice, and transcript mapping CSVs (`*{GENE}*.csv`).  
-   - Logs validation issues (missing exons, mismatched coordinates).  
+   **Key options:**
+   - `--orf` — Directory or file containing known ORF sequences. If omitted, ORF is inferred from transcript.
+   - `--force-cds` — Force specific transcript isoforms. Accepts either:
+     - Single accession (e.g., `NM_022162.3`) applied to all genes
+     - CSV file with `gene,transcript_id` columns for per-gene overrides
+   - `--out-aa-mapping` — Optional output directory for amino-acid mapping CSVs.
+   - `--verbose` — Print detailed ORF/mutation validation messages and write log file.
+
+   **Outputs:**
+   - Per-gene ORF, transcript, and genomic FASTA bundles.
+   - Chromosome, genomic-slice, transcript, and amino-acid mapping CSVs (`*{GENE}*.csv`).
+   - Validation log with mutation issues (out-of-range positions, base mismatches).  
 
 2. **Consume validation logs automatically**
 
@@ -144,7 +213,7 @@ For the vast majority of the pipelines in this repository properly mapped mutati
 
 3. **Optional: reference checks and VCF conversion**
 
-   - `dependencies/vcf_converter.py` cross-validates FASTA headers against the reference genome, normalizes chromosome naming, and creates sorted per-gene VCFs for SpliceAI.  
+   - `utils/vcf_converter.py` cross-validates FASTA headers against the reference genome, normalizes chromosome naming, and creates sorted per-gene VCFs for SpliceAI.  
    - Run when VCF input is required or genome mismatches are suspected.  
 
 4. **Stage outputs for pipelines**
@@ -159,14 +228,6 @@ For the vast majority of the pipelines in this repository properly mapped mutati
 
 ---
 
-## Upcoming Pipelines
-
-- netSufP3  
-- EVmutation  
-- netMHC  
-
----
-
 ## Citation
 
 ####
@@ -176,13 +237,17 @@ For citation details, see [CITING.md](CITING.md) and [CITATION.cff](CITATION.cff
 
 ### Pipeline-Specific Citations
 
-- **Miranda** — Enright AJ, John B, Gaul U, Tuschl T, Sander C, Marks DS. *MicroRNA targets in Drosophila.* Genome Biol. 2003;5(1):R1.  
-- **NetNGlyc** — Gupta R, Jung E, Brunak S. *Prediction of N-glycosylation sites in human proteins.* NetNglyc 1.0 Server. 2004. <https://services.healthtech.dtu.dk/service.php?NetNGlyc-1.0>  
-  Teufel F, Almagro Armenteros JJ, Johansen AR, et al. *SignalP 6.0 predicts all five types of signal peptides using protein language models.* Nat Biotechnol. 2022;40(7):1023–1025.  
-- **NetPhos** — Blom N, Gammeltoft S, Brunak S. *Sequence and structure-based prediction of eukaryotic protein phosphorylation sites.* J Mol Biol. 1999;294(5):1351–1362.  
-- **GeneSplicer** — Pertea M, Lin X, Salzberg SL. *GeneSplicer: a new computational method for splice site prediction.* Nucleic Acids Res. 2001;29(5):1185–1190.  
-- **SpliceAI** — Jaganathan K, Kyriazopoulou Panagiotopoulou S, McRae JF, et al. *Predicting Splicing from Primary Sequence with Deep Learning.* Cell. 2019;176(3):535–548.e24.  
-- **RNAfold** — Lorenz R, Bernhart SH, Höner zu Siederdissen C, et al. *ViennaRNA Package 2.0.* Algorithms Mol Biol. 2011;6(1):26.  
+- **Miranda** — Enright AJ, et al. *MicroRNA targets in Drosophila.* Genome Biol. 2003;5(1):R1.
+- **NetNGlyc** — Gupta R, et al. *Prediction of N-glycosylation sites in human proteins.* DTU Health Tech. 2004.
+- **NetPhos** — Blom N, et al. *Sequence and structure-based prediction of eukaryotic protein phosphorylation sites.* J Mol Biol. 1999;294(5):1351-1362.
+- **NetMHC** — Reynisson B, et al. *NetMHCpan-4.1 and NetMHCIIpan-4.0.* Nucleic Acids Res. 2020;48(W1):W449-W454.
+- **NetSurfP3** — Klausen MS, et al. *NetSurfP-2.0: Improved prediction of protein structural features.* Proteins. 2019;87(6):520-527.
+- **GeneSplicer** — Pertea M, et al. *GeneSplicer: a new computational method for splice site prediction.* Nucleic Acids Res. 2001;29(5):1185-1190.
+- **SpliceAI** — Jaganathan K, et al. *Predicting Splicing from Primary Sequence with Deep Learning.* Cell. 2019;176(3):535-548.
+- **RNAfold** — Lorenz R, et al. *ViennaRNA Package 2.0.* Algorithms Mol Biol. 2011;6(1):26.
+- **AlphaFold3** — Abramson J, et al. *Accurate structure prediction of biomolecular interactions with AlphaFold 3.* Nature. 2024;630:493-500.
+- **EVmutation** — Hopf TA, et al. *Mutation effects predicted from sequence co-variation.* Nat Biotechnol. 2017;35:128-135.
+- **Rare Codon** — Jacobs WM, Shakhnovich EI. *Evidence of evolutionary selection for cotranslational folding.* PNAS. 2017;114:11434-11439.  
 
 ---
 

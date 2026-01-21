@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # BioFeatureFactory
-# Copyright (C) 2023–2025  Jacob Goldmintz
+# Copyright (C) 2023–2026  Jacob Goldmintz
 #
 # This program is free software: you can redistribute it and/or modify
 # it under the terms of the GNU Affero General Public License as
@@ -37,7 +37,7 @@ import json
 from pathlib import Path
 
 # Import shared batch processing utilities
-sys.path.append(os.path.join(os.path.dirname(__file__), '../dependencies'))
+sys.path.append(os.path.join(os.path.dirname(__file__), '../utils'))
 from utility import (
     split_fasta_into_batches,
     combine_batch_outputs,
@@ -307,7 +307,7 @@ def _run_docker_netphos(fasta_file, output_file, timeout=300):
             "docker", "run", "--rm",
             "--platform", "linux/386",
             "--entrypoint", "/bin/bash",
-            "netnglyc:latest",
+            "biofeaturefactory:latest",
             "-c", "ls -la /opt/netnglyc/ape-1.0/ape && echo 'APE found' || echo 'APE not found'"
         ]
         
@@ -324,7 +324,7 @@ def _run_docker_netphos(fasta_file, output_file, timeout=300):
             "docker", "run", "--rm",
             "--platform", "linux/386",
             "--entrypoint", "tcsh",
-            "netnglyc:latest", 
+            "biofeaturefactory:latest", 
             "-c", "echo 'Testing tcsh' && /opt/netnglyc/ape-1.0/ape -h"
         ]
         
@@ -345,7 +345,7 @@ def _run_docker_netphos(fasta_file, output_file, timeout=300):
             "--entrypoint", "tcsh",  # Override default NetNGlyc entrypoint
             "-v", f"{work_dir}:/data",
             "-w", "/data",  # Set working directory to /data
-            "netnglyc:latest",
+            "biofeaturefactory:latest",
             "/opt/netnglyc/ape-1.0/ape", "-m", "netphos", "input.fasta"
         ]
         

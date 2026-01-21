@@ -1,4 +1,4 @@
-# GeneSplicer Pipeline: WT↔ALT Ensemble Delta Caller
+# GeneSplicer Pipeline: WT<->ALT Ensemble Delta Caller
 
 ## Overview
 
@@ -11,7 +11,7 @@ Run GeneSplicer on full genomic context (or configurable context), compare WT vs
 ## Capabilities
 - Full-context scan (`--pipeline full`) with absolute genomic positions
 - Optional local marking with `--report-radius`
-- Proximity clustering, WT↔ALT pairing, event calling, priority scoring
+- Proximity clustering, WT<->ALT pairing, event calling, priority scoring
 - Deterministic, append-safe summary; auditable detail tables
 
 ## Dependencies
@@ -31,9 +31,9 @@ Run GeneSplicer on full genomic context (or configurable context), compare WT vs
 ---
 
 ### File Set
-- `--splice-summary` → `<basename>.tsv`
-- `--splice-summary.events.tsv` → `<basename>.events.tsv`
-- `--splice-summary.sites.tsv` → `<basename>.sites.tsv`
+- `--splice-summary` -> `<basename>.tsv`
+- `--splice-summary.events.tsv` -> `<basename>.events.tsv`
+- `--splice-summary.sites.tsv` -> `<basename>.sites.tsv`
 
 **Conventions**
 - Coordinates are absolute in `genome`/`extended` scan modes; window‐relative only in `window` mode.
@@ -122,7 +122,7 @@ Per‐allele per‐site audit rows used to build clusters and events.
 | `type`            | Boundary type                                       | `donor` / `acceptor`            |
 | `site_pos`        | Site position (End5 for donors, End3 for acceptors) | bp (absolute) or index (window) |
 | `score`           | GeneSplicer score                                   | dimensionless                   |
-| `confidence`      | Confidence weight (`low/med/high` → `0.5/0.75/1.0`) | numeric                         |
+| `confidence`      | Confidence weight (`low/med/high` -> `0.5/0.75/1.0`) | numeric                         |
 | `rank`            | Rank within allele×type (1=strongest)               | integer                         |
 | `distance_to_snv` | `\|site_pos − snv_pos\|`                            | bp                              |
 | `visible_flag`    | 1 if `score ≥ --visibility-threshold` else 0        | 0/1                             |
@@ -270,7 +270,7 @@ Confidence-weighted change using certainty weights (Borenstein et al., 2009).
 ### frac_effect_in_radius
 Fraction of effect mass within the local radius.
 - **Definition**: $\Phi = \dfrac{\sum_{d_i \le R} |\Delta_i|}{\sum_{\text{all } i} |\Delta_i|}$.
-- **Interpretation**: localization metric. Near $1$ → impact concentrated near SNV; near $0$ → mostly distal.
+- **Interpretation**: localization metric. Near $1$ -> impact concentrated near SNV; near $0$ -> mostly distal.
 
 ### global_max_abs_Δscore, local_max_abs_Δscore
 - **Definitions**: 
@@ -353,7 +353,7 @@ If you use this pipeline, please cite:
 
 ## License
 
-This project is licensed under the MIT License - see the [LICENSE](../../LICENSE) file in the root BioFeatureFactory directory for details.
+This project is licensed under the AGPL-3.0 License - see the [LICENSE](../../LICENSE) file in the root BioFeatureFactory directory for details.
 
 ## Support
 

@@ -1,6 +1,6 @@
-# Docker Support for NetNGlyc / NetPhos Pipelines
+# Docker Support for BioFeatureFactory Software Suite
 
-This directory hosts the shared container image used by the NetNGlyc and NetPhos pipelines when a native binary is unavailable (Apple Silicon) or when a self-contained Linux environment is desired.
+This directory hosts the unified container image `biofeaturefactory:latest` used by all BioFeatureFactory pipelines (NetNGlyc, NetPhos, NetMHC, NetSurfP-3.0) when a native binary is unavailable (Apple Silicon) or when a self-contained Linux environment is desired.
 
 ---
 
@@ -9,7 +9,7 @@ This directory hosts the shared container image used by the NetNGlyc and NetPhos
 | File | Purpose |
 |------|---------|
 | `Dockerfile` | 32-bit Linux image with NetNGlyc 1.0, NetPhos, tcsh, etc. |
-| `build-container.sh` | Builds `netnglyc:latest`, adding compatibility tweaks for Apple Silicon Macs. |
+| `build-container.sh` | Builds `biofeaturefactory:latest`, adding compatibility tweaks for Apple Silicon Macs. |
 | `signalp_stub` | Helper invoked inside the container when host SignalP 6.0 is not available. |
 | `netnglyc_stub` | Minimal stub to keep Docker workflows functional if the licensed binary is missing. |
 
@@ -36,7 +36,7 @@ The script:
 - Installs 32-bit libraries and tcsh required by the licensed binary.
 - Adds SignalP stubs so NetNGlyc can consume host predictions.
 
-The resulting image is tagged `netnglyc:latest`.
+The resulting image is tagged `biofeaturefactory:latest`.
 
 ---
 
@@ -54,25 +54,39 @@ Regardless of platform, SignalP 6.0 still runs on the host; the container expect
 
 ## 5. Pipeline Integration
 
-Both pipelines reference this image when `--force-docker` is set or when no native binary is detected:
+All pipelines reference this image when `--force-docker` is set or when no native binary is detected:
 
-- `../netnglyc/netnglyc-pipeline.py`
+- `../netNglyc/netnglyc-pipeline.py`
 - `../netphos/netphos-pipeline.py`
+- `../netMHC/netmhc-pipeline.py`
+- `../NSP3/netsurfp3-pipeline.py`
 
 The container provides:
-- NetNGlyc 1.0 (32-bit Linux build).
-- NetPhos (where licensed).
-- POSIX shell utilities required by the legacy scripts.
+- NetNGlyc 1.0 (32-bit Linux build)
+- NetPhos 3.1 (where licensed)
+- NetMHCpan 4.1 (where licensed and configured)
+- NetSurfP-3.0 (where configured with PyTorch/ESM models)
+- POSIX shell utilities required by the legacy scripts
 
 ---
 
 ## 6. Checklist
 
-1. Download `netNglyc.tar.gz`/`netphos.tar.gz` → place in `docker/`.
+1. Download required software packages -> place `.tar.gz` files in `docker/`:
+   - `netNglyc.tar.gz` (required)
+   - `netphos.tar.gz` (optional)
+   - `netMHCpan.tar.gz` (optional)
+   - NetSurfP-3.0 files (optional)
 2. Install Docker Desktop (macOS) or ensure Docker Engine is available (Linux).
 3. Run `./build-container.sh`.
-4. In pipeline commands, use the defaults (`netnglyc:latest`) or pass `--docker-image <name>` if you retagged.
+4. In pipeline commands, use the defaults (`biofeaturefactory:latest`) or pass `--docker-image <name>` if you retagged.
 5. Keep SignalP 6.0 installed on the host so the ensemble pipelines can embed SignalP context in their outputs.
 
 ---
+
+## License
+
+This project is licensed under the AGPL-3.0 License - see the [LICENSE](../LICENSE) file in the root BioFeatureFactory directory for details.
+
+Note: The software packages bundled in the Docker image (NetNGlyc, NetPhos, NetMHC, etc.) have their own licenses from DTU Health Tech.
 

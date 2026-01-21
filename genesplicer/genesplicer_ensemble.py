@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # BioFeatureFactory
-# Copyright (C) 2023–2025  Jacob Goldmintz
+# Copyright (C) 2023–2026  Jacob Goldmintz
 #
 # This program is free software: you can redistribute it and/or modify
 # it under the terms of the GNU Affero General Public License as
@@ -32,9 +32,9 @@ import multiprocessing
 import concurrent.futures
 
 # ---------------------------------------------------------------------------
-# imports from ../dependencies/utility.py
+# imports from ../utils/utility.py
 # ---------------------------------------------------------------------------
-DEP_DIR = os.path.normpath(os.path.join(os.path.dirname(__file__), "..", "dependencies"))
+DEP_DIR = os.path.normpath(os.path.join(os.path.dirname(__file__), "..", "utils"))
 if DEP_DIR not in sys.path:
     sys.path.insert(0, DEP_DIR)
 

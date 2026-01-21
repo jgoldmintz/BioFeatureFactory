@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # BioFeatureFactory
-# Copyright (C) 2023–2025  Jacob Goldmintz
+# Copyright (C) 2023–2026  Jacob Goldmintz
 #
 # This program is free software: you can redistribute it and/or modify
 # it under the terms of the GNU Affero General Public License as
@@ -123,6 +123,56 @@ def load_supplied_orfs(path: str) -> dict[str, str]:
             _record_orf(gene_name, seq, src.name)
 
     return orfs
+
+
+def parse_force_cds(value: str) -> tuple[str | None, dict[str, str]]:
+    """Parse --force-cds argument.
+
+    Returns:
+        (global_transcript, per_gene_map)
+        - If single accession: (accession, {})
+        - If CSV file: (None, {GENE: accession, ...})
+    """
+    # Check if value matches RefSeq accession pattern (e.g., NM_022162.3, XM_123456.1)
+    accession_pattern = re.compile(r'^[NX][MR]_\d+\.\d+$')
+    if accession_pattern.match(value):
+        return (value, {})
+
+    # Otherwise treat as file path
+    path = Path(value)
+    if not path.exists():
+        raise FileNotFoundError(
+            f"--force-cds value '{value}' is neither a valid accession (e.g., NM_022162.3) "
+            f"nor an existing file."
+        )
+
+    transcript_map: dict[str, str] = {}
+    with open(path, 'r') as f:
+        import csv
+        reader = csv.DictReader(f)
+        if not reader.fieldnames:
+            raise ValueError(f"CSV file '{value}' has no header row.")
+        # Normalize fieldnames to lowercase for flexible matching
+        fieldnames_lower = [fn.lower() for fn in reader.fieldnames]
+        gene_col = None
+        tid_col = None
+        for fn, fn_lower in zip(reader.fieldnames, fieldnames_lower):
+            if fn_lower in ('gene', 'gene_name', 'gene_symbol'):
+                gene_col = fn
+            if fn_lower in ('transcript_id', 'transcript', 'accession'):
+                tid_col = fn
+        if gene_col is None or tid_col is None:
+            raise ValueError(
+                f"CSV file '{value}' must have columns for gene (gene/gene_name/gene_symbol) "
+                f"and transcript ID (transcript_id/transcript/accession). Found: {reader.fieldnames}"
+            )
+        for row in reader:
+            gene = row.get(gene_col, '').strip().upper()
+            tid = row.get(tid_col, '').strip()
+            if gene and tid:
+                transcript_map[gene] = tid
+
+    return (None, transcript_map)
 
 
 STOP_CODONS = {"TAA", "TAG", "TGA"}
@@ -387,6 +437,7 @@ def build_transcript_seq_and_map(
     reference_fasta: str,
     orf_mutations: list[str],
     supplied_orf: str | None = None,
+    transcript_id: str | None = None,
     verbose: bool = False,
     log_messages: list[str] | None = None,
 ):
@@ -397,8 +448,12 @@ def build_transcript_seq_and_map(
       tx_to_genome (list[int], 1-based genomic coord per transcript index),
       cds_tx_start (1-based), cds_tx_end (1-based, inclusive)
       orf_seq (CDS only, mRNA orientation)
+
+    Args:
+        transcript_id: Optional specific transcript ID to force selection of
+            (e.g., NM_022162.3). Overrides auto-selection if provided.
     """
-    info = get_genome_loc(gene_name, annotation_file)
+    info = get_genome_loc(gene_name, annotation_file, transcript_id=transcript_id)
     if not info:
         raise ValueError(f"Gene '{gene_name}' not found in annotation '{annotation_file}'.")
 
@@ -542,6 +597,9 @@ def main():
     p.add_argument("--out-transcript-mapping", help="Optional output dir for transcript mapping CSVs.")
     p.add_argument("--out-aa-mapping", help="Optional output dir for amino-acid mapping CSVs.")
     p.add_argument("--orf", help="Optional ORF FASTA (file or directory). If omitted, ORF is inferred from transcript.")
+    p.add_argument("--force-cds",
+        help="Force specific transcript: single accession (e.g., NM_022162.3) for all genes, "
+             "or CSV file mapping genes to transcript IDs (gene,transcript_id columns).")
     p.add_argument("--verbose", action="store_true", help="Print detailed ORF/mutation validation messages.")
     args = p.parse_args()
 
@@ -572,6 +630,19 @@ def main():
             print(f"Loaded {len(orf_lookup)} ORF sequence(s) from {args.orf}")
         except Exception as exc:
             print(f"Error loading supplied ORFs: {exc}", file=sys.stderr)
+            sys.exit(1)
+
+    # Load transcript ID overrides from --force-cds
+    global_transcript, transcript_lookup = None, {}
+    if args.force_cds:
+        try:
+            global_transcript, transcript_lookup = parse_force_cds(args.force_cds)
+            if global_transcript:
+                print(f"Forcing transcript {global_transcript} for all genes")
+            else:
+                print(f"Loaded {len(transcript_lookup)} transcript override(s) from {args.force_cds}")
+        except Exception as exc:
+            print(f"Error loading --force-cds: {exc}", file=sys.stderr)
             sys.exit(1)
 
     if mut_path.is_file():
@@ -605,6 +676,9 @@ def main():
                         RuntimeWarning,
                     )
 
+            # Resolve transcript override: global takes precedence, then per-gene lookup
+            transcript_override = global_transcript or transcript_lookup.get(gene_key)
+
             # Build sequences + maps
             tx_map = build_transcript_seq_and_map(
                 gene,
@@ -612,6 +686,7 @@ def main():
                 args.reference,
                 muts,
                 supplied_orf=supplied_orf_seq,
+                transcript_id=transcript_override,
                 verbose=args.verbose,
                 log_messages=verbose_log,
             )

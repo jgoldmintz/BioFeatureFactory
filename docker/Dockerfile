@@ -1,5 +1,5 @@
 # BioFeatureFactory
-# Copyright (C) 2023–2025  Jacob Goldmintz
+# Copyright (C) 2023–2026  Jacob Goldmintz
 #
 # This program is free software: you can redistribute it and/or modify
 # it under the terms of the GNU Affero General Public License as
@@ -13,7 +13,6 @@
 #
 # You should have received a copy of the GNU Affero General Public License
 # along with this program.  If not, see <https://www.gnu.org/licenses/>.
-
 # NetNGlyc Docker Container
 # Base: 32-bit Linux (i386) for native binary compatibility
 FROM --platform=linux/386 debian:bullseye
@@ -58,6 +57,29 @@ RUN chmod +x netNglyc how/how98_Linux how98_Darwin signalp_stub \
 # Environment variables for NetNGlyc
 ENV GLYCHOME=/opt/netnglyc
 ENV PATH=/opt/netnglyc:$PATH
+
+# ============================================================================
+# NetMHC 4.0 Installation
+# ============================================================================
+
+# Copy NetMHC 4.0 distribution
+COPY netMHC-4.0/ /opt/netmhc-4.0/
+
+# Configure NetMHC wrapper script
+RUN sed -i 's|^setenv\s*NMHOME\s*/usr/cbs/packages/netMHC/4.0/netMHC-4.0|setenv NMHOME /opt/netmhc-4.0|' /opt/netmhc-4.0/netMHC && \
+    sed -i 's|^setenv\s*TMPDIR\s*/scratch|setenv TMPDIR /tmp|' /opt/netmhc-4.0/netMHC
+
+# Ensure NetMHC binaries are executable
+RUN chmod +x /opt/netmhc-4.0/netMHC && \
+    chmod +x /opt/netmhc-4.0/Linux_x86_64/bin/* 2>/dev/null || true && \
+    chmod +x /opt/netmhc-4.0/Linux_i686/bin/* 2>/dev/null || true
+
+# Create NetMHC temp directory
+RUN mkdir -p /tmp && chmod 777 /tmp
+
+# Environment variables for NetMHC
+ENV NMHOME=/opt/netmhc-4.0
+ENV PATH=/opt/netmhc-4.0:$PATH
 
 # Fix netNglyc script paths and configure SignalP with fallback
 RUN sed -i 's|^setenv[ \t]*GLYCHOME.*|setenv GLYCHOME /opt/netnglyc|' /opt/netnglyc/netNglyc && \

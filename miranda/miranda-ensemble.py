@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # BioFeatureFactory
-# Copyright (C) 2023–2025  Jacob Goldmintz
+# Copyright (C) 2023–2026  Jacob Goldmintz
 #
 # This program is free software: you can redistribute it and/or modify
 # it under the terms of the GNU Affero General Public License as
@@ -42,7 +42,7 @@ import pandas as pd
 # utility imports
 # -------------------------------------------------------------------------
 HERE = os.path.dirname(os.path.abspath(__file__))
-sys.path.append(os.path.join(HERE, "../dependencies"))
+sys.path.append(os.path.join(HERE, "../utils"))
 from utility import (  # noqa: E402
     read_fasta,
     get_mutation_data,

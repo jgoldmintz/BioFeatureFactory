@@ -32,7 +32,7 @@ This Nextflow-based pipeline provides automated SpliceAI splice site prediction 
 - **`bin/filter_annotation.py`** - Hybrid stratified sampling filter for high-isoform genes
 - **`bin/spliceai-parser.py`** - Advanced VCF parser with pkey mapping and log filtering
 - **`annot_to_spliceai.py`** - GTF to SpliceAI annotation format converter
-- **`../dependencies/vcf_converter.py`** - Robust SNP to VCF converter with RefSeq support
+- **`../utils/vcf_converter.py`** - Robust SNP to VCF converter with RefSeq support
 
 ### Input Requirements
 
@@ -220,7 +220,7 @@ python3 annot_to_spliceai.py reference.gtf --chromosome-format ucsc -o ucsc.txt
 
 ### VCF Conversion Only
 ```bash
-python3 dependencies/vcf_converter.py \
+python3 utils/vcf_converter.py \
     -m ABCB1_mutations.csv \
     -o vcf_output/ \
     --chromosome-format refseq \
@@ -284,7 +284,7 @@ conda list tensorflow
 # Error: No pkeys generated
 # Cause: Missing mapping files
 # Solution: Regenerate the mapping CSVs with the exon-aware builder
-python3 ../dependencies/exon_aware_mapping.py \
+python3 ../utils/exon_aware_mapping.py \
     --mutations /path/to/mutations/ \
     --annotation /path/to/annotation.gtf \
     --reference /path/to/reference_genome.fna \
@@ -390,7 +390,7 @@ If you use this SpliceAI pipeline, please cite:
 
 ## License
 
-This project is licensed under the MIT License - see the [LICENSE](../../LICENSE) file in the root BioFeatureFactory directory for details.
+This project is licensed under the AGPL-3.0 License - see the [LICENSE](../../LICENSE) file in the root BioFeatureFactory directory for details.
 
 ## Support
 

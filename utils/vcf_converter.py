@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # BioFeatureFactory
-# Copyright (C) 2023–2025  Jacob Goldmintz
+# Copyright (C) 2023–2026  Jacob Goldmintz
 #
 # This program is free software: you can redistribute it and/or modify
 # it under the terms of the GNU Affero General Public License as
@@ -31,7 +31,7 @@ from pathlib import Path
 
 import pysam
 
-sys.path.append(os.path.join(os.path.dirname(__file__), '../dependencies'))
+sys.path.append(os.path.join(os.path.dirname(__file__), '../utils'))
 from utility import (
     get_mutation_data_bioAccurate,
     trim_muts,

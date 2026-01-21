@@ -15,13 +15,15 @@
 # You should have received a copy of the GNU Affero General Public License
 # along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
+#!/bin/bash
 #
-# Build NetNGlyc Docker Container with ARM64 Mac support
+# Build BioFeatureFactory Software Suite Docker Container with ARM64 Mac support
+# Unified container for NetNGlyc, NetPhos, NetMHC, NetSurfP-3.0
 #
 
 set -e
 
-echo "Building NetNGlyc Docker container..."
+echo "Building BioFeatureFactory Software Suite Docker container..."
 
 # Detect if running on ARM64 Mac
 if [[ $(uname -m) == "arm64" ]] || [[ $(uname -m) == "aarch64" ]]; then
@@ -48,17 +50,33 @@ ln -s how/how98_Linux how98_Darwin || true
 chmod +x how/how98_Linux netNglyc Template/test Template/test_how
 cd ..
 
+# Set up NetMHC 4.0 environment
+echo "Setting up NetMHC 4.0 environment..."
+rm -rf netMHC-4.0 2>/dev/null || true
+# Copy NetMHC from software directory (2 levels up)
+cp -r ../../software/netMHC-4.0 ./netMHC-4.0
+if [ -d "netMHC-4.0" ]; then
+    echo " NetMHC 4.0 copied successfully"
+    chmod +x netMHC-4.0/netMHC
+    chmod +x netMHC-4.0/Linux_x86_64/bin/* 2>/dev/null || true
+    chmod +x netMHC-4.0/Linux_i686/bin/* 2>/dev/null || true
+else
+    echo "⚠️  Warning: netMHC-4.0 not found in ../../software/ - NetMHC functionality will not work"
+fi
+
 # Build Docker image with explicit platform
 echo "Building Docker image for linux/386 platform..."
-docker build --platform linux/386 -t netnglyc:latest .
+docker build --platform linux/386 -t biofeaturefactory:latest .
 
 # Clean up copied files
 echo "Cleaning up..."
-rm -rf netNglyc-1.0
+rm -rf netNglyc-1.0 netMHC-4.0
 
-echo "✅ NetNGlyc Docker container built successfully!"
+echo "BioFeatureFactory Software Suite Docker container built successfully!"
+echo ""
+echo "Image tagged as: biofeaturefactory:latest"
 echo ""
 echo "Note: On Apple Silicon Macs, the container will run in emulation mode."
 echo "This may be slower but will work correctly."
 echo ""
-echo "Run with: docker run --rm --platform linux/386 -v \$(pwd):/data netnglyc:latest my_sequences.fasta"
+echo "Example usage: docker run --rm --platform linux/386 -v \$(pwd):/data biofeaturefactory:latest my_sequences.fasta"

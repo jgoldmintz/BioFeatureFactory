@@ -1,4 +1,4 @@
-# Miranda WT→MUT Comparative miRNA Binding Pipeline
+# Miranda WT->MUT Comparative miRNA Binding Pipeline
 
 ## Overview
 
@@ -12,7 +12,7 @@ MirandA (John *et al.*, 2004) remains the scoring engine; the Python layer struc
 
 ## Capabilities
 
-- **Unified WT↔MUT execution** — WT sequences are analyzed once and reused for all mutations in that gene.  
+- **Unified WT<->MUT execution** — WT sequences are analyzed once and reused for all mutations in that gene.  
 - **Parallelized mutant computation** — MirandA is single-threaded, but runs for hundreds of mutations can be distributed across CPUs.  
 - **Δ-based comparison** — per-miRNA, per-locus, and per-segment Δ metrics quantify mutation-driven perturbation.  
 - **Competitive binding analysis** — detects overlapping miRNAs competing for the same local target region (Hausser & Zavolan, 2014).  
@@ -237,10 +237,10 @@ python miranda_unified.py -i ./FASTA_files/wt/transcript -o ./miranda_out -m /op
 
 ## Interpretation
 
-- **Localized perturbations** (large $|\Delta|$ near SNV, high $f_{local}$) → direct structural disruption of seed pairing.  
-- **Distant competitive perturbations** → emergence or loss of distal binding clusters.  
-- **Low global Δscore** and constant $C_{seg}$ → negligible regulatory change.  
-- **High weighted Δscore** at large $d$ → gain of cryptic distal binding site.
+- **Localized perturbations** (large $|\Delta|$ near SNV, high $f_{local}$) -> direct structural disruption of seed pairing.  
+- **Distant competitive perturbations** -> emergence or loss of distal binding clusters.  
+- **Low global Δscore** and constant $C_{seg}$ -> negligible regulatory change.  
+- **High weighted Δscore** at large $d$ -> gain of cryptic distal binding site.
 
 These transformations convert sequence changes into **quantitative functional evidence**, enabling ranking and integrative modeling.
 
@@ -284,11 +284,11 @@ These transformations convert sequence changes into **quantitative functional ev
 
 ## License
 
-MIT License (inherited from BioFeatureFactory)
+AGPL-3.0 License (inherited from BioFeatureFactory)
 
 ## License
 
-This project is licensed under the MIT License - see the [LICENSE](../../LICENSE) file in the root BioFeatureFactory directory for details.
+This project is licensed under the AGPL-3.0 License - see the [LICENSE](../../LICENSE) file in the root BioFeatureFactory directory for details.
 
 ## Support
 

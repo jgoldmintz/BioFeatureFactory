@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # BioFeatureFactory
-# Copyright (C) 2023–2025  Jacob Goldmintz
+# Copyright (C) 2023–2026  Jacob Goldmintz
 #
 # This program is free software: you can redistribute it and/or modify
 # it under the terms of the GNU Affero General Public License as
@@ -40,7 +40,7 @@ from Bio.Seq import Seq
 
 
 # Import utility functions  
-sys.path.append(os.path.join(os.path.dirname(__file__), '../dependencies'))
+sys.path.append(os.path.join(os.path.dirname(__file__), '../utils'))
 
 from utility import (
     read_fasta,
@@ -587,7 +587,7 @@ class RobustDockerNetNGlyc:
     - No fallback functionality - fails explicitly if requirements not met
     """
 
-    def __init__(self, docker_image="netnglyc:latest", use_signalp=True,
+    def __init__(self, docker_image="biofeaturefactory:latest", use_signalp=True,
                  max_workers=4, cache_dir=None, docker_timeout=600, keep_intermediates=False, verbose=False):
         self.docker_image = docker_image
         self.max_workers = max_workers
@@ -1346,7 +1346,7 @@ class RobustDockerNetNGlyc:
         
         # Import shared utility functions
         import sys
-        sys.path.append(os.path.join(os.path.dirname(__file__), '..', 'dependencies'))
+        sys.path.append(os.path.join(os.path.dirname(__file__), '..', 'utils'))
 
         
         # Find NetNGlyc output files: both regular and batch files
@@ -2801,8 +2801,8 @@ def main():
     parser.add_argument("input", nargs='?', help="Input FASTA file or directory (required for process/full-pipeline modes)")
     parser.add_argument("output", nargs='?', help="Output file or directory (required for all modes except --test/--clear-cache)")
     parser.add_argument("--workers", type=int, default=4, help="Number of parallel workers (used with --processing-mode parallel, default: 4)")
-    parser.add_argument("--docker-image", default="netnglyc:latest",
-                        help="Docker image name (default: netnglyc:latest)")
+    parser.add_argument("--docker-image", default="biofeaturefactory:latest",
+                        help="Docker image name (default: biofeaturefactory:latest)")
     parser.add_argument("--cache-dir", help="Custom cache directory for SignalP/NetNGlyc results")
     parser.add_argument("--test", action="store_true",
                         help="Run test with ABCB1 sequence (no other args required)")
