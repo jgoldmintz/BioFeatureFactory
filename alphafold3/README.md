@@ -17,7 +17,7 @@ AlphaFold3 (Abramson *et al.*, 2024) provides the structural prediction engine; 
 - **Multi-mode execution** — Local GPU, SLURM batch, or GCP cloud submission.
 - **Δ-based comparison** — Per-RBP delta metrics quantify mutation-driven perturbation.
 - **Event classification** — Gained, lost, strengthened, weakened binding states.
-- **Distance-weighted impact modeling** — Effects scaled by proximity to SNV using exponential decay.
+- **Distance-weighted impact modeling** — Effects scaled by proximity to SNV using inverse distance weighting (Shepard, 1968).
 - **Validation-aware filtering** — Exclusion of failed variants via `--validation-log`.
 
 ---
@@ -127,41 +127,75 @@ Each row represents a single RNA position within the AF3 prediction window.
 
 ### Δchain_pair_pae_min (Primary Binding Proxy)
 
-$$\Delta_{\text{PAE}} = \text{PAE}_{\text{mut}} - \text{PAE}_{\text{wt}}$$
+$$\Delta_{PAE} = PAE_{mut} - PAE_{wt}$$
 
-Quantifies the **direction and magnitude** of binding confidence change.
-PAE (Predicted Aligned Error) measures structural uncertainty between chain pairs — lower PAE indicates higher confidence in the predicted interface.
+**What is PAE?** Predicted Aligned Error (PAE) is an AlphaFold confidence metric that estimates the positional error (in Angstroms) between two residues after optimal superposition. For inter-chain predictions, PAE quantifies how confidently AF3 predicts the relative positioning of the RNA and protein chains.
 
-- **Positive Δ** -> Weaker binding (higher uncertainty in MUT)
-- **Negative Δ** -> Stronger binding (lower uncertainty in MUT)
-- **Δ ≈ 0** -> No significant change
+**Interpretation:**
+- **Low PAE (< 10 Å)**: High confidence that the two chains interact in the predicted orientation
+- **High PAE (> 20 Å)**: Low confidence; chains may not interact or their relative position is uncertain
+
+**Delta interpretation:**
+- **Positive Δ** -> Weaker binding in mutant (PAE increased, meaning higher uncertainty)
+- **Negative Δ** -> Stronger binding in mutant (PAE decreased, meaning lower uncertainty)
+- **Δ ≈ 0** -> No significant change in predicted binding confidence
 
 ---
 
 ### Priority Score (Distance-Weighted Perturbation)
 
-$$P = |\Delta_{\text{PAE}}| \cdot \frac{1}{1 + d/k}$$
+$$P = |\Delta_{PAE}| \times \frac{1}{1 + d/k}$$
 
-where $d$ = distance between SNV and RBP binding site, $k$ = decay constant (default 50 bp).
-Hyperbolic decay models the **decline of mutational influence with distance**.
-Sites at or near the mutation contribute disproportionately to the priority score.
+**Variables:**
+- $|\Delta_{PAE}|$ = absolute magnitude of PAE change (Å)
+- $d$ = genomic distance (bp) between the SNV position and the RBP binding site center
+- $k$ = decay constant (default: 50 bp)
+
+**Rationale:** Mutations closer to an RBP binding site are more likely to directly affect binding. The hyperbolic decay term $\frac{1}{1 + d/k}$ down-weights distal effects:
+
+| Distance (d) | Decay Factor | Interpretation |
+|--------------|--------------|----------------|
+| 0 bp | 1.0 | Full weight (mutation at binding site) |
+| 50 bp | 0.5 | Half weight |
+| 100 bp | 0.33 | One-third weight |
+| 200 bp | 0.2 | One-fifth weight |
+
+This prioritizes RBPs whose binding sites overlap or are proximal to the mutation.
 
 ---
 
 ### Interface Contacts
 
-$$N_{\text{contacts}} = \sum_{i,j} \mathbf{1}[d_{ij} < 8\text{Å}]$$
+$$N_{contacts} = \sum_{i \in RNA} \sum_{j \in protein} \mathbf{1}[d_{ij} < 8 \text{ Å}]$$
 
-Count of RNA-protein atom pairs within 8 Å distance threshold.
-More contacts indicate stronger predicted binding interaction.
+**Variables:**
+- $i$ = index over RNA heavy atoms
+- $j$ = index over protein heavy atoms
+- $d_{ij}$ = Euclidean distance between atoms $i$ and $j$
+- $\mathbf{1}[\cdot]$ = indicator function (returns 1 if condition is true, 0 otherwise)
+
+**Interpretation:** Counts atom pairs where an RNA atom is within 8 Å of a protein atom. Higher contact counts suggest more extensive binding interfaces. The 8 Å threshold captures van der Waals contacts, hydrogen bonds, and electrostatic interactions.
 
 ---
 
 ### Confident Binding Classification
 
-A binding event is classified as **confident** if:
+A binding event is classified as **confident** when ALL of the following conditions are met:
 
-$$N_{\text{contacts}} \geq 3 \quad \land \quad \text{PAE}_{\text{min}} \leq 10 \quad \land \quad (\text{pLDDT}_{\text{RNA}} \geq 50 \lor \text{pLDDT}_{\text{protein}} \geq 50)$$
+1. **Sufficient contacts**: $N_{contacts} \geq 3$
+   - At least 3 RNA-protein atom pairs within 8 Å
+
+2. **Low inter-chain uncertainty**: $PAE_{min} \leq 10$ Å
+   - The minimum PAE between any RNA-protein residue pair is below 10 Å
+
+3. **Adequate local structure quality**: $pLDDT_{RNA} \geq 50$ OR $pLDDT_{protein} \geq 50$
+   - At least one chain at the interface has confident per-residue structure (pLDDT scale: 0-100, where >70 is high confidence)
+
+**Combined criterion:**
+
+$$\text{confident} = (N_{contacts} \geq 3) \land (PAE_{min} \leq 10) \land (pLDDT_{RNA} \geq 50 \lor pLDDT_{protein} \geq 50)$$
+
+This three-part filter excludes predictions where AF3 has low confidence in either the individual chain structures or their relative arrangement.
 
 ---
 
@@ -310,6 +344,7 @@ alphafold3/
 
 - Abramson J. *et al.* (2024) Accurate structure prediction of biomolecular interactions with AlphaFold 3. **Nature**, 630:493–500.
 - Jumper J. *et al.* (2021) Highly accurate protein structure prediction with AlphaFold. **Nature**, 596:583–589.
+- Shepard D. (1968) A two-dimensional interpolation function for irregularly-spaced data. **Proceedings of the 23rd ACM National Conference**, pp. 517–524.
 - Zhao W. *et al.* (2022) POSTAR3: an updated platform for exploring post-transcriptional regulation coordinated by RNA-binding proteins. **Nucleic Acids Research**, 50:D483–D492.
 - Van Nostrand E.L. *et al.* (2020) A large-scale binding and functional map of human RNA-binding proteins. **Nature**, 583:711–719.
 
