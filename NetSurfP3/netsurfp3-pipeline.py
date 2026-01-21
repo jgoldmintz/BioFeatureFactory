@@ -428,58 +428,58 @@ def classify_burial_change(wt_rsa, mut_rsa):
     """
     Classify RSA change as buried/intermediate/exposed transition.
 
-    RSA categories:
-    - buried: RSA < 0.25
-    - intermediate: 0.25 <= RSA < 0.50
-    - exposed: RSA >= 0.50
+    RSA categories (encoded as levels 0, 1, 2):
+    - buried (0): RSA < 0.25
+    - intermediate (1): 0.25 <= RSA < 0.50
+    - exposed (2): RSA >= 0.50
 
     Returns:
-        str: Transition string like "buried→exposed" or "stable"
+        int: Transition score from -2 to +2
+             Positive = toward exposed, Negative = toward buried
+             +2 = buried->exposed, -2 = exposed->buried, 0 = no change
     """
 
-    def rsa_category(rsa):
+    def rsa_level(rsa):
         if rsa < 0.25:
-            return "buried"
+            return 0  # buried
         elif rsa < 0.50:
-            return "intermediate"
+            return 1  # intermediate
         else:
-            return "exposed"
+            return 2  # exposed
 
-    wt_cat = rsa_category(wt_rsa)
-    mut_cat = rsa_category(mut_rsa)
+    wt_level = rsa_level(wt_rsa)
+    mut_level = rsa_level(mut_rsa)
 
-    if wt_cat == mut_cat:
-        return "stable"
-    return f"{wt_cat}→{mut_cat}"
+    return mut_level - wt_level
 
 
 def classify_disorder_change(wt_disorder, mut_disorder):
     """
     Classify disorder change as ordered/intermediate/disordered transition.
 
-    Disorder categories:
-    - ordered: disorder < 0.3
-    - intermediate: 0.3 <= disorder < 0.7
-    - disordered: disorder >= 0.7
+    Disorder categories (encoded as levels 0, 1, 2):
+    - ordered (0): disorder < 0.3
+    - intermediate (1): 0.3 <= disorder < 0.7
+    - disordered (2): disorder >= 0.7
 
     Returns:
-        str: Transition string like "ordered→disordered" or "stable"
+        int: Transition score from -2 to +2
+             Positive = toward disordered, Negative = toward ordered
+             +2 = ordered->disordered, -2 = disordered->ordered, 0 = no change
     """
 
-    def disorder_category(d):
+    def disorder_level(d):
         if d < 0.3:
-            return "ordered"
+            return 0  # ordered
         elif d < 0.7:
-            return "intermediate"
+            return 1  # intermediate
         else:
-            return "disordered"
+            return 2  # disordered
 
-    wt_cat = disorder_category(wt_disorder)
-    mut_cat = disorder_category(mut_disorder)
+    wt_level = disorder_level(wt_disorder)
+    mut_level = disorder_level(mut_disorder)
 
-    if wt_cat == mut_cat:
-        return "stable"
-    return f"{wt_cat}→{mut_cat}"
+    return mut_level - wt_level
 
 
 def compute_qc_flags(wt_aa_expected, wt_aa_actual, mut_aa_expected, mut_aa_actual, phi, psi):

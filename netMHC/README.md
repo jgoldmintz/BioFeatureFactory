@@ -286,19 +286,19 @@ python netmhc-pipeline.py input/ output.tsv --batch-size 0
 
 ## 11. Implementation Status
 
-### Completed Features ✅
+### Completed Features
 
 **All core functionality is now operational:**
-- ✅ Pipeline structure and CLI interface
-- ✅ WT/mutant sequence synthesis
-- ✅ Mapping CSV integration
-- ✅ Validation log filtering
-- ✅ Docker command structure (`_run_docker_netmhc`)
-- ✅ Native execution support (`_run_native_netmhc`)
-- ✅ NetMHC output parsing (`parse_netmhc_output`)
-- ✅ WT vs MUT comparison and epitope classification
-- ✅ Three-tier TSV output system (summary, events, sites)
-- ✅ Automatic batch processing for large sequences (>100 AA)
+- Pipeline structure and CLI interface
+- WT/mutant sequence synthesis
+- Mapping CSV integration
+- Validation log filtering
+- Docker command structure (`_run_docker_netmhc`)
+- Native execution support (`_run_native_netmhc`)
+- NetMHC output parsing (`parse_netmhc_output`)
+- WT vs MUT comparison and epitope classification
+- Three-tier TSV output system (summary, events, sites)
+- Automatic batch processing for large sequences (>100 AA)
 
 **Docker Integration:**
 - NetMHC-4.0 installed in `biofeaturefactory:latest` image
@@ -343,7 +343,7 @@ Building BioFeatureFactory Software Suite Docker container...
 Detected ARM64 architecture (Apple Silicon)
 Container will run in emulation mode
 ...
-✅ NetMHC 4.0 copied successfully
+NetMHC 4.0 copied successfully
 ```
 
 ### Step 2: Verify Data Organization

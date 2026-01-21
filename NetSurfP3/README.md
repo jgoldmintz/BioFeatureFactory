@@ -228,14 +228,14 @@ Changes in the ±5 residue window around each mutation:
                     WT
            Buried  Intermediate  Exposed
 Mutant
-Buried       =         v           vv
-Intermediate ^         =           v
-Exposed      ^^        ^           =
+Buried       0        -1           -2
+Intermediate +1        0           -1
+Exposed      +2       +1            0
 ```
 
-- **^^ Burial Loss**: Potentially exposes epitopes, creates new interfaces
-- **vv Burial Gain**: May mask epitopes, disrupt existing interactions
-- **= Stable**: Minimal impact on surface properties
+- **+2 (Buried -> Exposed)**: Potentially exposes epitopes, creates new interfaces
+- **-2 (Exposed -> Buried)**: May mask epitopes, disrupt existing interactions
+- **0 (No change)**: Minimal impact on surface properties
 
 ### 7.2 Disorder Classification
 
@@ -243,13 +243,13 @@ Exposed      ^^        ^           =
                WT
         Ordered  Intermediate  Disordered
 Mutant
-Ordered    =         v            vv
-Intermediate ^       =            v
-Disordered   ^^      ^            =
+Ordered    0        -1            -2
+Intermediate +1      0            -1
+Disordered   +2     +1             0
 ```
 
-- **^^ Disorder Gain**: May increase flexibility, affect binding dynamics
-- **vv Disorder Loss**: May rigidify structure, alter conformational ensemble
+- **+2 (Ordered -> Disordered)**: May increase flexibility, affect binding dynamics
+- **-2 (Disordered -> Ordered)**: May rigidify structure, alter conformational ensemble
 
 ---
 

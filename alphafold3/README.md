@@ -98,7 +98,7 @@ Each row represents a single RBP binding comparison for one mutation.
 | **rbp_name** | RBP gene symbol (e.g., HNRNPA1, SRSF1). | string |
 | **wt_chain_pair_pae_min** | Minimum PAE between RNA-protein chains (WT). | Å |
 | **mut_chain_pair_pae_min** | Minimum PAE between RNA-protein chains (MUT). | Å |
-| **delta_chain_pair_pae_min** | $\Delta_{\text{PAE}} = \text{PAE}_{\text{mut}} - \text{PAE}_{\text{wt}}$. | Å |
+| **delta_chain_pair_pae_min** | $\Delta_{PAE} = PAE_{mut} - PAE_{wt}$ | Å |
 | **wt_interface_contacts** | Number of cross-chain contacts < 8 Å (WT). | count |
 | **mut_interface_contacts** | Number of cross-chain contacts < 8 Å (MUT). | count |
 | **delta_interface_contacts** | Change in interface contacts. | count |

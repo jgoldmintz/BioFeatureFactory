@@ -11,7 +11,7 @@ please cite it as:
 
 > Goldmintz J.  
 > **BioFeatureFactory: an open framework for multi-modal variant feature engineering.**  
-> Software, 2025.  
+> Software, 2026.  
 > Available at: https://github.com/jgoldmintz/biofeaturefactory
 
 When a formal publication is available, please prefer that citation; it will be
