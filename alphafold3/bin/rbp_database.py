@@ -1,5 +1,5 @@
 # BioFeatureFactory
-# Copyright (C) 2023–2026  Jacob Goldmintz
+# Copyright (C) 2023-2026  Jacob Goldmintz
 #
 # This program is free software: you can redistribute it and/or modify
 # it under the terms of the GNU Affero General Public License as
@@ -215,7 +215,7 @@ class POSTAR3Database:
         Args:
             chrom: Chromosome
             pos: Position (0-based)
-            window: Window size on each side (default ±50bp)
+            window: Window size on each side (default +/-50bp)
 
         Returns:
             List of nearby RBP binding sites

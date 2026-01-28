@@ -1,5 +1,5 @@
 # BioFeatureFactory
-# Copyright (C) 2023–2026  Jacob Goldmintz
+# Copyright (C) 2023-2026  Jacob Goldmintz
 #
 # This program is free software: you can redistribute it and/or modify
 # it under the terms of the GNU Affero General Public License as
@@ -108,7 +108,7 @@ class RBPSequenceMapper:
     Maps RBP gene names to protein sequences and MSAs.
 
     Uses:
-    1. Gene name → UniProt ID mapping file (TSV)
+    1. Gene name -> UniProt ID mapping file (TSV)
     2. Local FASTA files for protein sequences OR
     3. A3M MSA files (preferred - includes sequence + alignment)
     """
@@ -124,7 +124,7 @@ class RBPSequenceMapper:
         Initialize the mapper.
 
         Args:
-            mapping_file: Path to gene name → UniProt mapping TSV
+            mapping_file: Path to gene name -> UniProt mapping TSV
                           (columns: Entry, Gene Names, Protein names, Length)
             sequence_dir: Directory containing protein FASTA files
             sequence_fasta: Single FASTA file with all protein sequences

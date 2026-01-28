@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # BioFeatureFactory
-# Copyright (C) 2023–2026  Jacob Goldmintz
+# Copyright (C) 2023-2026  Jacob Goldmintz
 #
 # This program is free software: you can redistribute it and/or modify
 # it under the terms of the GNU Affero General Public License as
@@ -44,9 +44,7 @@ from bin.binding_metrics import (
     compute_delta_metrics, aggregate_mutation_summary, format_events_rows
 )
 
-# Add parent directory for shared utilities (required - part of BioFeatureFactory)
-sys.path.insert(0, str(Path(__file__).parent.parent / 'utils'))
-from utility import (
+from utils.utility import (
     read_fasta, trim_muts, get_mutation_data_bioAccurate,
     extract_gene_from_filename, subseq
 )
@@ -97,7 +95,7 @@ class AlphaFold3Pipeline:
             execution_mode: 'local', 'batch', or 'cloud'
             af3_binary: Path to AF3 executable
             window_size: RNA window size around mutation (odd number)
-            rbp_window: Window to search for RBP binding sites (±bp)
+            rbp_window: Window to search for RBP binding sites (+/-bp)
             validation_log: Optional validation log for filtering mutations
         """
         self.output_dir = Path(output_dir)
@@ -481,7 +479,7 @@ def main():
     parser.add_argument('--window-size', type=int, default=101,
                        help='RNA window size (odd number)')
     parser.add_argument('--rbp-window', type=int, default=50,
-                       help='Window for RBP site lookup (±bp)')
+                       help='Window for RBP site lookup (+/-bp)')
     parser.add_argument('--validation-log',
                        help='Validation log for filtering mutations')
 

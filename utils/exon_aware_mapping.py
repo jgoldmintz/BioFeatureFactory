@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # BioFeatureFactory
-# Copyright (C) 2023–2026  Jacob Goldmintz
+# Copyright (C) 2023-2026  Jacob Goldmintz
 #
 # This program is free software: you can redistribute it and/or modify
 # it under the terms of the GNU Affero General Public License as
@@ -34,9 +34,7 @@ from pathlib import Path
 import pysam
 import warnings
 
-# This script is placed alongside utility.py
-sys.path.append(str(Path(__file__).parent))
-from utility import (
+from utils.utility import (
     get_mutation_data,
     get_mutation_data_bioAccurate,
     get_mutant_aa,
@@ -330,9 +328,9 @@ def resolve_orf_from_sources(
             matched = max(len(orf_mutations) - total, 0)
             emit_verbose(
                 f"{gene_name} validation summary:\n"
-                f"  • Total mutations: {len(orf_mutations)}\n"
-                f"  • Passed: {matched}\n"
-                f"  • Failed: {total} (length: {len(out_of_range)}, base mismatch: {len(mismatches)})",
+                f"  - Total mutations: {len(orf_mutations)}\n"
+                f"  - Passed: {matched}\n"
+                f"  - Failed: {total} (length: {len(out_of_range)}, base mismatch: {len(mismatches)})",
                 True,
                 log_messages,
             )

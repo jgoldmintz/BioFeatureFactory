@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # BioFeatureFactory
-# Copyright (C) 2023–2026  Jacob Goldmintz
+# Copyright (C) 2023-2026  Jacob Goldmintz
 #
 # This program is free software: you can redistribute it and/or modify
 # it under the terms of the GNU Affero General Public License as
@@ -28,8 +28,7 @@ import sys
 from collections import OrderedDict
 from pathlib import Path
 
-sys.path.append(os.path.join(os.path.dirname(__file__), '../utils'))
-from utility import _collect_failures_from_logs, load_mapping
+from utils.utility import _collect_failures_from_logs, load_mapping
 
 LABELS = ['A', 'B', 'C', 'D']
 
@@ -352,11 +351,11 @@ def main():
     )
 
     if success:
-        print(f"✓ Successfully parsed {args.input}")
-        print(f"✓ Output saved to {args.output}")
-        print(f"✓ {processed_count} variants processed, {predictions_count} predictions extracted")
+        print(f"[OK] Successfully parsed {args.input}")
+        print(f"[OK] Output saved to {args.output}")
+        print(f"[OK] {processed_count} variants processed, {predictions_count} predictions extracted")
     else:
-        print(f"✗ Failed to parse {args.input}", file=sys.stderr)
+        print(f"[X] Failed to parse {args.input}", file=sys.stderr)
         sys.exit(1)
 
 if __name__ == "__main__":

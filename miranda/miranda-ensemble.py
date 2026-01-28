@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # BioFeatureFactory
-# Copyright (C) 2023–2026  Jacob Goldmintz
+# Copyright (C) 2023-2026  Jacob Goldmintz
 #
 # This program is free software: you can redistribute it and/or modify
 # it under the terms of the GNU Affero General Public License as
@@ -19,7 +19,7 @@
 Unified MirandA pipeline (WT + MUT in one run) with comparative outputs.
 
 Key changes
-- WT: run MirandA once per gene → {GENE}-wt-miranda.out (no per-mutation duplication).
+- WT: run MirandA once per gene -> {GENE}-wt-miranda.out (no per-mutation duplication).
 - MUT: per-gene parallel execution; logs every 100 processed with true done/total seeded from disk+cache.
 - Parser: joins WT and MUT by (pkey, mirna_id, locus_id); WT rows are materialized per mutation from the single per-gene WT output.
 - Redundancy reduction: leverage utility.load_mapping, extract_mutation_from_sequence_name, extract_gene_from_filename, get_mutation_data, update_str, load_wt_sequences, load_validation_failures, should_skip_mutation, validate_mapping_content.
@@ -42,8 +42,7 @@ import pandas as pd
 # utility imports
 # -------------------------------------------------------------------------
 HERE = os.path.dirname(os.path.abspath(__file__))
-sys.path.append(os.path.join(HERE, "../utils"))
-from utility import (  # noqa: E402
+from utils.utility import (
     read_fasta,
     get_mutation_data,
     load_validation_failures,
@@ -397,7 +396,7 @@ def run_mut_phase(wt_sequences: Dict[str, str],
 
     for idx, gene in enumerate(genes, 1):
         gene_upper = gene.upper()
-        print(f"[MUT] [{idx}/{total_genes}] Starting {gene_upper} processing …")
+        print(f"[MUT] [{idx}/{total_genes}] Starting {gene_upper} processing ...")
 
         wt_seq = wt_sequences.get(gene_upper)
         if not wt_seq:
@@ -477,7 +476,7 @@ def run_mut_phase(wt_sequences: Dict[str, str],
 # -------------------------------------------------------------------------
 def parse_miranda_text(miranda_text: str) -> List[Dict]:
     """
-    Parse MirandA stdout → site rows.
+    Parse MirandA stdout -> site rows.
     """
     sites: List[Dict] = []
     current_mirna = None

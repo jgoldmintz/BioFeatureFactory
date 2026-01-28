@@ -1,6 +1,6 @@
 #!/bin/bash
 # BioFeatureFactory
-# Copyright (C) 2023–2025  Jacob Goldmintz
+# Copyright (C) 2023-2025  Jacob Goldmintz
 #
 # This program is free software: you can redistribute it and/or modify
 # it under the terms of the GNU Affero General Public License as
@@ -61,7 +61,7 @@ if [ -d "netMHC-4.0" ]; then
     chmod +x netMHC-4.0/Linux_x86_64/bin/* 2>/dev/null || true
     chmod +x netMHC-4.0/Linux_i686/bin/* 2>/dev/null || true
 else
-    echo "⚠️  Warning: netMHC-4.0 not found in ../../software/ - NetMHC functionality will not work"
+    echo "[!]  Warning: netMHC-4.0 not found in ../../software/ - NetMHC functionality will not work"
 fi
 
 # Build Docker image with explicit platform

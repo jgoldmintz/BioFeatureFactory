@@ -1,5 +1,5 @@
 # BioFeatureFactory
-# Copyright (C) 2023–2026  Jacob Goldmintz
+# Copyright (C) 2023-2026  Jacob Goldmintz
 #
 # This program is free software: you can redistribute it and/or modify
 # it under the terms of the GNU Affero General Public License as
@@ -31,9 +31,7 @@ import RNA
 
 os.environ["OMP_NUM_THREADS"] = "1"
 
-DEP_DIR = os.path.normpath(os.path.join(os.path.dirname(__file__), '..', 'utils'))
-sys.path.insert(0, DEP_DIR)
-from utility import (
+from utils.utility import (
     _collect_failures_from_logs,
     read_fasta,
     load_mapping,
@@ -45,7 +43,6 @@ from utility import (
     get_mutation_data,
     get_mutation_data_bioAccurate,
 )
-assert callable(load_mapping), f"load_mapping not found in {DEP_DIR}/utility.py"
 
 R = 1.98717e-3  # kcal/mol/K
 
@@ -153,7 +150,7 @@ def _autodetect_workers(n_tasks: int, cap: int = 8) -> int:
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Compute ddG, JSD, and per-position Δu for variant-centered RNA folding windows using ViennaRNA."
+        description="Compute ddG, JSD, and per-position deltau for variant-centered RNA folding windows using ViennaRNA."
     )
     parser.add_argument("-i", "--input", required=True, help="Input fasta sequence file/dir")
     parser.add_argument("-o", "--output", required=True, help="Output TSV (summary table)")
@@ -161,7 +158,7 @@ def main():
     parser.add_argument("--transcript-mapping", help="Path to transcript mapping file/directory")
     parser.add_argument("--log", help="Validation log (file or dir) used to filter failed mutations")
     parser.add_argument("--samples", type=int, default=1000, help="Number of Boltzmann samples per sequence")
-    parser.add_argument("--tau", type=float, default=0.05, help="Threshold for change_flag on Δu")
+    parser.add_argument("--tau", type=float, default=0.05, help="Threshold for change_flag on deltau")
     parser.add_argument("--positions-out", default=None, help="Per-position output TSV (default: <output>.positions.tsv)")
     parser.add_argument("--workers", type=int, default=None, help="Max parallel workers (processes)")
     args = parser.parse_args()
@@ -223,7 +220,7 @@ def main():
                 print(f'No transcript map matched {gene_name}', file=sys.stderr)
                 continue
             if len(cands) > 1:
-                print(f'WARN multiple maps for {gene_name}: {[str(c) for c in cands]} — picking first',file=sys.stderr)
+                print(f'WARN multiple maps for {gene_name}: {[str(c) for c in cands]} -- picking first',file=sys.stderr)
             transcript_map = cands[0]
 
         mutants = trim_muts(transcript_map, args.log, gene_name)

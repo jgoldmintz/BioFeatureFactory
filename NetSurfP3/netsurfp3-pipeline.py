@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # BioFeatureFactory
-# Copyright (C) 2023–2026  Jacob Goldmintz
+# Copyright (C) 2023-2026  Jacob Goldmintz
 #
 # This program is free software: you can redistribute it and/or modify
 # it under the terms of the GNU Affero General Public License as
@@ -43,9 +43,7 @@ from Bio.Seq import Seq
 import re
 
 # Import utility functions
-sys.path.append(os.path.join(os.path.dirname(__file__), '../utils'))
-
-from utility import (
+from utils.utility import (
     read_fasta,
     get_mutation_data_bioAccurate,
     load_validation_failures,
@@ -548,7 +546,7 @@ def compare_wt_mut_structures(wt_predictions, mut_predictions, mutation_pos):
             'ss8_change': 0 if wt_res.get('ss8', '') == mut_res.get('ss8', '') else 1,
         }
 
-    # Analyze local context (±5 residues)
+    # Analyze local context (+/-5 residues)
     local_window = 5
     local_changes = []
     for pos in range(max(1, mutation_pos - local_window),
@@ -644,7 +642,7 @@ def write_residues_tsv(residues_rows, output_file):
 
 def write_local_tsv(local_rows, output_file):
     """
-    Write local changes TSV with ±5 residue window per mutation.
+    Write local changes TSV with +/-5 residue window per mutation.
 
     Columns: pkey, gene, relative_pos, absolute_pos, delta_rsa, delta_disorder_pf,
              delta_disorder_pt, delta_phi, delta_psi, wt_ss3, mut_ss3, wt_ss8, mut_ss8,
@@ -843,7 +841,7 @@ def main():
     parser.add_argument('input', nargs='?',
                         help='Input: WT FASTA file or directory of FASTA files (nucleotide or amino acid)')
     parser.add_argument('output', nargs='?',
-                        help='Output path: base filename (e.g., "results" → results.summary.tsv) or directory (uses "nsp3_output" as base name)')
+                        help='Output path: base filename (e.g., "results" -> results.summary.tsv) or directory (uses "nsp3_output" as base name)')
 
     # Input type
     parser.add_argument('--input-type', choices=['nt', 'aa'], default='nt',
@@ -1045,7 +1043,7 @@ def main():
                     mut_res['phi'], mut_res['psi']
                 )
 
-                # Local structural impact (±5 residues)
+                # Local structural impact (+/-5 residues)
                 local_window = 5
                 local_impact = 0.0
                 local_changes_list = []

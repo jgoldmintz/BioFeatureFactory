@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # BioFeatureFactory
-# Copyright (C) 2023–2026  Jacob Goldmintz
+# Copyright (C) 2023-2026  Jacob Goldmintz
 #
 # This program is free software: you can redistribute it and/or modify
 # it under the terms of the GNU Affero General Public License as
@@ -16,41 +16,31 @@
 # along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
 """
-Adaptive controller for the SpliceAI Nextflow pipeline.
+Controller for the SpliceAI Nextflow pipeline.
 
-- Mirrors the pipeline’s CLI (mutations, reference, mapping paths, etc.).
-- Launches `nextflow run main.nf …` for you and streams its output.
+- Mirrors the pipeline's CLI (mutations, reference, mapping paths, etc.).
+- Launches `nextflow run main.nf ...` and streams its output.
 - Runs the spliceai-tracker automatically unless --disable_tracker is set.
-- Watches .nextflow.log for exit-134 events; when <= tail_threshold genes remain
-  and a tail gene fails repeatedly (>=3 within rapid_window_minutes or two within
-  rapid_gap_minutes), the controller stops the current run and relaunches with
-  `-resume --maxforks tail_maxforks` (typically 1).
+- Use --resume to continue from a previous run (Nextflow's built-in resume).
 """
 
 from __future__ import annotations
 
 import argparse
-import collections
-import datetime as dt
-import os
-import re
-import shutil
 import subprocess
 import sys
-import time
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import List, Optional
 
 HERE = Path(__file__).resolve().parent
 NEXTFLOW_SCRIPT = HERE / "bin/main.nf"
 TRACKER_SCRIPT = HERE / "bin/spliceai-tracker.py"
-LOG_PATH = HERE / ".nextflow.log"
 WORK_ROOT = HERE / "work"
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Adaptive wrapper for the SpliceAI Nextflow pipeline."
+        description="Controller for the SpliceAI Nextflow pipeline."
     )
     # Pipeline inputs / options
     parser.add_argument("--mutations_path", type=Path,
@@ -73,35 +63,21 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--clear_vcf_cache", action="store_true")
     parser.add_argument("--validate_mapping", action="store_true")
     parser.add_argument("--maxforks", type=int, default=0,
-                        help="Base maxforks value (controller supplies per run; 0=Nextflow default)")
-    parser.add_argument("--partial_cache_dir", type=Path, default=HERE / "partials",
-                        help="Directory for caching partial SpliceAI outputs (default: ./partials)")
-    parser.add_argument("--clear_partial_cache", action="store_true",
-                        help="Delete the partial cache directory before launching")
+                        help="Max concurrent run_spliceai tasks (0=Nextflow default)")
     parser.add_argument("--forceAll_isoforms", action="store_true",
                         help="Process all isoforms regardless of count (default: apply filtering for genes >50 isoforms)")
     parser.add_argument("--max_isoforms_per_gene", type=int, default=50,
                         help="Maximum isoforms per gene before hybrid filtering is applied (default: 50)")
 
-    # Controller knobs
-    parser.add_argument("--initial_maxforks", type=int, default=3,
-                        help="Max concurrent run_spliceai tasks on the first pass")
-    parser.add_argument("--tail_maxforks", type=int, default=1,
-                        help="Maxforks used after tail-mode restart (usually 1)")
-    parser.add_argument("--tail_threshold", type=int, default=6,
-                        help="Genes remaining at which we consider the run to be in the tail")
-    parser.add_argument("--rapid_window_minutes", type=float, default=10.0,
-                        help="Window for detecting >=3 failures of the same gene")
-    parser.add_argument("--rapid_gap_minutes", type=float, default=5.0,
-                        help="Threshold for two back-to-back failures")
+    # Controller options
     parser.add_argument("--poll_seconds", type=float, default=15.0,
-                        help="Monitor interval for tail detection")
+                        help="Tracker poll interval")
     parser.add_argument("--disable_tracker", action="store_true",
                         help="Skip launching spliceai-tracker.py")
     parser.add_argument("--pipeline", type=Path, default=NEXTFLOW_SCRIPT,
                         help="Nextflow script to run (default: main.nf)")
     parser.add_argument("--resume", action="store_true",
-                        help="Start the very first launch with -resume")
+                        help="Resume from a previous run using Nextflow's -resume flag")
 
     args = parser.parse_args()
     validate_args(args)
@@ -117,41 +93,18 @@ def validate_args(args: argparse.Namespace) -> None:
         raise SystemExit("ERROR: When providing --input_vcf_path you must also pass --skip_vcf_generation")
     if not args.input_vcf_path and not args.mutations_path:
         raise SystemExit("ERROR: Must provide --mutations_path when not using --input_vcf_path")
-    if args.initial_maxforks < 1 or args.tail_maxforks < 1:
-        raise SystemExit("ERROR: maxforks values must be >= 1")
 
 
 def normalize(path: Optional[Path]) -> Optional[str]:
     return str(path.resolve()) if path else None
 
 
-def discover_gene_ids(args: argparse.Namespace) -> List[str]:
-    if args.input_vcf_path:
-        p = args.input_vcf_path
-        if p.is_file():
-            return [p.stem.replace(".vcf", "")]
-        genes = sorted(v.stem.replace(".vcf", "") for v in p.glob("*.vcf"))
-        if not genes:
-            raise SystemExit(f"ERROR: No *.vcf files in {p}")
-        return genes
-
-    mp = args.mutations_path
-    if not mp:
-        raise SystemExit("ERROR: --mutations_path required when not using --input_vcf_path")
-    if mp.is_file():
-        return [mp.stem.replace("_mutations", "")]
-    genes = sorted(csv.stem.replace("_mutations", "") for csv in mp.glob("*.csv"))
-    if not genes:
-        raise SystemExit(f"ERROR: No *_mutations.csv files in {mp}")
-    return genes
-
-
-def build_nextflow_cmd(args: argparse.Namespace, maxforks: int, resume_flag: bool) -> List[str]:
+def build_nextflow_cmd(args: argparse.Namespace) -> List[str]:
     cmd = ["nextflow", "run", str(args.pipeline)]
-    if resume_flag or args.resume:
+    if args.resume:
         cmd.append("-resume")
 
-    def add_param(name: str, value: Optional[Path | str | float | int]):
+    def add_param(name: str, value):
         if value is not None:
             cmd.extend([f"--{name}", str(value)])
 
@@ -180,8 +133,8 @@ def build_nextflow_cmd(args: argparse.Namespace, maxforks: int, resume_flag: boo
     add_param("retry_jitter", args.retry_jitter)
     add_flag("clear_vcf_cache", args.clear_vcf_cache)
     add_flag("validate_mapping", args.validate_mapping)
-    add_param("maxforks", maxforks if maxforks else args.maxforks)
-    add_param("partial_cache_dir", args.partial_cache_dir)
+    if args.maxforks:
+        add_param("maxforks", args.maxforks)
     add_flag("forceAll_isoforms", args.forceAll_isoforms)
     add_param("max_isoforms_per_gene", args.max_isoforms_per_gene)
     return cmd
@@ -220,182 +173,17 @@ class TrackerRunner:
         self.proc = None
 
 
-class LogTailer:
-    pattern = re.compile(r"^(?P<ts>\w+-\d+\s+\d+:\d+:\d+\.\d+).+run_spliceai \((?P<gene>[^)]+)\).+exit: 134")
-
-    def __init__(self, log_path: Path):
-        self.log_path = log_path
-        self.fp: Optional[object] = None
-        self.pos = 0
-        self.year = dt.datetime.now().year
-
-    def _ensure_open(self) -> bool:
-        if not self.log_path.exists():
-            return False
-        if self.fp is None or self.fp.closed:
-            self.fp = self.log_path.open("r")
-            self.fp.seek(0, os.SEEK_END)
-            self.pos = self.fp.tell()
-        return True
-
-    def read_new_failures(self) -> List[Tuple[str, dt.datetime]]:
-        events: List[Tuple[str, dt.datetime]] = []
-        if not self._ensure_open():
-            return events
-        self.fp.seek(self.pos)
-        for line in self.fp:
-            self.pos = self.fp.tell()
-            m = self.pattern.search(line)
-            if m:
-                ts = dt.datetime.strptime(f"{self.year} {m.group('ts')}", "%Y %b-%d %H:%M:%S.%f")
-                events.append((m.group("gene").strip(), ts))
-        return events
-
-
-def collect_completed_genes() -> List[str]:
-    completed = []
-    for sub in WORK_ROOT.glob("*/*"):
-        exit_file = sub / ".exitcode"
-        if not exit_file.exists():
-            continue
-        try:
-            status = exit_file.read_text().strip()
-        except OSError:
-            continue
-        if status != "0":
-            continue
-        cmd_file = sub / ".command.sh"
-        if not cmd_file.exists():
-            continue
-        text = cmd_file.read_text()
-        marker = '-O "'
-        if marker not in text:
-            continue
-        gene = text.split(marker, 1)[1].split(".spliceai.vcf", 1)[0]
-        completed.append(gene)
-    return completed
-
-
-def should_restart_tail(
-        tail_genes: List[str],
-        failure_history: Dict[str, List[dt.datetime]],
-        window: dt.timedelta,
-        gap: dt.timedelta,
-) -> bool:
-    now = dt.datetime.now()
-    tail_set = set(tail_genes)
-    for gene in tail_set:
-        history = [ts for ts in failure_history.get(gene, []) if now - ts <= window]
-        failure_history[gene] = history
-        if len(history) >= 3 and history[-1] - history[-3] <= window:
-            return True
-        if len(history) >= 2 and history[-1] - history[-2] <= gap:
-            return True
-    return False
-
-
-def monitor_and_maybe_restart(
-        nf_proc: subprocess.Popen,
-        tracker: TrackerRunner,
-        args: argparse.Namespace,
-        gene_ids: List[str],
-        failure_history: Dict[str, List[dt.datetime]],
-) -> bool:
-    tailer = LogTailer(LOG_PATH)
-    window = dt.timedelta(minutes=args.rapid_window_minutes)
-    gap = dt.timedelta(minutes=args.rapid_gap_minutes)
-
+def run_controller(args: argparse.Namespace):
+    tracker = TrackerRunner(args)
+    cmd = build_nextflow_cmd(args)
+    print(f"[controller] Launching: {' '.join(cmd)}", flush=True)
+    nf_proc = subprocess.Popen(cmd, cwd=str(HERE))
+    tracker.start()
     try:
-        while True:
-            ret = nf_proc.poll()
-            if ret is not None:
-                tracker.stop()
-                return False  # finished normally
-
-            for gene, ts in tailer.read_new_failures():
-                failure_history.setdefault(gene, []).append(ts)
-
-            completed = set(collect_completed_genes())
-            remaining = [g for g in gene_ids if g not in completed]
-            tail_mode = 0 < len(remaining) <= args.tail_threshold
-
-            if tail_mode and should_restart_tail(remaining, failure_history, window, gap):
-                print(
-                    f"[controller] Rapid exit-134 detected among {remaining}; restarting with maxforks={args.tail_maxforks}",
-                    flush=True,
-                )
-                nf_proc.terminate()
-                try:
-                    nf_proc.wait(timeout=10)
-                except subprocess.TimeoutExpired:
-                    nf_proc.kill()
-                tracker.stop()
-                return True
-
-            time.sleep(max(args.poll_seconds, 5.0))
+        exit_code = nf_proc.wait()
     finally:
         tracker.stop()
-
-
-def harvest_partials_from_work(args: argparse.Namespace) -> int:
-    cache_dir = args.partial_cache_dir
-    cache_dir.mkdir(parents=True, exist_ok=True)
-    harvested = 0
-    for sub in WORK_ROOT.glob("*/*"):
-        cmd_path = sub / ".command.sh"
-        if not cmd_path.exists():
-            continue
-        try:
-            text = cmd_path.read_text()
-        except OSError:
-            continue
-        if "run_spliceai" not in text:
-            continue
-        marker = '-O "'
-        if marker not in text:
-            continue
-        gene = text.split(marker, 1)[1].split(".spliceai.vcf", 1)[0].strip()
-        if not gene:
-            continue
-        candidate = sub / f"{gene}.spliceai.vcf"
-        if not candidate.exists() or candidate.stat().st_size == 0:
-            continue
-        dest = cache_dir / f"{gene}.partial.vcf"
-        try:
-            if (not dest.exists()) or candidate.stat().st_mtime > dest.stat().st_mtime:
-                shutil.copy2(candidate, dest)
-                harvested += 1
-        except OSError:
-            continue
-    if harvested:
-        print(f"[controller] Harvested {harvested} partial SpliceAI VCF(s) into {cache_dir}")
-    return harvested
-
-
-def run_controller(args: argparse.Namespace):
-    gene_ids = discover_gene_ids(args)
-    failure_history: Dict[str, List[dt.datetime]] = collections.defaultdict(list)
-    current_max = args.initial_maxforks
-    resume_flag = args.resume
-    tracker = TrackerRunner(args)
-
-    if args.clear_partial_cache and args.partial_cache_dir.exists():
-        print(f"[controller] Clearing partial cache at {args.partial_cache_dir}")
-        shutil.rmtree(args.partial_cache_dir)
-
-    while True:
-        harvest_partials_from_work(args)
-        cmd = build_nextflow_cmd(args, current_max, resume_flag)
-        print(f"[controller] Launching: {' '.join(cmd)}", flush=True)
-        nf_proc = subprocess.Popen(cmd, cwd=str(HERE))
-        tracker.start()
-        restart_needed = monitor_and_maybe_restart(nf_proc, tracker, args, gene_ids, failure_history)
-        if restart_needed and current_max != args.tail_maxforks:
-            current_max = args.tail_maxforks
-            resume_flag = True  # ensure resume on subsequent run
-            continue
-        exit_code = nf_proc.wait()
-        sys.exit(exit_code)
+    sys.exit(exit_code)
 
 
 if __name__ == "__main__":

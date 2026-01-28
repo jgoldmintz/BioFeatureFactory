@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # BioFeatureFactory
-# Copyright (C) 2023–2026  Jacob Goldmintz
+# Copyright (C) 2023-2026  Jacob Goldmintz
 #
 # This program is free software: you can redistribute it and/or modify
 # it under the terms of the GNU Affero General Public License as
@@ -39,10 +39,8 @@ from typing import Optional
 from Bio.Seq import Seq
 
 
-# Import utility functions  
-sys.path.append(os.path.join(os.path.dirname(__file__), '../utils'))
-
-from utility import (
+# Import utility functions
+from utils.utility import (
     read_fasta,
     get_mutation_data_bioAccurate,
     write_fasta,
@@ -1344,11 +1342,6 @@ class RobustDockerNetNGlyc:
                 wt_temp_holder.cleanup()
             return results
         
-        # Import shared utility functions
-        import sys
-        sys.path.append(os.path.join(os.path.dirname(__file__), '..', 'utils'))
-
-        
         # Find NetNGlyc output files: both regular and batch files
         # Pattern 1: {GENE}_aa-netnglyc.out (regular files)
         regular_files = list(Path(input_dir).glob("*_aa-netnglyc.out"))
@@ -1358,7 +1351,7 @@ class RobustDockerNetNGlyc:
         # Group files by gene for batch combination
         gene_files = {}
         
-        # Build gene→files map by parsing names directly (avoid reading .out as FASTA)
+        # Build gene->files map by parsing names directly (avoid reading .out as FASTA)
         for file_path in regular_files:
             filename = file_path.stem  # Remove .out extension
             if '_aa-netnglyc' in filename:
@@ -2239,11 +2232,11 @@ class RobustDockerNetNGlyc:
         # Print comprehensive summary
         print(f"\n{'=' * 60}")
         print(f"Directory Processing Summary:")
-        print(f"   • Total files: {results['total']}")
-        print(f"   • Successful: {results['success']}")
-        print(f"   • Failed: {results['failed']}")
-        print(f"   • Processing time: {elapsed_total / 60:.1f} minutes")
-        print(f"   • Processing modes used:")
+        print(f"   - Total files: {results['total']}")
+        print(f"   - Successful: {results['success']}")
+        print(f"   - Failed: {results['failed']}")
+        print(f"   - Processing time: {elapsed_total / 60:.1f} minutes")
+        print(f"   - Processing modes used:")
         for mode, count in mode_counts.items():
             if count > 0:
                 print(f"     - {mode}: {count} files")
@@ -2251,10 +2244,10 @@ class RobustDockerNetNGlyc:
         # Show total predictions found
         total_predictions = sum(info.get('predictions_found', 0) 
                               for info in results["processing_summary"].values())
-        print(f"   • Total predictions found: {total_predictions}")
+        print(f"   - Total predictions found: {total_predictions}")
         
         if results["errors"]:
-            print(f"   • Errors encountered: {len(results['errors'])}")
+            print(f"   - Errors encountered: {len(results['errors'])}")
         
         print("=" * 60)
 
@@ -2519,13 +2512,13 @@ class RobustDockerNetNGlyc:
                         success, temp_output, error, _ = future.result()
                         if success and os.path.exists(temp_output):
                             successful_outputs.append(temp_output)
-                            print(f"✓ Completed: {seq_name}")
+                            print(f"[OK] Completed: {seq_name}")
                         else:
                             failed_count += 1
-                            print(f"✗ Failed: {seq_name} - {error}")
+                            print(f"[X] Failed: {seq_name} - {error}")
                     except Exception as e:
                         failed_count += 1
-                        print(f"✗ Exception processing {seq_name}: {e}")
+                        print(f"[X] Exception processing {seq_name}: {e}")
             
             print(f"Parallel processing completed: {len(successful_outputs)} successful, {failed_count} failed")
             

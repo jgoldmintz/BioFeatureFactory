@@ -1,5 +1,5 @@
 # BioFeatureFactory
-# Copyright (C) 2023–2026  Jacob Goldmintz
+# Copyright (C) 2023-2026  Jacob Goldmintz
 #
 # This program is free software: you can redistribute it and/or modify
 # it under the terms of the GNU Affero General Public License as
@@ -87,7 +87,7 @@ codon_table = {'I': ['ATT', 'ATC', 'ATA'],
 codon_to_aa = {codon: aa for aa, v in codon_table.items() for codon in v}
 
 def read_fasta(inf, aformat="FIRST", duplicate="replace"):
-    """Load sequences from a FASTA file into a name→sequence dictionary."""
+    """Load sequences from a FASTA file into a name->sequence dictionary."""
     data = {}
     with open(inf, "r") as fa:
         name = ""
@@ -871,7 +871,7 @@ def download_reference_genome(build, cache_dir="./reference_cache"):
         return None
 
 def load_mapping(mapping_file: str, mapType: str ='transcript') -> Dict[str, str]:
-    """Load a two-column mapping CSV (mutant→mapping) using the specified column name."""
+    """Load a two-column mapping CSV (mutant->mapping) using the specified column name."""
 
     mapping = {}
     tval, delim = validate_mapping_content(mapping_file)
@@ -1217,7 +1217,7 @@ def run_docker_command(docker_image, fasta_file, command_template, output_file, 
             shutil.rmtree(work_dir, ignore_errors=True)
 
 def extract_mutation_from_sequence_name(seq_name):
-    """Extract mutation ID from sequence name (e.g., 'ZFP36-C330T' → 'C330T')
+    """Extract mutation ID from sequence name (e.g., 'ZFP36-C330T' -> 'C330T')
 
     Args:
         seq_name: Sequence name in format 'GENE-MUTATION' or just 'GENE'

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # BioFeatureFactory
-# Copyright (C) 2023–2026  Jacob Goldmintz
+# Copyright (C) 2023-2026  Jacob Goldmintz
 #
 # This program is free software: you can redistribute it and/or modify
 # it under the terms of the GNU Affero General Public License as
@@ -16,7 +16,7 @@
 # along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
 """
-GeneSplicer WT↔ALT ensemble delta caller
+GeneSplicer WT<->ALT ensemble delta caller
 - Runs GeneSplicer on full genomic sequences (or windowed/custom) for each gene.
 """
 
@@ -32,13 +32,9 @@ import multiprocessing
 import concurrent.futures
 
 # ---------------------------------------------------------------------------
-# imports from ../utils/utility.py
+# imports from utils.utility
 # ---------------------------------------------------------------------------
-DEP_DIR = os.path.normpath(os.path.join(os.path.dirname(__file__), "..", "utils"))
-if DEP_DIR not in sys.path:
-    sys.path.insert(0, DEP_DIR)
-
-from utility import (
+from utils.utility import (
     read_fasta,
     update_str,
     get_mutation_data,
@@ -210,7 +206,7 @@ def _build_sites_for_allele(pkey: str,
             "in_radius": in_radius,
         })
 
-    # rank within allele×type by score
+    # rank within allelextype by score
     df_sites = pd.DataFrame(rows)
     if not df_sites.empty:
         for t in ("donor", "acceptor"):
@@ -414,17 +410,17 @@ def _summarize_variant(events_df: pd.DataFrame,
             "global_count_gained_high": 0,
             "global_count_lost_high": 0,
             "global_count_shifted": 0,
-            "global_max_abs_Δscore": 0.0,
-            "global_sum_weighted_abs_Δ": 0.0,
+            "global_max_abs_deltascore": 0.0,
+            "global_sum_weighted_abs_delta": 0.0,
             "nearest_event_bp_any": None,
             "local_count_gained_high": 0,
             "local_count_lost_high": 0,
             "local_count_shifted": 0,
-            "local_max_abs_Δscore": 0.0,
+            "local_max_abs_deltascore": 0.0,
             "nearest_event_bp_local": None,
             "frac_effect_in_radius": 0.0,
             "top_event_type": "none",
-            "top_event_Δscore": 0.0,
+            "top_event_deltascore": 0.0,
             "top_event_pos": None,
             "dominant_boundary": None,
             "qc_flags": "no_sites",
@@ -446,17 +442,17 @@ def _summarize_variant(events_df: pd.DataFrame,
             "global_count_gained_high": 0,
             "global_count_lost_high": 0,
             "global_count_shifted": 0,
-            "global_max_abs_Δscore": 0.0,
-            "global_sum_weighted_abs_Δ": 0.0,
+            "global_max_abs_deltascore": 0.0,
+            "global_sum_weighted_abs_delta": 0.0,
             "nearest_event_bp_any": None,
             "local_count_gained_high": 0,
             "local_count_lost_high": 0,
             "local_count_shifted": 0,
-            "local_max_abs_Δscore": 0.0,
+            "local_max_abs_deltascore": 0.0,
             "nearest_event_bp_local": None,
             "frac_effect_in_radius": 0.0,
             "top_event_type": "none",
-            "top_event_Δscore": 0.0,
+            "top_event_deltascore": 0.0,
             "top_event_pos": None,
             "dominant_boundary": None,
             "qc_flags": "no_sites",
@@ -481,9 +477,9 @@ def _summarize_variant(events_df: pd.DataFrame,
 
     # max abs delta
     if not sub_events["dscore"].isna().all():
-        global_max_abs_Δscore = float(sub_events["dscore"].abs().max(skipna=True))
+        global_max_abs_deltascore = float(sub_events["dscore"].abs().max(skipna=True))
     else:
-        global_max_abs_Δscore = 0.0
+        global_max_abs_deltascore = 0.0
 
     # sum weighted abs delta
     swa = 0.0
@@ -493,7 +489,7 @@ def _summarize_variant(events_df: pd.DataFrame,
             continue
         w = math.exp(- float(d) / float(distance_k)) if distance_k > 0 else 1.0
         swa += w * abs(float(ev["dscore"]))
-    global_sum_weighted_abs_Δ = swa
+    global_sum_weighted_abs_delta = swa
 
     # nearest event
     if not sub_events["distance_to_snv"].isna().all():
@@ -512,10 +508,10 @@ def _summarize_variant(events_df: pd.DataFrame,
                                          (in_local[["wt_score", "mut_score"]].max(axis=1) >= high_cutoff)])
     local_count_shifted = len(in_local[in_local["cls"] == "shifted"])
     if not in_local.empty and not in_local["dscore"].isna().all():
-        local_max_abs_Δscore = float(in_local["dscore"].abs().max(skipna=True))
+        local_max_abs_deltascore = float(in_local["dscore"].abs().max(skipna=True))
         nearest_event_bp_local = int(in_local["distance_to_snv"].min(skipna=True))
     else:
-        local_max_abs_Δscore = 0.0
+        local_max_abs_deltascore = 0.0
         nearest_event_bp_local = None
 
     # frac_effect_in_radius
@@ -534,11 +530,11 @@ def _summarize_variant(events_df: pd.DataFrame,
     if "priority" in sub_events.columns and not sub_events["priority"].isna().all():
         top_ev = sub_events.sort_values("priority", ascending=False).iloc[0]
         top_event_type = top_ev["cls"]
-        top_event_Δscore = float(top_ev["dscore"]) if not pd.isna(top_ev["dscore"]) else 0.0
+        top_event_deltascore = float(top_ev["dscore"]) if not pd.isna(top_ev["dscore"]) else 0.0
         top_event_pos = top_ev["mut_pos"] if pd.notna(top_ev["mut_pos"]) else top_ev["wt_pos"]
     else:
         top_event_type = "none"
-        top_event_Δscore = 0.0
+        top_event_deltascore = 0.0
         top_event_pos = None
 
     # dominant boundary
@@ -560,7 +556,7 @@ def _summarize_variant(events_df: pd.DataFrame,
         flags.append("no_sites")
     if nearest_event_bp_any is not None and nearest_event_bp_any > 2000:
         flags.append("far_event>2kb")
-    if global_max_abs_Δscore < 1.0:
+    if global_max_abs_deltascore < 1.0:
         flags.append("low_signal_only")
     qc_flags = ";".join(flags) if flags else ""
 
@@ -572,17 +568,17 @@ def _summarize_variant(events_df: pd.DataFrame,
         "global_count_gained_high": global_count_gained_high,
         "global_count_lost_high": global_count_lost_high,
         "global_count_shifted": global_count_shifted,
-        "global_max_abs_Δscore": global_max_abs_Δscore,
-        "global_sum_weighted_abs_Δ": global_sum_weighted_abs_Δ,
+        "global_max_abs_deltascore": global_max_abs_deltascore,
+        "global_sum_weighted_abs_delta": global_sum_weighted_abs_delta,
         "nearest_event_bp_any": nearest_event_bp_any,
         "local_count_gained_high": local_count_gained_high,
         "local_count_lost_high": local_count_lost_high,
         "local_count_shifted": local_count_shifted,
-        "local_max_abs_Δscore": local_max_abs_Δscore,
+        "local_max_abs_deltascore": local_max_abs_deltascore,
         "nearest_event_bp_local": nearest_event_bp_local,
         "frac_effect_in_radius": frac_effect_in_radius,
         "top_event_type": top_event_type,
-        "top_event_Δscore": top_event_Δscore,
+        "top_event_deltascore": top_event_deltascore,
         "top_event_pos": top_event_pos,
         "dominant_boundary": dom,
         "qc_flags": qc_flags,
@@ -738,7 +734,7 @@ def _process_gene(fasta_path: Path,
 # ---------------------------------------------------------------------------
 
 def main():
-    parser = argparse.ArgumentParser(description="GeneSplicer WT↔ALT ensemble delta caller")
+    parser = argparse.ArgumentParser(description="GeneSplicer WT<->ALT ensemble delta caller")
     parser.add_argument("-i", "--input", required=True, help="Directory of genomic FASTA files")
     parser.add_argument("-m", "--mapping-dir", required=True, help="Directory of genomic mutation/mapping files")
     parser.add_argument("-g", "--genesplicer-dir", required=True, help="Directory containing GeneSplicer binary")

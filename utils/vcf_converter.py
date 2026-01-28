@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # BioFeatureFactory
-# Copyright (C) 2023–2026  Jacob Goldmintz
+# Copyright (C) 2023-2026  Jacob Goldmintz
 #
 # This program is free software: you can redistribute it and/or modify
 # it under the terms of the GNU Affero General Public License as
@@ -31,8 +31,7 @@ from pathlib import Path
 
 import pysam
 
-sys.path.append(os.path.join(os.path.dirname(__file__), '../utils'))
-from utility import (
+from utils.utility import (
     get_mutation_data_bioAccurate,
     trim_muts,
     extract_gene_from_filename,
@@ -104,14 +103,14 @@ def verify_sequences_against_reference(verify_path, reference_path):
                         "locations": found_locations,
                         "source_file": str(fasta_file)
                     }
-                    print(f"    ✓ Found at {len(found_locations)} location(s)")
+                    print(f"    [OK] Found at {len(found_locations)} location(s)")
                 else:
                     results["failed_sequences"][f"{fasta_file.name}:{seq_name}"] = {
                         "sequence_length": len(sequence),
                         "error": "Sequence not found in reference genome",
                         "source_file": str(fasta_file)
                     }
-                    print("    ✗ Not found in reference genome")
+                    print("    [X] Not found in reference genome")
 
         ref_fasta.close()
 
@@ -495,7 +494,7 @@ def main():
             successful_files += 1
             total_processed += cached_entry.get("variant_count", 0)
             print(
-                f"✓ {Path(f).name} -> {cached_entry.get('output_path')} (cached {cached_entry.get('variant_count', 0)} variants)"
+                f"[OK] {Path(f).name} -> {cached_entry.get('output_path')} (cached {cached_entry.get('variant_count', 0)} variants)"
             )
             continue
 
@@ -512,7 +511,7 @@ def main():
         if success:
             successful_files += 1
             total_processed += count
-            print(f"✓ {Path(f).name} -> {vcf} ({count} variants)")
+            print(f"[OK] {Path(f).name} -> {vcf} ({count} variants)")
             try:
                 output_path = Path(vcf).resolve()
                 output_mtime = output_path.stat().st_mtime
@@ -531,7 +530,7 @@ def main():
             cache_dirty = True
         else:
             failed_files.append((Path(f).name, err))
-            print(f"✗ {Path(f).name}: {err}", file=sys.stderr)
+            print(f"[X] {Path(f).name}: {err}", file=sys.stderr)
             if cache_key in cache:
                 cache_dirty = True
                 cache.pop(cache_key, None)

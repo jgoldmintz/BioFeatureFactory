@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # BioFeatureFactory
-# Copyright (C) 2023–2026  Jacob Goldmintz
+# Copyright (C) 2023-2026  Jacob Goldmintz
 #
 # This program is free software: you can redistribute it and/or modify
 # it under the terms of the GNU Affero General Public License as
@@ -38,9 +38,6 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
-
-# Add parent directory to path for imports
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 # EVmutation library (MIT licensed, Copyright Thomas A. Hopf)
 # Clone from: https://github.com/debbiemarkslab/EVmutation

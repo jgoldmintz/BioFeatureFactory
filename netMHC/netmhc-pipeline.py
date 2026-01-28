@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # BioFeatureFactory
-# Copyright (C) 2023–2026  Jacob Goldmintz
+# Copyright (C) 2023-2026  Jacob Goldmintz
 #
 # This program is free software: you can redistribute it and/or modify
 # it under the terms of the GNU Affero General Public License as
@@ -49,9 +49,7 @@ from Bio.Seq import Seq
 
 
 # Import utility functions
-sys.path.append(os.path.join(os.path.dirname(__file__), '../utils'))
-
-from utility import (
+from utils.utility import (
     read_fasta,
     get_mutation_data_bioAccurate,
     write_fasta,

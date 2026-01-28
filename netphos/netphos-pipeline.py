@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # BioFeatureFactory
-# Copyright (C) 2023–2026  Jacob Goldmintz
+# Copyright (C) 2023-2026  Jacob Goldmintz
 #
 # This program is free software: you can redistribute it and/or modify
 # it under the terms of the GNU Affero General Public License as
@@ -37,8 +37,7 @@ import json
 from pathlib import Path
 
 # Import shared batch processing utilities
-sys.path.append(os.path.join(os.path.dirname(__file__), '../utils'))
-from utility import (
+from utils.utility import (
     split_fasta_into_batches,
     combine_batch_outputs,
     get_mutation_data_bioAccurate_unified,

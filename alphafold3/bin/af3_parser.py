@@ -1,5 +1,5 @@
 # BioFeatureFactory
-# Copyright (C) 2023–2026  Jacob Goldmintz
+# Copyright (C) 2023-2026  Jacob Goldmintz
 #
 # This program is free software: you can redistribute it and/or modify
 # it under the terms of the GNU Affero General Public License as
@@ -101,7 +101,7 @@ class AF3Structure:
         Args:
             chain1: First chain ID
             chain2: Second chain ID
-            distance_threshold: Max distance for contact (Å)
+            distance_threshold: Max distance for contact (A)
 
         Returns:
             List of (residue1, residue2, distance) tuples
@@ -301,7 +301,7 @@ def analyze_binding(
         structure: Parsed AF3 structure
         rna_chain: RNA chain ID
         protein_chain: Protein chain ID
-        contact_threshold: Distance threshold for contacts (Å)
+        contact_threshold: Distance threshold for contacts (A)
 
     Returns:
         BindingAnalysis with binding metrics
@@ -382,7 +382,7 @@ if __name__ == '__main__':
         if binding:
             print(f"\nBinding Analysis:")
             print(f"  Contacts: {binding.n_contacts}")
-            print(f"  Min distance: {binding.min_contact_distance:.2f} Å")
+            print(f"  Min distance: {binding.min_contact_distance:.2f} A")
             print(f"  Interface pLDDT (RNA): {binding.interface_plddt_rna:.1f}")
             print(f"  Interface pLDDT (protein): {binding.interface_plddt_protein:.1f}")
             print(f"  Chain pair PAE min: {binding.chain_pair_pae_min:.2f}")

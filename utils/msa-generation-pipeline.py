@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # BioFeatureFactory
-# Copyright (C) 2023–2026  Jacob Goldmintz
+# Copyright (C) 2023-2026  Jacob Goldmintz
 #
 # This program is free software: you can redistribute it and/or modify
 # it under the terms of the GNU Affero General Public License as
@@ -340,7 +340,7 @@ def generate_msa(query_fasta, database, output_path, jackhmmer_binary,
     min_neff = min_neff_ratio * query_length
 
     print(f"Query: {focus_id}, Length: {query_length}")
-    print(f"Target N_eff: ≥{min_neff:.0f} (ratio {min_neff_ratio}×L)")
+    print(f"Target N_eff: >={min_neff:.0f} (ratio {min_neff_ratio}xL)")
 
     # Create temporary file for Stockholm output
     output_dir = Path(output_path).parent
@@ -384,7 +384,7 @@ def generate_msa(query_fasta, database, output_path, jackhmmer_binary,
     print("Computing N_eff...")
     neff = compute_neff(filtered_msa, identity_threshold)
     neff_ratio = neff / query_length
-    print(f"N_eff: {neff:.1f} (ratio: {neff_ratio:.1f}×L)")
+    print(f"N_eff: {neff:.1f} (ratio: {neff_ratio:.1f}xL)")
 
     # Check quality threshold
     if neff < min_neff:
@@ -469,7 +469,7 @@ Examples:
     --output protein.msa.a2m
 
 Quality thresholds:
-  N_eff ≥ 10L (L = protein length) is recommended for EVmutation.
+  N_eff >= 10L (L = protein length) is recommended for EVmutation.
   Lower N_eff may result in reduced prediction accuracy.
 """
     )
@@ -537,7 +537,7 @@ Quality thresholds:
     print(f"Query length: {stats['query_length']}")
     print(f"Sequences (raw): {stats['n_sequences_raw']}")
     print(f"Sequences (filtered): {stats['n_sequences_filtered']}")
-    print(f"N_eff: {stats['n_eff']} ({stats['n_eff_ratio']}×L)")
+    print(f"N_eff: {stats['n_eff']} ({stats['n_eff_ratio']}xL)")
     print(f"Coverage: {stats['coverage']:.1%}")
     print(f"Mean identity: {stats['mean_identity']:.1%}")
     print(f"Quality check: {'PASS' if stats['quality_pass'] else 'WARN (low N_eff)'}")
