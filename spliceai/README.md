@@ -7,28 +7,20 @@ This Nextflow-based pipeline provides automated SpliceAI splice site prediction 
 ### Comprehensive Processing Pipeline
 - **VCF Generation**: Convert snv CSV files to SpliceAI-compatible VCF format
 - **Exon-Aware Mapping**: Coordinate system conversion between ORF, transcript, genomic, and chromosome space
-- **Automated SpliceAI Execution**: Parallel splice prediction with TensorFlow race condition mitigation
+- **Automated SpliceAI Execution**: Parallel splice prediction with Nextflow
 - **Intelligent Isoform Management**: Hybrid stratified sampling for genes with >50 isoforms (configurable) to prevent catastrophic slowdowns
 - **Intelligent Result Parsing**: Extract predictions with mutation-specific pkey mapping and validation log filtering
 - **Live Progress Tracking**: Optional monitor that reports per-gene SpliceAI progress in real time
-
-### TensorFlow Stability Enhancements
-- **Race Condition Prevention**: Environment variables to control TensorFlow threading
-- **Controlled Parallelism**: Configurable concurrent process limits
-- **Retry Logic**: Exponential backoff with jitter for failed predictions
-- **Process Isolation**: Staggered execution to prevent model loading conflicts
-
 ### Flexible Input Handling
 - **Multiple Input Modes**: Run SpliceAI on a single VCF (`--input_vcf_file`), a directory of VCFs (`--input_vcf_dir`), or auto-build VCFs from mutation specs (`--mutations_path`)
 - **Chromosome Format Support**: RefSeq (NC_000007.14) and simple (7) chromosome naming
 - **Validation Integration**: Skip mutations flagged in exon-aware validation logs
-- **Cache Management**: Intelligent VCF caching for repeated runs
 
 ## Required Files and Setup
 
 ### Essential Pipeline Files
-- **`spliceai-pipeline-controller.py`** - Main entry point with adaptive restart logic and progress tracking
-- **`bin/main.nf`** - Nextflow pipeline with TensorFlow threading controls and multi-input support
+- **`spliceai-pipeline-controller.py`** - Main entry point with progress tracking
+- **`bin/main.nf`** - Nextflow pipeline with multi-input support
 - **`bin/filter_annotation.py`** - Hybrid stratified sampling filter for high-isoform genes
 - **`bin/spliceai-parser.py`** - Advanced VCF parser with pkey mapping and log filtering
 - **`annot_to_spliceai.py`** - GTF to SpliceAI annotation format converter
@@ -114,13 +106,11 @@ python spliceai-pipeline-controller.py \
     --transcript_mapping_path mappings/transcript/ \
     --chromosome_mapping_path mappings/chromosome/ \
     --genomic_mapping_path mappings/genomic/ \
-    --output_dir results/ \
-    --initial_maxforks 3
+    --output_dir results/
 ```
 
 - To reuse existing VCFs (single file or directory) instead of generating them, supply `--input_vcf_path /path/to/vcfs --skip_vcf_generation` and omit `--mutations_path`.
 - To generate new VCFs from mutation CSVs, provide `--mutations_path` and omit `--input_vcf_path`; the controller builds VCFs automatically before running SpliceAI.
-- The controller launches Nextflow, streams logs, runs the progress tracker, and automatically drops to `--maxforks tail_maxforks` when the tail genes hit rapid TensorFlow exit‑134 errors.
 
 ## Processing Modes
 
@@ -141,45 +131,19 @@ python spliceai-pipeline-controller.py \
 - **`--vcf_output_dir`**: Publish intermediate VCFs, bgzipped files, and indexes to a dedicated directory
 
 ### SpliceAI Execution Control
-- **`--initial_maxforks`** *(controller)*: Max concurrent `run_spliceai` tasks for the first pass (default: 3).
-- **`--tail_maxforks`** *(controller)*: Maxforks applied after the controller detects rapid tail retries (default: 1).
-- **`--tail_threshold`**, **`--rapid_window_minutes`**, **`--rapid_gap_minutes`** *(controller)*: Heuristics that define "tail mode" and the frequency of exit‑134 failures that triggers a restart.
-- **`--splice_threshold`** *(pipeline)*: Minimum delta score threshold passed to the parser (default: 0.0).
-- **`--retry_jitter`** *(pipeline)*: Maximum retry delay for `run_spliceai` (default: 10).
-- **`--maxforks`** *(pipeline)*: Final limit enforced inside Nextflow (the controller sets this to `initial_maxforks` or `tail_maxforks` depending on the phase).
-- The progress tracker runs automatically; disable it with `--disable_tracker` if you do not want the live `processed/total` table.
-- **`--partial_cache_dir`** *(pipeline/controller)*: Directory to persist per-gene SpliceAI VCF fragments so retries only process remaining variants (default: `./partials` relative to the repo).
-- **`--clear_partial_cache`** *(controller)*: Remove the cache directory before launching when you want to rerun everything from scratch.
+- **`--splice_threshold`**: Minimum delta score threshold passed to the parser (default: 0.0).
+- **`--maxforks`**: Max concurrent `run_spliceai` tasks (default: 0 = no limit).
+- **`--disable_tracker`**: Disable the live progress tracker.
 
 ### Isoform Management
-- **`--forceAll_isoforms`** *(pipeline)*: Process all transcript isoforms regardless of count. By default, genes with more than `max_isoforms_per_gene` isoforms are filtered using hybrid stratified sampling to prevent catastrophic slowdowns.
-- **`--max_isoforms_per_gene`** *(pipeline)*: Threshold for applying isoform filtering (default: 50). Genes exceeding this count trigger hybrid sampling: the top 10 longest isoforms (capturing canonical/MANE transcripts) plus 40 randomly selected from the remainder. Uses deterministic seeding based on gene name hash for reproducibility. Note that filtered genes bypass the partial cache to ensure consistency.
+- **`--forceAll_isoforms`**: Process all transcript isoforms regardless of count. By default, genes with more than `max_isoforms_per_gene` isoforms are filtered using hybrid stratified sampling to prevent catastrophic slowdowns.
+- **`--max_isoforms_per_gene`**: Threshold for applying isoform filtering (default: 50). Genes exceeding this count trigger hybrid sampling: the top 10 longest isoforms (capturing canonical/MANE transcripts) plus 40 randomly selected from the remainder. Uses deterministic seeding based on gene name hash for reproducibility.
 
 ### Validation and Filtering
 - **`--validation_log`**: Path to validation log for filtering failed mutations
 - **`--chromosome_mapping_path`**: Optional per-gene chromosome mapping (legacy `--chromosome_mapping_dir`)
 - **`--transcript_mapping_path`**: Required for mutation ID mapping (legacy `--transcript_mapping_dir`)
 - **`--genomic_mapping_path`**: Required for genomic mapping (legacy `--genomic_mapping_dir`)
-
-## TensorFlow Race Condition Mitigation
-
-### Problem
-SpliceAI uses TensorFlow, which has cumulative metrics counters that can race when multiple processes load/unload models simultaneously, causing exit 134 (SIGABRT) crashes.
-
-### Solution
-The pipeline automatically applies TensorFlow threading controls:
-```bash
-export TF_NUM_INTEROP_THREADS=1
-export TF_NUM_INTRAOP_THREADS=1
-export OMP_NUM_THREADS=1
-export TF_CPP_MIN_LOG_LEVEL=3
-```
-
-### Process Management
-- **Staggered Execution**: 5-20 second delays prevent simultaneous model loading
-- **Retry Logic**: Exponential backoff with jitter for failed processes
-- **Error Recovery**: Automatic retry up to 3 attempts per sample
-- **Partial Result Cache**: Each gene’s SpliceAI VCF is cached (default `partials/`). Retries prune already-processed variants before re-running SpliceAI, and successful runs merge the cache into the final `${gene}.spliceai.vcf`. The controller automatically harvests any surviving `<gene>.spliceai.vcf` files from `work/` into this cache before every launch. Override via `--partial_cache_dir` (pipeline/controller) or clear it up front with `--clear_partial_cache`.
 
 ## Output Format
 
@@ -270,13 +234,10 @@ python3 annot_to_spliceai.py annotation.gtf --chromosome-format ncbi -o annotati
 
 #### TensorFlow Crashes (Exit 134)
 ```bash
-# The pipeline automatically applies threading controls
-# If crashes persist, check TensorFlow version compatibility
+# Check TensorFlow version compatibility
 conda list tensorflow
 # SpliceAI works best with TensorFlow 1.x versions
-# Additional mitigations:
-#   - Increase `--retry_jitter` to spread retries further apart
-#   - Set `--maxforks 1` to run SpliceAI tasks sequentially when parallel launches keep failing
+# Set --maxforks 1 to run SpliceAI tasks sequentially if crashes persist
 ```
 
 #### Missing Mapping Files
@@ -354,23 +315,6 @@ python spliceai-pipeline-controller.py \
     --genomic_mapping_path mappings/genomic/ \
     --output_dir results/ \
     --max_isoforms_per_gene 100
-```
-
-#### Large Dataset Optimization
-```bash
-# For large datasets, adjust cache and retry settings
-python spliceai-pipeline-controller.py \
-    --mutations_path /path/to/mutations \
-    --reference_genome /path/to/reference.fna \
-    --annotation_file annotation_ncbi.txt \
-    --transcript_mapping_path mappings/transcript/ \
-    --chromosome_mapping_path mappings/chromosome/ \
-    --genomic_mapping_path mappings/genomic/ \
-    --output_dir results/ \
-    --clear_vcf_cache \
-    --retry_jitter 20 \
-    --initial_maxforks 4 \
-    --tail_maxforks 1
 ```
 
 ## Prerequisites

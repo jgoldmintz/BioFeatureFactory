@@ -34,6 +34,7 @@ import tempfile
 import shutil
 import hashlib
 import json
+import platform
 from pathlib import Path
 
 # Import shared batch processing utilities
@@ -52,6 +53,51 @@ from utils.utility import (
 def get_mutation_data_bioAccurate(aaposaa):
     """Extract amino acid position from mutation notation (e.g., 'D333E' -> 333)"""
     return get_mutation_data_bioAccurate_unified(aaposaa)
+
+
+def is_linux_host():
+    """Return True when running on a Linux kernel."""
+    return platform.system().lower() == "linux"
+
+
+def resolve_native_ape_path(user_path=None):
+    """
+    Resolve path to native APE binary.
+    Checks: 1) user-provided path, 2) environment variables, 3) common locations.
+    Returns absolute path if found and executable, else None.
+    """
+    candidates = []
+
+    def _add(path):
+        if path:
+            candidates.append(os.path.expanduser(path))
+
+    _add(user_path)
+    _add(os.environ.get("NETPHOS_APE_PATH"))
+    netphos_home = os.environ.get("NETPHOS_HOME")
+    if netphos_home:
+        _add(os.path.join(netphos_home, "ape-1.0", "ape"))
+    # Check netnglyc home as well since APE ships with netnglyc
+    netnglyc_home = os.environ.get("NETNGLYC_HOME")
+    if netnglyc_home:
+        _add(os.path.join(netnglyc_home, "ape-1.0", "ape"))
+
+    home = Path.home()
+    common_roots = [
+        home / "ape-1.0" / "ape",
+        home / "netphos" / "ape-1.0" / "ape",
+        home / "netNglyc" / "ape-1.0" / "ape",
+        Path("/opt/netphos/ape-1.0/ape"),
+        Path("/opt/netnglyc/ape-1.0/ape"),
+        Path("/usr/local/bin/ape"),
+    ]
+    for candidate in common_roots:
+        _add(str(candidate))
+
+    for path in candidates:
+        if path and os.path.isfile(path) and os.access(path, os.X_OK):
+            return os.path.abspath(path)
+    return None
 
 def load_nt_to_aa_mapping(mapping_file):
     """Load NT->AA mapping from CSV file"""
@@ -377,25 +423,64 @@ def _run_docker_netphos(fasta_file, output_file, timeout=300):
         if os.path.exists(work_dir):
             shutil.rmtree(work_dir, ignore_errors=True)
 
-def process_netphos_batched(fasta_file, output_file, batch_size=100, timeout=300):
+
+def _run_native_netphos(fasta_file, output_file, timeout=300, ape_bin=None):
+    """Run NetPhos using native APE binary (Linux only)."""
+    if not ape_bin:
+        return False, "No APE binary path provided"
+
+    try:
+        # APE needs to run from its installation directory
+        ape_dir = os.path.dirname(ape_bin)
+        result = subprocess.run(
+            [ape_bin, "-m", "netphos", fasta_file],
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            cwd=ape_dir
+        )
+
+        if result.returncode == 0:
+            with open(output_file, 'w') as f:
+                f.write(result.stdout)
+            return True, result.stdout
+        else:
+            error_msg = f"APE failed with return code {result.returncode}\n"
+            error_msg += f"STDERR: {result.stderr}"
+            return False, error_msg
+    except subprocess.TimeoutExpired:
+        return False, f"Native APE command timed out after {timeout} seconds"
+    except Exception as e:
+        return False, str(e)
+
+
+def process_netphos_batched(fasta_file, output_file, batch_size=100, timeout=300, executor_fn=None, ape_bin=None):
     """Process large FASTA files using batching to prevent segmentation faults"""
+    # Default to Docker executor if none specified
+    if executor_fn is None:
+        executor_fn = _run_docker_netphos
+
     try:
         # Split FASTA into batches
         batch_files = split_fasta_into_batches(fasta_file, batch_size)
-        
+
         if not batch_files:
             print("No sequences found in FASTA file")
             return False
-        
+
         print(f"Processing {len(batch_files)} batches...")
         batch_outputs = []
-        
+
         # Process each batch
         for i, batch_file in enumerate(batch_files):
             batch_output = output_file.replace('.out', f'-batch-{i+1}.out')
             print(f"Processing batch {i+1}/{len(batch_files)}...")
-            
-            success, error = _run_docker_netphos(batch_file, batch_output, timeout)
+
+            # Use the selected executor
+            if executor_fn == _run_native_netphos:
+                success, error = executor_fn(batch_file, batch_output, timeout, ape_bin)
+            else:
+                success, error = executor_fn(batch_file, batch_output, timeout)
             
             if success:
                 batch_outputs.append(batch_output)
@@ -547,9 +632,22 @@ def count_fasta_sequences(fasta_file):
         return 1  # Fallback assumption
     return count
 
-def run_netphos_with_fasta(fasta_file, output_file, batch_size=None, timeout=300, use_cache=True):
+def run_netphos_with_fasta(fasta_file, output_file, batch_size=None, timeout=300, use_cache=True,
+                           executor_fn=None, ape_bin=None):
     """Run NetPhos on FASTA file with intelligent processing strategy selection and caching"""
-    
+    # Default to Docker executor if none specified
+    if executor_fn is None:
+        executor_fn = _run_docker_netphos
+
+    # Determine mode label for logging
+    mode_label = "native" if executor_fn == _run_native_netphos else "Docker"
+
+    # Helper to call the executor with the right arguments
+    def _run(fasta, output, tmo):
+        if executor_fn == _run_native_netphos:
+            return executor_fn(fasta, output, tmo, ape_bin)
+        return executor_fn(fasta, output, tmo)
+
     # Check cache first if enabled
     if use_cache:
         cached_file, cached_metadata = get_cached_result(fasta_file, "netphos")
@@ -559,81 +657,85 @@ def run_netphos_with_fasta(fasta_file, output_file, batch_size=None, timeout=300
                 print(f"  Cached at: {cached_metadata.get('cached_at', 'Unknown')}")
             shutil.copy2(cached_file, output_file)
             return True
-    
+
     # If batch_size is explicitly specified, use batching
     if batch_size:
         print(f"Using batch processing (batch_size: {batch_size})...")
-        result = process_netphos_batched(fasta_file, output_file, batch_size, timeout)
-        
+        result = process_netphos_batched(fasta_file, output_file, batch_size, timeout,
+                                         executor_fn=executor_fn, ape_bin=ape_bin)
+
         # Cache result if successful
         if result and use_cache:
             seq_count = count_fasta_sequences(fasta_file)
-            save_to_cache(fasta_file, output_file, "netphos", 
-                         {"processing_mode": "batch", "batch_size": batch_size, "sequence_count": seq_count})
+            save_to_cache(fasta_file, output_file, "netphos",
+                          {"processing_mode": "batch", "batch_size": batch_size, "sequence_count": seq_count})
         return result
-    
+
     # Count sequences to determine optimal strategy
     seq_count = count_fasta_sequences(fasta_file)
     print(f"Processing {seq_count} sequence(s)...")
-    
+
     # Intelligent strategy selection based on sequence count
     if seq_count == 1:
         # Single sequence: only try single run, no fallback
-        print("Single sequence detected - using single Docker run...")
-        success, error = _run_docker_netphos(fasta_file, output_file, timeout)
-        
+        print(f"Single sequence detected - using single {mode_label} run...")
+        success, error = _run(fasta_file, output_file, timeout)
+
         if success:
             print(f"NetPhos completed: {output_file}")
             # Cache result if successful
             if use_cache:
-                save_to_cache(fasta_file, output_file, "netphos", 
-                             {"processing_mode": "single", "sequence_count": seq_count})
+                save_to_cache(fasta_file, output_file, "netphos",
+                              {"processing_mode": "single", "sequence_count": seq_count})
             return True
         else:
             print(f"Single run failed: {error}")
-            print("NetPhos failed for single sequence. Check Docker setup and APE system availability.")
+            print(f"NetPhos failed for single sequence. Check {mode_label} setup and APE system availability.")
             return False
-    
+
     elif seq_count <= 10:
         # Small batch (2-10 sequences): try single run first, then batch if needed
-        print("Small sequence set - attempting single Docker run...")
-        success, error = _run_docker_netphos(fasta_file, output_file, timeout)
-        
+        print(f"Small sequence set - attempting single {mode_label} run...")
+        success, error = _run(fasta_file, output_file, timeout)
+
         if success:
             print(f" NetPhos completed: {output_file}")
             # Cache result if successful
             if use_cache:
-                save_to_cache(fasta_file, output_file, "netphos", 
-                             {"processing_mode": "single", "sequence_count": seq_count})
+                save_to_cache(fasta_file, output_file, "netphos",
+                              {"processing_mode": "single", "sequence_count": seq_count})
             return True
         else:
             print(f" Single run failed: {error}")
             print("Falling back to batch processing for small sequence set...")
-            result = process_netphos_batched(fasta_file, output_file, batch_size=10, timeout=timeout)
+            result = process_netphos_batched(fasta_file, output_file, batch_size=10, timeout=timeout,
+                                             executor_fn=executor_fn, ape_bin=ape_bin)
             # Cache result if successful
             if result and use_cache:
-                save_to_cache(fasta_file, output_file, "netphos", 
-                             {"processing_mode": "batch_fallback", "batch_size": 10, "sequence_count": seq_count})
+                save_to_cache(fasta_file, output_file, "netphos",
+                              {"processing_mode": "batch_fallback", "batch_size": 10, "sequence_count": seq_count})
             return result
-    
+
     elif seq_count <= 100:
         # Medium batch (11-100 sequences): use batch processing with size 25
         print("Medium sequence set - using batch processing...")
-        result = process_netphos_batched(fasta_file, output_file, batch_size=25, timeout=timeout)
+        result = process_netphos_batched(fasta_file, output_file, batch_size=25, timeout=timeout,
+                                         executor_fn=executor_fn, ape_bin=ape_bin)
         # Cache result if successful
         if result and use_cache:
-            save_to_cache(fasta_file, output_file, "netphos", 
-                         {"processing_mode": "batch", "batch_size": 25, "sequence_count": seq_count})
+            save_to_cache(fasta_file, output_file, "netphos",
+                          {"processing_mode": "batch", "batch_size": 25, "sequence_count": seq_count})
         return result
-    
+
     else:
         # Large batch (100+ sequences): use batch processing with size 50
         print("Large sequence set - using batch processing...")
-        result = process_netphos_batched(fasta_file, output_file, batch_size=50, timeout=timeout)
+        result = process_netphos_batched(fasta_file, output_file, batch_size=50, timeout=timeout,
+                                         executor_fn=executor_fn, ape_bin=ape_bin)
         # Cache result if successful
         if result and use_cache:
-            save_to_cache(fasta_file, output_file, "netphos", 
-                         {"processing_mode": "batch", "batch_size": 50, "sequence_count": seq_count})
+            save_to_cache(fasta_file, output_file, "netphos",
+                          {"processing_mode": "batch", "batch_size": 50, "sequence_count": seq_count})
         return result
 
 def main():
@@ -662,9 +764,17 @@ def main():
     # Cache options
     parser.add_argument('--no-cache', action='store_true',
                        help='Disable result caching (always reprocess files)')
-    parser.add_argument('--clear-cache', action='store_true', 
+    parser.add_argument('--clear-cache', action='store_true',
                        help='Clear all cached NetPhos results and exit')
-    
+
+    # Native execution options (Linux only)
+    parser.add_argument('--native-ape-path',
+                       help='Path to native APE binary (Linux only)')
+    parser.add_argument('--force-native', action='store_true',
+                       help='Force native execution, fail if unavailable')
+    parser.add_argument('--force-docker', action='store_true',
+                       help='Force Docker execution even if native binary available')
+
     args = parser.parse_args()
     
     # Handle cache clearing
@@ -717,7 +827,33 @@ def main():
         args.threshold = 0.0  # Reset threshold when yes-only is used
     
     failure_map = load_validation_failures(args.log) if (args.log and args.is_mutant) else {}
-    
+
+    # Determine execution mode (native vs Docker)
+    if getattr(args, 'force_native', False) and getattr(args, 'force_docker', False):
+        parser.error("--force-native and --force-docker cannot be used together")
+
+    native_ape = resolve_native_ape_path(getattr(args, 'native_ape_path', None))
+    linux = is_linux_host()
+
+    if getattr(args, 'force_native', False):
+        if not native_ape:
+            parser.error("--force-native requires valid --native-ape-path or NETPHOS_APE_PATH environment variable")
+        executor_fn = _run_native_netphos
+        ape_bin = native_ape
+        print(f"Execution mode: native APE ({native_ape})")
+    elif getattr(args, 'force_docker', False):
+        executor_fn = _run_docker_netphos
+        ape_bin = None
+        print("Execution mode: Docker")
+    elif native_ape and (linux or os.environ.get("NETPHOS_ALLOW_NATIVE") == "1"):
+        executor_fn = _run_native_netphos
+        ape_bin = native_ape
+        print(f"Execution mode: native APE ({native_ape})")
+    else:
+        executor_fn = _run_docker_netphos
+        ape_bin = None
+        print("Execution mode: Docker")
+
     # Handle different processing modes
     if args.mode in ['full-pipeline', 'netphos-only']:
         # Input can be a FASTA file or directory containing FASTA files
@@ -733,8 +869,9 @@ def main():
             
             print(f"Running NetPhos on {fasta_file}...")
             use_cache = not args.no_cache
-            success = run_netphos_with_fasta(fasta_file, netphos_output, args.batch_size, args.timeout, use_cache)
-            
+            success = run_netphos_with_fasta(fasta_file, netphos_output, args.batch_size, args.timeout, use_cache,
+                                             executor_fn=executor_fn, ape_bin=ape_bin)
+
             if not success:
                 print("ERROR: NetPhos execution failed")
                 return 1
@@ -779,8 +916,9 @@ def main():
                 print(f"Processing {fasta_path} ({seq_count} sequences)...")
                 use_cache = not args.no_cache
                 # Let each file determine its own optimal processing strategy
-                success = run_netphos_with_fasta(fasta_path, netphos_output, args.batch_size, args.timeout, use_cache)
-                
+                success = run_netphos_with_fasta(fasta_path, netphos_output, args.batch_size, args.timeout, use_cache,
+                                                 executor_fn=executor_fn, ape_bin=ape_bin)
+
                 if success:
                     netphos_outputs.append(netphos_output)
                     print(f" NetPhos completed: {netphos_output}")

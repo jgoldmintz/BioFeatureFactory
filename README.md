@@ -4,8 +4,9 @@ Modular bioinformatics framework for automated feature extraction, coordinate ma
 
 ## Table of Contents
 1. [Architecture Overview](#architecture-overview)
-2. [Pipeline Quick-Start Matrix](#pipeline-quick-start-matrix)
-3. [Pipeline Summaries](#pipeline-summaries)
+2. [Installation](#installation)
+3. [Pipeline Quick-Start Matrix](#pipeline-quick-start-matrix)
+4. [Pipeline Summaries](#pipeline-summaries)
    - [NetNGlyc](#netnglyc-pipeline)
    - [NetPhos](#netphos-pipeline)
    - [NetMHC](#netmhc-pipeline)
@@ -18,11 +19,11 @@ Modular bioinformatics framework for automated feature extraction, coordinate ma
    - [EVmutation](#evmutation-pipeline)
    - [Codon Usage](#codon-usage-pipeline)
    - [Rare Codon](#rare-codon-pipeline)
-4. [Shared Infrastructure & Pathing](#shared-infrastructure--pathing)
-5. [End-to-End Data Preparation Workflow](#end-to-end-data-preparation-workflow)
-6. [Citation](#citation)
-7. [License](#license)
-8. [Support](#support)
+5. [Shared Infrastructure & Pathing](#shared-infrastructure--pathing)
+6. [End-to-End Data Preparation Workflow](#end-to-end-data-preparation-workflow)
+7. [Citation](#citation)
+8. [License](#license)
+9. [Support](#support)
 
 ---
 
@@ -163,12 +164,24 @@ Rare codon enrichment detection using sliding window analysis.
 
 ---
 
+## Installation
+
+From the repository root, install the shared utilities as an editable package:
+
+```bash
+pip install -e .
+```
+
+This registers the `utils` package so all pipelines can import shared helpers without path manipulation. Re-run after pulling updates that modify `pyproject.toml`.
+
+---
+
 ## Shared Infrastructure & Pathing
 
-- `utils/utility.py` serves as the core helper module for NetNGlyc, NetPhos, Miranda, GeneSplicer, SpliceAI preprocessors, and RNAfold.  
-- Each pipeline appends `../utils` to `sys.path` at runtime.  
-- Helpers include directory discovery (`get_input_dir`, `get_output_dir`), mutation CSV loaders, exon-aware mapping filters, FASTA retrieval utilities, and logging wrappers.  
-- `docker/` contains Dockerfiles and compose snippets for NetNGlyc and NetPhos. 
+- `utils/utility.py` serves as the core helper module for NetNGlyc, NetPhos, Miranda, GeneSplicer, SpliceAI preprocessors, and RNAfold.
+- The `utils` package is installed via `pip install -e .` (see [Installation](#installation)).
+- Helpers include directory discovery (`get_input_dir`, `get_output_dir`), mutation CSV loaders, exon-aware mapping filters, FASTA retrieval utilities, and logging wrappers.
+- `docker/` contains Dockerfiles and compose snippets for NetNGlyc and NetPhos.
 
 ---
 

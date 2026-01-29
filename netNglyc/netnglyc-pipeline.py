@@ -61,6 +61,55 @@ from utils.utility import (
 )
 
 
+# ---------------------------------------------------------------------------
+# Native execution support
+# ---------------------------------------------------------------------------
+
+def is_linux_host():
+    """Return True when running on a Linux kernel."""
+    return platform.system().lower() == "linux"
+
+
+def resolve_native_netnglyc_path(user_path=None):
+    """
+    Resolve a usable native NetNGlyc executable when available.
+
+    Search order:
+    1. Explicit --native-netnglyc-bin value
+    2. $NETNGLYC_PATH environment variable
+    3. $NETNGLYC_HOME/netNglyc
+    4. Common install locations
+    """
+    candidates = []
+
+    def _add(path):
+        if path:
+            candidates.append(os.path.expanduser(path))
+
+    _add(user_path)
+    _add(os.environ.get("NETNGLYC_PATH"))
+
+    netnglyc_home = os.environ.get("NETNGLYC_HOME")
+    if netnglyc_home:
+        _add(os.path.join(netnglyc_home, "netNglyc"))
+
+    home = Path.home()
+    common_roots = [
+        home / "netNglyc" / "netNglyc",
+        Path("/opt/netnglyc/netNglyc"),
+        Path("/usr/local/bin/netNglyc"),
+    ]
+
+    for candidate in common_roots:
+        _add(str(candidate))
+
+    for path in candidates:
+        if path and os.path.isfile(path) and os.access(path, os.X_OK):
+            return os.path.abspath(path)
+
+    return None
+
+
 def translate_orf_sequence(nt_sequence: str) -> str:
     """Translate a nucleotide ORF into an amino acid sequence, trimming trailing stops."""
     if not nt_sequence:
@@ -378,15 +427,19 @@ def _process_single_sequence_worker(args):
     """
     Worker function for parallel processing - must be at module level for pickling
     """
-    temp_fasta, temp_output, seq_name, docker_image, use_signalp, cache_dir, docker_timeout, verbose = args
-    
+    (temp_fasta, temp_output, seq_name, docker_image, use_signalp, cache_dir,
+     docker_timeout, verbose, use_native, native_path) = args
+
     worker_processor = RobustDockerNetNGlyc(
         docker_image=docker_image,
         use_signalp=use_signalp,
         max_workers=1,
         cache_dir=cache_dir,
         docker_timeout=docker_timeout,
-        verbose=verbose
+        verbose=verbose,
+        native_bin=native_path if use_native else None,
+        force_native=use_native,
+        force_docker=not use_native if native_path else False
     )
     
     try:
@@ -577,16 +630,19 @@ class SignalP6Handler:
 
 class RobustDockerNetNGlyc:
     """
-    Docker NetNGlyc with integrated SignalP 6 preprocessing on host
-    
+    NetNGlyc processor with integrated SignalP 6 preprocessing on host.
+
+    Supports both Docker and native Linux execution modes.
+
     Requires:
-    - Licensed NetNGlyc 1.0 in Docker container
+    - Native mode: NetNGlyc binary installed on Linux host
+    - Docker mode: Licensed NetNGlyc 1.0 in Docker container
     - SignalP 6.0 installed on host system (when use_signalp=True)
-    - No fallback functionality - fails explicitly if requirements not met
     """
 
     def __init__(self, docker_image="biofeaturefactory:latest", use_signalp=True,
-                 max_workers=4, cache_dir=None, docker_timeout=600, keep_intermediates=False, verbose=False):
+                 max_workers=4, cache_dir=None, docker_timeout=600, keep_intermediates=False,
+                 verbose=False, native_bin=None, force_native=False, force_docker=False):
         self.docker_image = docker_image
         self.max_workers = max_workers
         self.temp_dir = tempfile.mkdtemp(prefix="netnglyc_")
@@ -594,6 +650,9 @@ class RobustDockerNetNGlyc:
         self.docker_timeout = docker_timeout
         self.keep_intermediates = keep_intermediates
         self.verbose = verbose
+        self.native_bin = native_bin
+        self.force_native = force_native
+        self.force_docker = force_docker
 
         # Initialize SignalP handler
         if use_signalp:
@@ -612,13 +671,46 @@ class RobustDockerNetNGlyc:
         # Setup error logging with date-named log file
         self._setup_error_logging()
 
-        # Detect platform once during initialization
-        self.platform_args = get_docker_platform_args()
-        if self.platform_args and self.verbose:
-            print(f"Detected ARM64 architecture - Docker will use emulation mode")
+        # Setup execution mode (native vs Docker)
+        self._setup_execution_mode()
 
-        # Test Docker setup (non-fatal - allow fallback during processing)
-        self._test_docker_availability()
+        # Docker-specific initialization (only if not using native)
+        if not self.use_native:
+            # Detect platform once during initialization
+            self.platform_args = get_docker_platform_args()
+            if self.platform_args and self.verbose:
+                print(f"Detected ARM64 architecture - Docker will use emulation mode")
+            # Test Docker setup
+            self._test_docker_availability()
+        else:
+            self.platform_args = []
+
+    def _setup_execution_mode(self):
+        """Determine whether to use native or Docker execution."""
+        if self.force_native and self.force_docker:
+            raise ValueError("--force-native and --force-docker cannot be used together")
+
+        native_path = resolve_native_netnglyc_path(self.native_bin)
+        linux = is_linux_host()
+
+        if self.force_native:
+            if not native_path:
+                raise ValueError("--force-native requires valid native binary path")
+            self.use_native = True
+            self.native_path = native_path
+        elif self.force_docker:
+            self.use_native = False
+            self.native_path = None
+        elif native_path and (linux or os.environ.get("NETNGLYC_ALLOW_NATIVE") == "1"):
+            self.use_native = True
+            self.native_path = native_path
+        else:
+            self.use_native = False
+            self.native_path = None
+
+        if self.verbose:
+            mode = f"native ({self.native_path})" if self.use_native else "Docker"
+            print(f"Execution mode: {mode}")
 
     def _setup_error_logging(self):
         """Setup error logging with date-named log file"""
@@ -651,7 +743,7 @@ class RobustDockerNetNGlyc:
             result = subprocess.run(["docker", "--version"], capture_output=True, timeout=5)
             if result.returncode != 0:
                 if self.verbose:
-                    print("Docker not available - will fallback to native stub when needed")
+                    print("Docker not available")
                 return False
 
             # Test image
@@ -663,16 +755,16 @@ class RobustDockerNetNGlyc:
             )
             if not result.stdout.strip():
                 if self.verbose:
-                    print(f"Docker image '{self.docker_image}' not found - will fallback to native stub when needed")
+                    print(f"Docker image '{self.docker_image}' not found")
                 return False
-                
+
             if self.verbose:
                 print(f"Docker NetNGlyc ready: {self.docker_image}")
             return True
 
         except Exception as e:
             if self.verbose:
-                print(f"Docker test failed ({e}) - will fallback to native stub when needed")
+                print(f"Docker test failed: {e}")
             return False
 
     def _test_docker(self):
@@ -771,13 +863,11 @@ class RobustDockerNetNGlyc:
             raise Exception(f"Docker NetNGlyc failed with return code {result.returncode}")
 
         except subprocess.TimeoutExpired as e:
-            # Timeout - log error but don't fallback to stub
             error_msg = f"Docker NetNGlyc timeout ({self.docker_timeout}s) for file: {os.path.basename(fasta_file)}"
             print(f"ERROR: {error_msg}")
             self.error_logger.error(error_msg)
             raise Exception(f"NetNGlyc Docker timeout after {self.docker_timeout} seconds")
         except Exception as e:
-            # All Docker issues result in explicit failure - no fallback
             error_msg = f"Docker NetNGlyc failed for file {os.path.basename(fasta_file)}: {e}"
             print(f"ERROR: {error_msg}")
             self.error_logger.error(error_msg)
@@ -786,6 +876,47 @@ class RobustDockerNetNGlyc:
             # Clean up work directory
             if os.path.exists(work_dir):
                 shutil.rmtree(work_dir)
+
+    def _run_native_netnglyc(self, fasta_file):
+        """
+        Run NetNGlyc using native Linux binary.
+
+        Args:
+            fasta_file: Path to input FASTA file
+
+        Returns:
+            NetNGlyc output as string
+
+        Raises:
+            Exception: If native execution fails
+        """
+        try:
+            result = subprocess.run(
+                [self.native_path, fasta_file],
+                capture_output=True,
+                text=True,
+                timeout=self.docker_timeout,
+                cwd=os.path.dirname(self.native_path)
+            )
+
+            if result.returncode == 0:
+                if "Predictions for N-Glycosylation sites" in result.stdout:
+                    return result.stdout
+                elif "No Asparagines in the input sequences" in result.stdout:
+                    return result.stdout
+
+            raise Exception(f"Native NetNGlyc failed with return code {result.returncode}: {result.stderr}")
+
+        except subprocess.TimeoutExpired:
+            error_msg = f"Native NetNGlyc timeout ({self.docker_timeout}s) for file: {os.path.basename(fasta_file)}"
+            print(f"ERROR: {error_msg}")
+            self.error_logger.error(error_msg)
+            raise Exception(f"Native NetNGlyc timeout after {self.docker_timeout} seconds")
+        except Exception as e:
+            error_msg = f"Native NetNGlyc failed for file {os.path.basename(fasta_file)}: {e}"
+            print(f"ERROR: {error_msg}")
+            self.error_logger.error(error_msg)
+            raise Exception(f"Native NetNGlyc failed: {e}")
 
     def _clean_signalp_warning(self, netnglyc_output):
         """
@@ -865,8 +996,11 @@ class RobustDockerNetNGlyc:
                         if info['has_signal']:
                             pass  # SignalP info processed elsewhere
     
-            # Step 2: Run NetNGlyc Docker with ORIGINAL FASTA and SignalP results
-            netnglyc_output = self._run_docker_netnglyc(fasta_file, signalp_output_dir)
+            # Step 2: Run NetNGlyc (native or Docker) with ORIGINAL FASTA
+            if self.use_native:
+                netnglyc_output = self._run_native_netnglyc(fasta_file)
+            else:
+                netnglyc_output = self._run_docker_netnglyc(fasta_file, signalp_output_dir)
 
             if netnglyc_output:
                 # Step 3: Save results
@@ -2271,7 +2405,10 @@ class RobustDockerNetNGlyc:
             cache_dir=self.cache_dir,
             docker_timeout=self.docker_timeout,
             keep_intermediates=self.keep_intermediates,  # CRITICAL: Pass the flag to worker processes
-            verbose=self.verbose
+            verbose=self.verbose,
+            native_bin=getattr(self, 'native_path', None) if self.use_native else None,
+            force_native=self.use_native,
+            force_docker=not self.use_native if getattr(self, 'native_path', None) else False
         )
         
         processing_info = {
@@ -2497,8 +2634,9 @@ class RobustDockerNetNGlyc:
             # Prepare arguments for worker function (add instance parameters)
             worker_args = []
             for temp_fasta, temp_output, seq_name in temp_files:
-                args = (temp_fasta, temp_output, seq_name, self.docker_image, 
-                       self.use_signalp, self.cache_dir, self.docker_timeout, self.verbose)
+                args = (temp_fasta, temp_output, seq_name, self.docker_image,
+                        self.use_signalp, self.cache_dir, self.docker_timeout, self.verbose,
+                        self.use_native, getattr(self, 'native_path', None))
                 worker_args.append((args, seq_name))
             
             # Use ProcessPoolExecutor for true parallelism
@@ -2737,7 +2875,10 @@ def run_full_pipeline_mode(args, failure_map, parser):
             cache_dir=args.cache_dir,
             docker_timeout=args.batch_timeout,
             keep_intermediates=args.keep_intermediates,
-            verbose=args.verbose
+            verbose=args.verbose,
+            native_bin=args.native_netnglyc_bin,
+            force_native=args.force_native,
+            force_docker=args.force_docker
         ) as processor:
 
             print("\nRunning NetNGlyc on WT amino acid FASTAs...")
@@ -2823,6 +2964,14 @@ def main():
     parser.add_argument("--log",
                         help="Validation log file or directory to skip failed mutations (mutant modes only)")
 
+    # Native execution options
+    parser.add_argument("--native-netnglyc-bin",
+                        help="Path to native NetNGlyc binary (Linux only)")
+    parser.add_argument("--force-native", action="store_true",
+                        help="Force native execution, fail if unavailable")
+    parser.add_argument("--force-docker", action="store_true",
+                        help="Force Docker execution even if native binary available")
+
     args = parser.parse_args()
     failure_map = load_validation_failures(args.log) if args.log else {}
 
@@ -2896,6 +3045,9 @@ def main():
             cache_dir=args.cache_dir,
             docker_timeout=args.batch_timeout,
             verbose=args.verbose,
+            native_bin=args.native_netnglyc_bin,
+            force_native=args.force_native,
+            force_docker=args.force_docker
         )
         input_path = Path(args.input)
         wt_dirs = []
@@ -2932,7 +3084,10 @@ def main():
             max_workers=args.workers,
             cache_dir=args.cache_dir,
             docker_timeout=args.batch_timeout,
-            verbose=args.verbose
+            verbose=args.verbose,
+            native_bin=args.native_netnglyc_bin,
+            force_native=args.force_native,
+            force_docker=args.force_docker
     ) as processor:
 
         if os.path.isfile(args.input):
