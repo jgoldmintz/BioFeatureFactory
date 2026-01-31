@@ -18,6 +18,9 @@ AlphaFold3 (Abramson *et al.*, 2024) provides the structural prediction engine; 
 - **Δ-based comparison** — Per-RBP delta metrics quantify mutation-driven perturbation.
 - **Event classification** — Gained, lost, strengthened, weakened binding states.
 - **Distance-weighted impact modeling** — Effects scaled by proximity to SNV using inverse distance weighting (Shepard, 1968).
+- **Ensemble aggregation** — Parses all AF3 seed/sample outputs (mean ± std across samples) for robust confidence estimates.
+- **Interface sites table** — Per-residue pLDDT and contact data at the RNA-protein interface, with per-residue contact frequency from ensemble.
+- **Multi-window mode** — Optional placement of the mutation at multiple fractional offsets within the RNA window, aggregating across windows to reduce positional bias.
 - **Validation-aware filtering** — Exclusion of failed variants via `--validation-log`.
 
 ---
@@ -37,30 +40,38 @@ AlphaFold3 (Abramson *et al.*, 2024) provides the structural prediction engine; 
 
 | Argument | Description |
 |----------|-------------|
-| `--mutations` | TSV file with mutation specifications |
-| `--postar3-db` | Path to tabix-indexed POSTAR3 BED file |
-| `--uniprot-mapping` | TSV mapping gene names to UniProt IDs |
-| `--sequence-fasta` or `--sequence-dir` | Protein sequences (FASTA file or directory) |
-| `--output-dir` | Output directory for results |
+| `--postar-db` | Path to tabix-indexed POSTAR3 BED file |
+| `--rbp-mapping` | Gene-UniProt mapping TSV |
+| `--fasta` | Transcript FASTA file or directory of FASTA files |
+| `--output` / `-o` | Output directory |
+
+One of:
+- `--rbp-sequences` — Protein sequences FASTA
+- `--msa-dir` — Directory with A3M MSA files (preferred)
+
+One of:
+- `--mutations` — Mutations CSV file or directory
+- `--chromosome-mapping` — Chromosome mapping CSV (provides mutations and chromosomal positions)
 
 ### Optional Arguments
 
 | Argument | Default | Description |
 |----------|---------|-------------|
+| `--prefix` | `alphafold3` | Output file prefix |
 | `--execution-mode` | `local` | Execution mode: `local`, `batch`, or `cloud` |
-| `--window-size` | `50` | bp radius around mutation for RBP query |
-| `--rna-window` | `101` | RNA sequence length for AF3 input (nt) |
+| `--af3-binary` | `alphafold3` | Path to AF3 executable |
+| `--docker-image` | `alphafold3` | Docker image name for AF3 |
+| `--model-dir` | — | Path to AF3 model weights directory (required for local mode) |
+| `--window-size` | `101` | RNA window size around mutation (nt, odd number) |
+| `--rbp-window` | `50` | Window for RBP site lookup (±bp) |
 | `--validation-log` | — | Path to validation log for filtering failed mutations |
-| `--gcp-project` | — | GCP project ID (cloud mode only) |
-
-### Mutation File Format
-
-```
-pkey           gene    chrom   pos        ref  alt  transcript_seq
-TP53-c.123A>G  TP53    chr17   7676154    A    G    ATGCGA...
-```
-
-Required columns: `pkey`, `gene`, `chrom`, `pos`, `ref`, `alt`, `transcript_seq`
+| `--vcf` | — | Per-gene VCF file or directory (provides chromosome) |
+| `--chromosome-mapping` | — | Chromosome mapping CSV file or directory |
+| `--chrom` | — | Chromosome (alternative to `--vcf`) |
+| `--tx-start` | — | Transcript start position (alternative to `--chromosome-mapping`) |
+| `--strand` | `+` | Strand (`+`/`-`) |
+| `--multi-window` | off | Run multiple windows per mutation (multiplies AF3 runs) |
+| `--multi-window-offsets` | `0.3,0.5,0.7` | Mutation position as fraction of window |
 
 ---
 
@@ -103,23 +114,31 @@ Each row represents a single RBP binding comparison for one mutation.
 | **mut_interface_contacts** | Number of cross-chain contacts < 8 Å (MUT). | count |
 | **delta_interface_contacts** | Change in interface contacts. | count |
 | **cls** | Event classification: `gained`, `lost`, `strengthened`, `weakened`, `unchanged`, `no_binding`. | enum |
-| **priority** | Ranking score: $\|\Delta_{\text{PAE}}\| \cdot e^{-d/k}$. | numeric |
+| **priority** | Ranking score: $\|\Delta_{\text{PAE}}\| \cdot \frac{1}{1+d/k}$. | numeric |
+| **n_samples_wt** | Number of AF3 samples parsed for WT (ensemble mode). | count |
+| **n_samples_mut** | Number of AF3 samples parsed for MUT (ensemble mode). | count |
+| **std_pae_wt** | Standard deviation of chain-pair PAE across WT samples. | Å |
+| **std_pae_mut** | Standard deviation of chain-pair PAE across MUT samples. | Å |
+| **n_windows** | Number of windows used (multi-window mode only). | count |
 
 ---
 
 ### 3. Sites Table (`sites.tsv`)
 
-Each row represents a single RNA position within the AF3 prediction window.
+Each row represents a single interface residue (RNA or protein) within the AF3 prediction.
 
 | Column | Description | Units |
 |--------|-------------|-------|
 | **pkey** | Variant key (`GENE-mutation`). | — |
-| **allele** | Allele label (`WT` or `MUT`). | string |
 | **rbp_name** | RBP identifier. | string |
-| **rna_pos** | Position within RNA window (1-indexed). | nt |
-| **plddt** | Per-residue confidence score. | 0–100 |
-| **in_contact** | Binary flag: 1 if residue contacts protein (< 8 Å). | 0/1 |
-| **contact_distance** | Distance to nearest protein atom. | Å |
+| **allele** | Allele label (`WT` or `MUT`). | string |
+| **chain** | Chain identifier (e.g., `A` for RNA, `B` for protein). | string |
+| **res_id** | Residue sequence number. | int |
+| **res_name** | Residue name (3-letter code). | string |
+| **plddt** | Per-residue pLDDT confidence score. | 0–100 |
+| **is_contact** | Binary flag: 1 if residue contacts the other chain (< 8 Å). | 0/1 |
+| **min_contact_distance** | Minimum distance to nearest atom in the other chain. | Å |
+| **contact_frequency** | Fraction of ensemble samples where this residue is a contact (ensemble mode). | 0–1 |
 
 ---
 
@@ -218,42 +237,91 @@ This three-part filter excludes predictions where AF3 has low confidence in eith
 
 ```bash
 python alphafold3_pipeline.py \
-    --mutations mutations.tsv \
-    --postar3-db RBP_db/human-POSTAR3.sorted.bed.gz \
-    --uniprot-mapping human_uniprot_genes.tsv \
-    --sequence-fasta rbp_sequences.fasta \
-    --output-dir af3_results/ \
+    --fasta transcripts/SMN2.fasta \
+    --chromosome-mapping mappings/SMN2_chromosome_mapping.csv \
+    --postar-db RBP_db/human-POSTAR3.sorted.bed.gz \
+    --rbp-mapping human_uniprot_genes.tsv \
+    --rbp-sequences rbp_sequences.fasta \
+    --model-dir /path/to/af3_weights \
+    --output af3_results/ \
+    --prefix alphafold3 \
     --execution-mode local
+```
+
+### With Multi-Window Mode
+
+```bash
+python alphafold3_pipeline.py \
+    --fasta transcripts/SMN2.fasta \
+    --chromosome-mapping mappings/SMN2_chromosome_mapping.csv \
+    --postar-db RBP_db/human-POSTAR3.sorted.bed.gz \
+    --rbp-mapping human_uniprot_genes.tsv \
+    --msa-dir msa_files/ \
+    --model-dir /path/to/af3_weights \
+    --output af3_results/ \
+    --multi-window \
+    --multi-window-offsets 0.3,0.5,0.7
+```
+
+### Directory Mode (Multiple Genes)
+
+```bash
+python alphafold3_pipeline.py \
+    --fasta transcripts/ \
+    --chromosome-mapping mappings/ \
+    --vcf vcf_files/ \
+    --postar-db RBP_db/human-POSTAR3.sorted.bed.gz \
+    --rbp-mapping human_uniprot_genes.tsv \
+    --msa-dir msa_files/ \
+    --model-dir /path/to/af3_weights \
+    --output af3_results/
 ```
 
 ### Batch Execution (SLURM)
 
 ```bash
 python alphafold3_pipeline.py \
-    --mutations mutations.tsv \
-    --postar3-db RBP_db/human-POSTAR3.sorted.bed.gz \
-    --uniprot-mapping human_uniprot_genes.tsv \
-    --sequence-dir rbp_sequences/ \
-    --output-dir af3_results/ \
+    --fasta transcripts/SMN2.fasta \
+    --mutations mutations/SMN2.csv \
+    --chrom chr5 --tx-start 70220768 \
+    --postar-db RBP_db/human-POSTAR3.sorted.bed.gz \
+    --rbp-mapping human_uniprot_genes.tsv \
+    --rbp-sequences rbp_sequences.fasta \
+    --output af3_results/ \
     --execution-mode batch
 ```
 
 Generates SLURM scripts in output directory. Submit with `sbatch af3_results/<job_id>/submit.slurm`.
 
-### Cloud Execution (GCP Batch)
+---
 
-```bash
-python alphafold3_pipeline.py \
-    --mutations mutations.tsv \
-    --postar3-db RBP_db/human-POSTAR3.sorted.bed.gz \
-    --uniprot-mapping human_uniprot_genes.tsv \
-    --sequence-fasta rbp_sequences.fasta \
-    --output-dir af3_results/ \
-    --execution-mode cloud \
-    --gcp-project my-project
-```
+## Ensemble Aggregation
 
-Generates GCP Batch JSON configs.
+AF3 produces multiple samples per seed (typically 4 samples per seed). The pipeline parses all `seed-N_sample-N/` subdirectories from each AF3 run and aggregates metrics across samples.
+
+**Aggregated fields:**
+- **Mean** of chain-pair PAE, interface contacts, pLDDT (RNA and protein)
+- **Standard deviation** (population stdev) of each metric across samples
+- **Contact frequency** — per-residue fraction of samples where that residue appears as an interface contact (reported in the sites table)
+
+When only a single sample is available (e.g., top-ranked model only), the pipeline falls back to single-model behavior with no standard deviation fields.
+
+The ensemble columns in `events.tsv` (`n_samples_wt`, `n_samples_mut`, `std_pae_wt`, `std_pae_mut`) are empty when running in single-model mode.
+
+---
+
+## Multi-Window Mode
+
+By default, the mutation is centered in the RNA window. The `--multi-window` flag generates multiple windows where the mutation is placed at different fractional offsets within the window (default: 0.3, 0.5, 0.7). This reduces positional bias — AF3 predictions can be sensitive to where the mutation falls relative to window boundaries.
+
+**Behavior:**
+- Each offset produces a distinct WT/MUT window pair
+- Duplicate windows (possible near transcript ends) are deduplicated
+- AF3 is run separately for each window (jobs suffixed `_w0`, `_w1`, etc.)
+- Metrics are aggregated across windows (mean ± std), reported identically to ensemble aggregation
+- The `n_windows` column in `events.tsv` records how many windows were used
+
+**Compute cost:** With 3 offsets and N RBPs, multi-window mode runs 6×N AF3 jobs per mutation (3 windows × 2 alleles × N RBPs). The flag is off by default.
 
 ---
 

@@ -22,7 +22,7 @@ and classifies binding events.
 """
 
 from dataclasses import dataclass
-from typing import Optional, List
+from typing import Dict, Optional, List
 from enum import Enum
 
 
@@ -45,6 +45,12 @@ class BindingMetrics:
     interface_plddt_rna: float
     interface_plddt_protein: float
     has_binding: bool  # Based on confidence thresholds
+    # Ensemble fields (None when single-model)
+    n_samples: Optional[int] = None
+    std_chain_pair_pae_min: Optional[float] = None
+    std_interface_contacts: Optional[float] = None
+    std_plddt_rna: Optional[float] = None
+    std_plddt_protein: Optional[float] = None
 
 
 @dataclass
@@ -63,6 +69,7 @@ class DeltaMetrics:
     # Classification
     event_class: BindingEventClass
     priority_score: float  # For ranking importance
+    n_windows: Optional[int] = None  # Multi-window mode only
 
 
 @dataclass
@@ -294,7 +301,7 @@ def format_events_rows(
     """
     rows = []
     for d in delta_list:
-        rows.append({
+        row = {
             'pkey': pkey,
             'rbp_name': d.rbp_name,
             'wt_chain_pair_pae_min': round(d.wt_metrics.chain_pair_pae_min, 3) if d.wt_metrics else '',
@@ -304,6 +311,49 @@ def format_events_rows(
             'mut_interface_contacts': d.mut_metrics.interface_contacts if d.mut_metrics else 0,
             'delta_interface_contacts': d.delta_interface_contacts,
             'cls': d.event_class.value,
-            'priority': round(d.priority_score, 3)
+            'priority': round(d.priority_score, 3),
+            'n_samples_wt': d.wt_metrics.n_samples if d.wt_metrics and d.wt_metrics.n_samples else '',
+            'n_samples_mut': d.mut_metrics.n_samples if d.mut_metrics and d.mut_metrics.n_samples else '',
+            'std_pae_wt': round(d.wt_metrics.std_chain_pair_pae_min, 3) if d.wt_metrics and d.wt_metrics.std_chain_pair_pae_min is not None else '',
+            'std_pae_mut': round(d.mut_metrics.std_chain_pair_pae_min, 3) if d.mut_metrics and d.mut_metrics.std_chain_pair_pae_min is not None else '',
+            'n_windows': d.n_windows if d.n_windows else '',
+        }
+        rows.append(row)
+    return rows
+
+
+def format_sites_rows(
+    pkey: str,
+    rbp_name: str,
+    allele: str,
+    sites: List,
+    contact_frequency: Optional[Dict[int, float]] = None
+) -> List[dict]:
+    """
+    Format interface sites as rows for sites.tsv.
+
+    Args:
+        pkey: Mutation pkey
+        rbp_name: RBP identifier
+        allele: 'WT' or 'MUT'
+        sites: List of InterfaceSite objects
+        contact_frequency: Optional dict of res_id -> fraction (from ensemble)
+    """
+    rows = []
+    for s in sites:
+        freq = ''
+        if contact_frequency and s.res_id in contact_frequency:
+            freq = round(contact_frequency[s.res_id], 3)
+        rows.append({
+            'pkey': pkey,
+            'rbp_name': rbp_name,
+            'allele': allele,
+            'chain': s.chain,
+            'res_id': s.res_id,
+            'res_name': s.res_name,
+            'plddt': round(s.plddt, 1),
+            'is_contact': 1 if s.is_contact else 0,
+            'min_contact_distance': s.min_contact_distance,
+            'contact_frequency': freq,
         })
     return rows

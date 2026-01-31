@@ -31,23 +31,42 @@ import argparse
 import csv
 import sys
 from pathlib import Path
-from typing import Dict, List, Optional, Set
-from dataclasses import dataclass
+from concurrent.futures import Future
+from typing import Dict, List, Optional, Set, Tuple
+from dataclasses import dataclass, field
 
 # Local imports
 from bin.rbp_database import POSTAR3Database, RBPBindingSite
 from bin.rbp_sequence_mapper import RBPSequenceMapper
 from bin.af3_runner import AF3Runner, AF3RunnerConfig, ExecutionMode, create_rna_protein_input
-from bin.af3_parser import AF3Parser, analyze_binding, BindingAnalysis
+from bin.af3_parser import (
+    AF3Parser, AF3Structure, analyze_binding, BindingAnalysis,
+    parse_all_samples, aggregate_binding_analyses, AggregatedBindingAnalysis,
+    extract_interface_sites
+)
 from bin.binding_metrics import (
     BindingMetrics, DeltaMetrics, ThresholdConfig,
-    compute_delta_metrics, aggregate_mutation_summary, format_events_rows
+    compute_delta_metrics, aggregate_mutation_summary,
+    format_events_rows, format_sites_rows
 )
 
 from utils.utility import (
     read_fasta, trim_muts, get_mutation_data_bioAccurate,
-    extract_gene_from_filename, subseq
+    extract_gene_from_filename, subseq, load_mapping,
+    _collect_failures_from_logs
 )
+
+
+def parse_vcf_chrom(vcf_path: str) -> Optional[str]:
+    """Extract CHROM from a per-gene VCF (all data rows share same chromosome)."""
+    with open(vcf_path) as f:
+        for line in f:
+            if line.startswith('#'):
+                continue
+            fields = line.strip().split('\t')
+            if len(fields) >= 1:
+                return fields[0]
+    return None
 
 
 @dataclass
@@ -63,6 +82,15 @@ class MutationContext:
     wt_rna_window: str
     mut_rna_window: str
     window_center: int  # Position of mutation in window (0-based)
+    genomic_pos: Optional[int] = None  # Chromosomal position for RBP distance
+
+
+@dataclass
+class _ParsedResult:
+    """Internal: parsed AF3 output with metrics, structures, and aggregation."""
+    metrics: Optional[BindingMetrics]
+    structures: List[AF3Structure]
+    aggregation: Optional[AggregatedBindingAnalysis]
 
 
 class AlphaFold3Pipeline:
@@ -79,9 +107,14 @@ class AlphaFold3Pipeline:
         msa_dir: Optional[str] = None,
         execution_mode: str = "local",
         af3_binary: str = "alphafold3",
+        docker_image: str = "alphafold3",
+        model_dir: Optional[str] = None,
         window_size: int = 101,
         rbp_window: int = 50,
-        validation_log: Optional[str] = None
+        validation_log: Optional[str] = None,
+        multi_window: bool = False,
+        multi_window_offsets: Optional[List[float]] = None,
+        max_gpus: Optional[int] = None
     ):
         """
         Initialize pipeline.
@@ -94,6 +127,8 @@ class AlphaFold3Pipeline:
             msa_dir: Directory containing A3M MSA files (preferred over rbp_sequences)
             execution_mode: 'local', 'batch', or 'cloud'
             af3_binary: Path to AF3 executable
+            docker_image: Docker image name for AF3
+            model_dir: Path to AF3 model weights directory
             window_size: RNA window size around mutation (odd number)
             rbp_window: Window to search for RBP binding sites (+/-bp)
             validation_log: Optional validation log for filtering mutations
@@ -104,6 +139,8 @@ class AlphaFold3Pipeline:
         self.window_size = window_size
         self.rbp_window = rbp_window
         self.validation_log = validation_log
+        self.multi_window = multi_window
+        self.multi_window_offsets = multi_window_offsets or [0.3, 0.5, 0.7]
 
         # Initialize components
         print("Loading POSTAR3 database...", file=sys.stderr)
@@ -120,7 +157,10 @@ class AlphaFold3Pipeline:
         af3_config = AF3RunnerConfig(
             af3_binary=af3_binary,
             output_base_dir=str(self.output_dir / "af3_runs"),
-            execution_mode=ExecutionMode(execution_mode)
+            execution_mode=ExecutionMode(execution_mode),
+            docker_image=docker_image,
+            model_dir=model_dir,
+            max_gpus=max_gpus
         )
         self.af3_runner = AF3Runner(af3_config)
 
@@ -135,22 +175,24 @@ class AlphaFold3Pipeline:
     def process_gene(
         self,
         fasta_path: str,
-        mutations_path: str,
+        mutations_path: Optional[str] = None,
         gene_name: Optional[str] = None,
         chrom: Optional[str] = None,
         tx_start: Optional[int] = None,
-        strand: str = "+"
+        strand: str = "+",
+        chrom_mapping: Optional[Dict[str, str]] = None
     ):
         """
         Process all mutations for a gene.
 
         Args:
             fasta_path: Path to ORF FASTA
-            mutations_path: Path to mutations CSV
+            mutations_path: Path to mutations CSV (optional when chrom_mapping provided)
             gene_name: Gene symbol (extracted from filename if not provided)
             chrom: Chromosome for POSTAR3 lookup
             tx_start: Transcript start for coordinate conversion
             strand: Strand ('+' or '-')
+            chrom_mapping: Dict mapping mutation -> chromosome entry (e.g., C123T -> C87504250T)
         """
         # Get gene name
         if gene_name is None:
@@ -174,7 +216,18 @@ class AlphaFold3Pipeline:
             transcript_seq = next(iter(fasta_data.values()))
 
         # Load mutations
-        mutations = trim_muts(mutations_path, self.validation_log, gene_name)
+        if mutations_path:
+            mutations = trim_muts(mutations_path, self.validation_log, gene_name)
+        elif chrom_mapping:
+            mutations = list(chrom_mapping.keys())
+            if self.validation_log:
+                failures = _collect_failures_from_logs(self.validation_log)
+                skip_set = failures.get(gene_name.upper(), set()) if gene_name else set()
+                mutations = [m for m in mutations if m not in skip_set]
+        else:
+            print(f"  Error: No mutations source", file=sys.stderr)
+            return
+
         print(f"  {len(mutations)} mutations to process", file=sys.stderr)
 
         # Process each mutation
@@ -186,7 +239,8 @@ class AlphaFold3Pipeline:
                     transcript_seq=transcript_seq,
                     chrom=chrom,
                     tx_start=tx_start,
-                    strand=strand
+                    strand=strand,
+                    chrom_mapping=chrom_mapping
                 )
             except Exception as e:
                 print(f"  Error processing {mutation}: {e}", file=sys.stderr)
@@ -199,7 +253,8 @@ class AlphaFold3Pipeline:
         transcript_seq: str,
         chrom: Optional[str],
         tx_start: Optional[int],
-        strand: str
+        strand: str,
+        chrom_mapping: Optional[Dict[str, str]] = None
     ):
         """Process a single mutation."""
         pkey = f"{gene_name}-{mutation}"
@@ -220,14 +275,11 @@ class AlphaFold3Pipeline:
         if transcript_seq[pos_0].upper() != wt_nt.upper():
             raise ValueError(f"Reference mismatch at {nt_pos}: expected {wt_nt}, found {transcript_seq[pos_0]}")
 
-        # Extract RNA windows
-        wt_window = subseq(transcript_seq, pos_0, self.window_size)
-        mut_seq = transcript_seq[:pos_0] + mut_nt + transcript_seq[pos_0+1:]
-        mut_window = subseq(mut_seq, pos_0, self.window_size)
+        # Generate RNA windows
+        windows = self._generate_windows(transcript_seq, pos_0, mut_nt)
 
-        # Find mutation position in window
-        window_start = max(0, pos_0 - self.window_size // 2)
-        window_center = pos_0 - window_start
+        # Primary window (centered or first offset)
+        wt_window, mut_window, window_center = windows[0]
 
         context = MutationContext(
             pkey=pkey,
@@ -242,8 +294,24 @@ class AlphaFold3Pipeline:
             window_center=window_center
         )
 
+        # Resolve chromosomal position
+        genomic_pos = None
+        if chrom_mapping and mutation in chrom_mapping:
+            entry = chrom_mapping[mutation]
+            try:
+                genomic_pos = int(entry[1:-1])
+            except (ValueError, IndexError):
+                print(f"    Warning: Could not parse chromosome mapping for {mutation}: {entry}", file=sys.stderr)
+        elif tx_start is not None:
+            if strand == '+':
+                genomic_pos = tx_start + nt_pos - 1
+            else:
+                genomic_pos = tx_start - nt_pos + 1
+
+        context.genomic_pos = genomic_pos
+
         # Query RBPs near mutation
-        rbp_sites = self._get_nearby_rbps(chrom, nt_pos, tx_start, strand)
+        rbp_sites = self._get_nearby_rbps(chrom, genomic_pos)
 
         if not rbp_sites:
             # No RBPs in region
@@ -254,10 +322,20 @@ class AlphaFold3Pipeline:
         rbps_to_test = self.rbp_db.group_by_rbp(rbp_sites)
         print(f"    {pkey}: {len(rbps_to_test)} RBPs to test", file=sys.stderr)
 
-        # Run AF3 for each RBP
-        delta_list = []
+        # Phase 1: Submit all RBP jobs (non-blocking)
+        pending_list = []
         for rbp_name, sites in rbps_to_test.items():
-            delta = self._analyze_rbp_binding(context, rbp_name, sites)
+            pending = self._submit_rbp_jobs(
+                context, rbp_name, sites,
+                windows=windows if len(windows) > 1 else None
+            )
+            if pending:
+                pending_list.append(pending)
+
+        # Phase 2: Collect all results (blocks on futures as they complete)
+        delta_list = []
+        for pending in pending_list:
+            delta = self._collect_rbp_results(context, pending)
             if delta:
                 delta_list.append(delta)
 
@@ -267,72 +345,196 @@ class AlphaFold3Pipeline:
     def _get_nearby_rbps(
         self,
         chrom: Optional[str],
-        nt_pos: int,
-        tx_start: Optional[int],
-        strand: str
+        genomic_pos: Optional[int]
     ) -> List[RBPBindingSite]:
         """Query POSTAR3 for RBPs near mutation position."""
-        if chrom is None:
+        if chrom is None or genomic_pos is None:
             return []
-
-        # Convert transcript position to genomic
-        if tx_start is not None:
-            if strand == '+':
-                genomic_pos = tx_start + nt_pos - 1
-            else:
-                genomic_pos = tx_start - nt_pos + 1
-        else:
-            genomic_pos = nt_pos
 
         return self.rbp_db.query_position(chrom, genomic_pos, self.rbp_window)
 
-    def _analyze_rbp_binding(
+    def _generate_windows(
+        self,
+        transcript_seq: str,
+        pos_0: int,
+        mut_nt: str
+    ) -> List[Tuple[str, str, int]]:
+        """
+        Generate RNA windows around the mutation.
+
+        Returns list of (wt_window, mut_window, window_center) tuples.
+        Single window when multi_window is disabled.
+        """
+        mut_seq = transcript_seq[:pos_0] + mut_nt + transcript_seq[pos_0 + 1:]
+
+        if not self.multi_window:
+            wt_window = subseq(transcript_seq, pos_0, self.window_size)
+            mut_window = subseq(mut_seq, pos_0, self.window_size)
+            window_start = max(0, pos_0 - self.window_size // 2)
+            return [(wt_window, mut_window, pos_0 - window_start)]
+
+        seen = set()
+        windows = []
+        for frac in self.multi_window_offsets:
+            target_center = int(frac * self.window_size)
+            window_start = pos_0 - target_center
+            window_start = max(0, min(window_start, len(transcript_seq) - self.window_size))
+            window_end = window_start + self.window_size
+
+            wt_win = transcript_seq[window_start:window_end]
+            mut_win = mut_seq[window_start:window_end]
+            center = pos_0 - window_start
+
+            if wt_win not in seen:
+                seen.add(wt_win)
+                windows.append((wt_win, mut_win, center))
+
+        return windows if windows else [(subseq(transcript_seq, pos_0, self.window_size),
+                                          subseq(mut_seq, pos_0, self.window_size),
+                                          pos_0 - max(0, pos_0 - self.window_size // 2))]
+
+    @dataclass
+    class _PendingRBPAnalysis:
+        """Tracks submitted async jobs for one RBP."""
+        rbp_name: str
+        sites: List
+        distance: int
+        wt_future: Optional[Future] = None
+        mut_future: Optional[Future] = None
+        window_wt_futures: Optional[List[Future]] = None
+        window_mut_futures: Optional[List[Future]] = None
+        n_windows: int = 1
+
+    def _submit_rbp_jobs(
         self,
         context: MutationContext,
         rbp_name: str,
-        sites: List[RBPBindingSite]
-    ) -> Optional[DeltaMetrics]:
-        """Run AF3 and analyze binding for one RBP."""
-        # Get RBP data (sequence + MSA)
+        sites: List[RBPBindingSite],
+        windows: Optional[List[Tuple[str, str, int]]] = None
+    ) -> Optional['AlphaFold3Pipeline._PendingRBPAnalysis']:
+        """Submit AF3 jobs for one RBP without blocking. Returns pending tracker."""
         rbp_data = self.seq_mapper.get_rbp_data(rbp_name)
         if not rbp_data:
             print(f"      {rbp_name}: sequence not found", file=sys.stderr)
             return None
 
         protein_seq = rbp_data.sequence
-        protein_msa = rbp_data.msa_content  # May be None if no MSA available
+        protein_msa = rbp_data.msa_content
 
-        # Check token limit (rough estimate)
         total_tokens = len(context.wt_rna_window) + len(protein_seq)
         if total_tokens > 5000:
             print(f"      {rbp_name}: token limit exceeded ({total_tokens})", file=sys.stderr)
             return None
 
-        # Create AF3 inputs (with MSA if available)
-        wt_input = create_rna_protein_input(
-            job_name=f"{context.pkey}_{rbp_name}_WT",
-            rna_seq=context.wt_rna_window,
-            protein_seq=protein_seq,
-            protein_msa=protein_msa
+        distance = min(site.distance_to(context.genomic_pos) for site in sites) if context.genomic_pos else 0
+
+        pending = self._PendingRBPAnalysis(
+            rbp_name=rbp_name,
+            sites=sites,
+            distance=distance
         )
 
-        mut_input = create_rna_protein_input(
-            job_name=f"{context.pkey}_{rbp_name}_MUT",
-            rna_seq=context.mut_rna_window,
-            protein_seq=protein_seq,
-            protein_msa=protein_msa
-        )
+        if windows and len(windows) > 1:
+            pending.n_windows = len(windows)
+            pending.window_wt_futures = []
+            pending.window_mut_futures = []
+            for i, (wt_win, mut_win, _center) in enumerate(windows):
+                wt_in = create_rna_protein_input(
+                    job_name=f"{context.pkey}_{rbp_name}_WT_w{i}",
+                    rna_seq=wt_win, protein_seq=protein_seq, protein_msa=protein_msa
+                )
+                mut_in = create_rna_protein_input(
+                    job_name=f"{context.pkey}_{rbp_name}_MUT_w{i}",
+                    rna_seq=mut_win, protein_seq=protein_seq, protein_msa=protein_msa
+                )
+                pending.window_wt_futures.append(
+                    self.af3_runner.submit_job_async(wt_in, job_id=f"{context.pkey}_{rbp_name}_WT_w{i}")
+                )
+                pending.window_mut_futures.append(
+                    self.af3_runner.submit_job_async(mut_in, job_id=f"{context.pkey}_{rbp_name}_MUT_w{i}")
+                )
+        else:
+            wt_input = create_rna_protein_input(
+                job_name=f"{context.pkey}_{rbp_name}_WT",
+                rna_seq=context.wt_rna_window, protein_seq=protein_seq, protein_msa=protein_msa
+            )
+            mut_input = create_rna_protein_input(
+                job_name=f"{context.pkey}_{rbp_name}_MUT",
+                rna_seq=context.mut_rna_window, protein_seq=protein_seq, protein_msa=protein_msa
+            )
+            pending.wt_future = self.af3_runner.submit_job_async(
+                wt_input, job_id=f"{context.pkey}_{rbp_name}_WT"
+            )
+            pending.mut_future = self.af3_runner.submit_job_async(
+                mut_input, job_id=f"{context.pkey}_{rbp_name}_MUT"
+            )
 
-        # Run AF3
-        wt_job = self.af3_runner.submit_job(wt_input, job_id=f"{context.pkey}_{rbp_name}_WT")
-        mut_job = self.af3_runner.submit_job(mut_input, job_id=f"{context.pkey}_{rbp_name}_MUT")
+        return pending
 
-        # Parse results
-        wt_metrics = self._parse_binding_metrics(wt_job.output_dir, rbp_name) if wt_job.status == "completed" else None
-        mut_metrics = self._parse_binding_metrics(mut_job.output_dir, rbp_name) if mut_job.status == "completed" else None
+    def _collect_rbp_results(
+        self,
+        context: MutationContext,
+        pending: '_PendingRBPAnalysis'
+    ) -> Optional[DeltaMetrics]:
+        """Block on futures, parse results, compute delta metrics for one RBP."""
+        rbp_name = pending.rbp_name
+        distance = pending.distance
 
-        # Distance to nearest binding site
-        distance = min(site.distance_to(context.nt_pos) for site in sites)
+        if pending.n_windows > 1:
+            wt_results = []
+            mut_results = []
+            for wt_f, mut_f in zip(pending.window_wt_futures, pending.window_mut_futures):
+                wt_job = wt_f.result()
+                mut_job = mut_f.result()
+                if wt_job.status == "completed" and wt_job.result_path:
+                    wt_results.append(self._parse_af3_output(wt_job.result_path, rbp_name))
+                if mut_job.status == "completed" and mut_job.result_path:
+                    mut_results.append(self._parse_af3_output(mut_job.result_path, rbp_name))
+
+            wt_metrics = self._aggregate_parsed_results(wt_results, rbp_name)
+            mut_metrics = self._aggregate_parsed_results(mut_results, rbp_name)
+
+            for r in wt_results:
+                if r and r.structures:
+                    sites_data = extract_interface_sites(r.structures[0])
+                    freq = r.aggregation.contact_frequency_rna if r.aggregation else None
+                    self.sites_rows.extend(format_sites_rows(context.pkey, rbp_name, 'WT', sites_data, freq))
+                    break
+            for r in mut_results:
+                if r and r.structures:
+                    sites_data = extract_interface_sites(r.structures[0])
+                    freq = r.aggregation.contact_frequency_rna if r.aggregation else None
+                    self.sites_rows.extend(format_sites_rows(context.pkey, rbp_name, 'MUT', sites_data, freq))
+                    break
+
+            delta = compute_delta_metrics(
+                rbp_name=rbp_name,
+                wt_metrics=wt_metrics,
+                mut_metrics=mut_metrics,
+                distance_to_mutation=distance,
+                config=self.threshold_config
+            )
+            delta.n_windows = pending.n_windows
+            return delta
+
+        # Single-window
+        wt_job = pending.wt_future.result()
+        mut_job = pending.mut_future.result()
+
+        wt_parsed = self._parse_af3_output(wt_job.result_path, rbp_name) if wt_job.status == "completed" else None
+        mut_parsed = self._parse_af3_output(mut_job.result_path, rbp_name) if mut_job.status == "completed" else None
+
+        wt_metrics = wt_parsed.metrics if wt_parsed else None
+        mut_metrics = mut_parsed.metrics if mut_parsed else None
+
+        if wt_parsed and wt_parsed.structures:
+            sites_data = extract_interface_sites(wt_parsed.structures[0])
+            freq = wt_parsed.aggregation.contact_frequency_rna if wt_parsed.aggregation else None
+            self.sites_rows.extend(format_sites_rows(context.pkey, rbp_name, 'WT', sites_data, freq))
+        if mut_parsed and mut_parsed.structures:
+            sites_data = extract_interface_sites(mut_parsed.structures[0])
+            freq = mut_parsed.aggregation.contact_frequency_rna if mut_parsed.aggregation else None
+            self.sites_rows.extend(format_sites_rows(context.pkey, rbp_name, 'MUT', sites_data, freq))
 
         return compute_delta_metrics(
             rbp_name=rbp_name,
@@ -342,29 +544,95 @@ class AlphaFold3Pipeline:
             config=self.threshold_config
         )
 
-    def _parse_binding_metrics(
+    def _parse_af3_output(
         self,
         output_dir: Path,
         rbp_name: str
-    ) -> Optional[BindingMetrics]:
-        """Parse AF3 output to binding metrics."""
-        parser = AF3Parser(str(output_dir))
-        structure = parser.parse()
-
-        if not structure:
+    ) -> Optional[_ParsedResult]:
+        """Parse AF3 output with ensemble sample aggregation."""
+        if output_dir is None:
             return None
 
-        binding = analyze_binding(structure, rna_chain="R", protein_chain="P")
-        if not binding:
+        structures = parse_all_samples(str(output_dir))
+        if not structures:
+            return None
+
+        analyses = [analyze_binding(s, rna_chain="R", protein_chain="P") for s in structures]
+
+        if len(structures) == 1:
+            binding = analyses[0]
+            if not binding:
+                return _ParsedResult(metrics=None, structures=structures, aggregation=None)
+            metrics = BindingMetrics(
+                rbp_name=rbp_name,
+                chain_pair_pae_min=binding.chain_pair_pae_min,
+                interface_contacts=binding.n_contacts,
+                interface_plddt_rna=binding.interface_plddt_rna,
+                interface_plddt_protein=binding.interface_plddt_protein,
+                has_binding=binding.n_contacts >= self.threshold_config.min_contacts
+            )
+            return _ParsedResult(metrics=metrics, structures=structures, aggregation=None)
+
+        # Multi-sample aggregation
+        agg = aggregate_binding_analyses(analyses)
+        if not agg:
+            return _ParsedResult(metrics=None, structures=structures, aggregation=None)
+
+        metrics = BindingMetrics(
+            rbp_name=rbp_name,
+            chain_pair_pae_min=agg.mean.chain_pair_pae_min,
+            interface_contacts=agg.mean.n_contacts,
+            interface_plddt_rna=agg.mean.interface_plddt_rna,
+            interface_plddt_protein=agg.mean.interface_plddt_protein,
+            has_binding=agg.mean.n_contacts >= self.threshold_config.min_contacts,
+            n_samples=agg.n_samples,
+            std_chain_pair_pae_min=agg.std_chain_pair_pae_min,
+            std_interface_contacts=agg.std_n_contacts,
+            std_plddt_rna=agg.std_interface_plddt_rna,
+            std_plddt_protein=agg.std_interface_plddt_protein
+        )
+        return _ParsedResult(metrics=metrics, structures=structures, aggregation=agg)
+
+    def _aggregate_parsed_results(
+        self,
+        results: List[Optional[_ParsedResult]],
+        rbp_name: str
+    ) -> Optional[BindingMetrics]:
+        """Aggregate metrics across multiple windows."""
+        all_analyses = []
+        for r in results:
+            if r and r.metrics:
+                # Build a BindingAnalysis-like from each result for aggregation
+                all_analyses.append(BindingAnalysis(
+                    rna_chain="R", protein_chain="P",
+                    n_contacts=r.metrics.interface_contacts,
+                    min_contact_distance=0.0,
+                    mean_contact_distance=0.0,
+                    interface_plddt_rna=r.metrics.interface_plddt_rna,
+                    interface_plddt_protein=r.metrics.interface_plddt_protein,
+                    chain_pair_pae_min=r.metrics.chain_pair_pae_min,
+                    contact_residues_rna=[], contact_residues_protein=[]
+                ))
+
+        if not all_analyses:
+            return None
+
+        agg = aggregate_binding_analyses(all_analyses)
+        if not agg:
             return None
 
         return BindingMetrics(
             rbp_name=rbp_name,
-            chain_pair_pae_min=binding.chain_pair_pae_min,
-            interface_contacts=binding.n_contacts,
-            interface_plddt_rna=binding.interface_plddt_rna,
-            interface_plddt_protein=binding.interface_plddt_protein,
-            has_binding=binding.n_contacts >= self.threshold_config.min_contacts
+            chain_pair_pae_min=agg.mean.chain_pair_pae_min,
+            interface_contacts=agg.mean.n_contacts,
+            interface_plddt_rna=agg.mean.interface_plddt_rna,
+            interface_plddt_protein=agg.mean.interface_plddt_protein,
+            has_binding=agg.mean.n_contacts >= self.threshold_config.min_contacts,
+            n_samples=agg.n_samples,
+            std_chain_pair_pae_min=agg.std_chain_pair_pae_min,
+            std_interface_contacts=agg.std_n_contacts,
+            std_plddt_rna=agg.std_interface_plddt_rna,
+            std_plddt_protein=agg.std_interface_plddt_protein
         )
 
     def _finalize_mutation_results(
@@ -377,7 +645,19 @@ class AlphaFold3Pipeline:
         summary = aggregate_mutation_summary(delta_list)
         summary['pkey'] = context.pkey
         summary['Gene'] = context.gene
-        summary['qc_flags'] = 'PASS' if delta_list else 'no_rbps_tested'
+
+        # QC flags: check whether AF3 predictions actually succeeded
+        has_complete = any(d.wt_metrics is not None and d.mut_metrics is not None for d in delta_list)
+        has_partial = any(d.wt_metrics is not None or d.mut_metrics is not None for d in delta_list)
+        if not delta_list:
+            summary['qc_flags'] = 'no_rbps_tested'
+        elif has_complete:
+            summary['qc_flags'] = 'PASS'
+        elif has_partial:
+            summary['qc_flags'] = 'PARTIAL'
+        else:
+            summary['qc_flags'] = 'ALL_FAILED'
+
         self.summary_rows.append(summary)
 
         # Events rows
@@ -435,6 +715,16 @@ class AlphaFold3Pipeline:
                 writer.writerows(self.events_rows)
             print(f"Wrote {len(self.events_rows)} rows to {events_path}", file=sys.stderr)
 
+        # Sites
+        sites_path = self.output_dir / f"{prefix}.sites.tsv"
+        if self.sites_rows:
+            fieldnames = list(self.sites_rows[0].keys())
+            with open(sites_path, 'w', newline='') as f:
+                writer = csv.DictWriter(f, fieldnames=fieldnames, delimiter='\t')
+                writer.writeheader()
+                writer.writerows(self.sites_rows)
+            print(f"Wrote {len(self.sites_rows)} rows to {sites_path}", file=sys.stderr)
+
 
 def main():
     parser = argparse.ArgumentParser(
@@ -451,15 +741,21 @@ def main():
     parser.add_argument('--msa-dir',
                        help='Directory with A3M MSA files (preferred over --rbp-sequences)')
 
-    # Gene inputs
-    parser.add_argument('--fasta', help='ORF FASTA file')
-    parser.add_argument('--mutations', help='Mutations CSV file')
-    parser.add_argument('--fasta-dir', help='Directory of FASTA files')
-    parser.add_argument('--mutations-dir', help='Directory of mutation files')
+    # Gene inputs (file or directory, auto-detected)
+    parser.add_argument('--fasta',
+                        help='Transcript FASTA file or directory of FASTA files')
+    parser.add_argument('--mutations',
+                        help='Mutations CSV file or directory (optional when --chromosome-mapping provided)')
 
-    # Genomic coordinates (optional, for POSTAR3 lookup)
-    parser.add_argument('--chrom', help='Chromosome')
-    parser.add_argument('--tx-start', type=int, help='Transcript start position')
+    # VCF-based coordinate resolution (replaces --chrom/--tx-start/--strand)
+    parser.add_argument('--vcf',
+                        help='Per-gene VCF file or directory from vcf_converter.py (provides chromosome)')
+    parser.add_argument('--chromosome-mapping',
+                        help='Chromosome mapping CSV file or directory (provides mutations and chromosomal positions)')
+
+    # Legacy genomic coordinates (still supported)
+    parser.add_argument('--chrom', help='Chromosome (alternative to --vcf)')
+    parser.add_argument('--tx-start', type=int, help='Transcript start position (alternative to --chromosome-mapping)')
     parser.add_argument('--strand', default='+', help='Strand (+/-)')
 
     # Output
@@ -474,6 +770,10 @@ def main():
                        help='AF3 execution mode')
     parser.add_argument('--af3-binary', default='alphafold3',
                        help='Path to AF3 executable')
+    parser.add_argument('--docker-image', default='alphafold3',
+                       help='Docker image name for AF3')
+    parser.add_argument('--model-dir',
+                       help='Path to AF3 model weights directory')
 
     # Parameters
     parser.add_argument('--window-size', type=int, default=101,
@@ -483,11 +783,23 @@ def main():
     parser.add_argument('--validation-log',
                        help='Validation log for filtering mutations')
 
+    # Multi-window mode (optional, multiplies AF3 runs)
+    parser.add_argument('--multi-window', action='store_true', default=False,
+                       help='Run multiple windows per mutation (multiplies AF3 runs)')
+    parser.add_argument('--multi-window-offsets', type=str, default='0.3,0.5,0.7',
+                       help='Mutation position as fraction of window (default: 0.3,0.5,0.7)')
+    parser.add_argument('--max-gpus', type=int, default=None,
+                       help='Max GPUs for parallel AF3 execution (default: auto-detect)')
+
     args = parser.parse_args()
 
     # Validate that we have either MSA dir or sequences
     if not args.msa_dir and not args.rbp_sequences:
         parser.error("Provide either --msa-dir or --rbp-sequences")
+
+    # Model weights required for local execution
+    if args.execution_mode == 'local' and not args.model_dir:
+        parser.error("--model-dir is required for local execution mode")
 
     # Initialize pipeline
     pipeline = AlphaFold3Pipeline(
@@ -498,43 +810,109 @@ def main():
         msa_dir=args.msa_dir,
         execution_mode=args.execution_mode,
         af3_binary=args.af3_binary,
+        docker_image=args.docker_image,
+        model_dir=args.model_dir,
         window_size=args.window_size,
         rbp_window=args.rbp_window,
-        validation_log=args.validation_log
+        validation_log=args.validation_log,
+        multi_window=args.multi_window,
+        multi_window_offsets=[float(x) for x in args.multi_window_offsets.split(',')] if args.multi_window_offsets else None,
+        max_gpus=args.max_gpus
     )
 
-    # Process single gene or directory
-    if args.fasta and args.mutations:
-        pipeline.process_gene(
-            fasta_path=args.fasta,
-            mutations_path=args.mutations,
-            chrom=args.chrom,
-            tx_start=args.tx_start,
-            strand=args.strand
-        )
-    elif args.fasta_dir and args.mutations_dir:
-        # Process all genes in directories
-        fasta_dir = Path(args.fasta_dir)
-        mutations_dir = Path(args.mutations_dir)
+    # Resolve inputs
+    fasta_input = Path(args.fasta) if args.fasta else None
+    mutations_input = Path(args.mutations) if args.mutations else None
+    vcf_input = Path(args.vcf) if args.vcf else None
+    chrom_map_input = Path(args.chromosome_mapping) if args.chromosome_mapping else None
 
-        for fasta_file in sorted(fasta_dir.glob('*.fasta')):
+    if not fasta_input:
+        parser.error("--fasta is required")
+    if not mutations_input and not chrom_map_input:
+        parser.error("Provide --mutations or --chromosome-mapping")
+
+    # When using --mutations without --chromosome-mapping, require genomic coordinate flags
+    if mutations_input and not chrom_map_input:
+        if not args.chrom or args.tx_start is None:
+            parser.error("--chrom and --tx-start are required when using --mutations without --chromosome-mapping")
+
+    if fasta_input.is_dir():
+        # --- Directory mode ---
+        for fasta_file in sorted(fasta_input.glob('*.fasta')):
             gene_name = extract_gene_from_filename(str(fasta_file))
 
             # Find matching mutations file
-            mut_candidates = list(mutations_dir.glob(f'*{gene_name}*.csv'))
-            if not mut_candidates:
-                print(f"No mutations file for {gene_name}", file=sys.stderr)
+            mut_path = None
+            if mutations_input and mutations_input.is_dir():
+                candidates = list(mutations_input.glob(f'*{gene_name}*.csv'))
+                if candidates:
+                    mut_path = str(candidates[0])
+
+            # Resolve chromosome from VCF
+            chrom = args.chrom
+            if vcf_input:
+                vcf_search = vcf_input if vcf_input.is_file() else None
+                if vcf_input.is_dir():
+                    vcf_candidates = list(vcf_input.glob(f'{gene_name}.vcf'))
+                    if vcf_candidates:
+                        vcf_search = vcf_candidates[0]
+                if vcf_search:
+                    chrom = parse_vcf_chrom(str(vcf_search))
+
+            # Load chromosome mapping
+            chrom_mapping = None
+            if chrom_map_input:
+                if chrom_map_input.is_file():
+                    chrom_mapping = load_mapping(str(chrom_map_input), mapType="chromosome")
+                elif chrom_map_input.is_dir():
+                    map_candidates = list(chrom_map_input.glob(f'*{gene_name}*.csv'))
+                    if map_candidates:
+                        chrom_mapping = load_mapping(str(map_candidates[0]), mapType="chromosome")
+
+            if not mut_path and not chrom_mapping:
+                print(f"No mutations source for {gene_name}", file=sys.stderr)
                 continue
 
             pipeline.process_gene(
                 fasta_path=str(fasta_file),
-                mutations_path=str(mut_candidates[0])
+                mutations_path=mut_path,
+                chrom=chrom,
+                tx_start=args.tx_start,
+                strand=args.strand,
+                chrom_mapping=chrom_mapping
             )
+
     else:
-        parser.error("Provide either --fasta/--mutations or --fasta-dir/--mutations-dir")
+        # --- Single file mode ---
+        chrom = args.chrom
+        chrom_mapping = None
+
+        if vcf_input:
+            chrom = parse_vcf_chrom(str(vcf_input))
+
+        if chrom_map_input:
+            if chrom_map_input.is_file():
+                chrom_mapping = load_mapping(str(chrom_map_input), mapType="chromosome")
+            elif chrom_map_input.is_dir():
+                gene_name = extract_gene_from_filename(str(fasta_input))
+                map_candidates = list(chrom_map_input.glob(f'*{gene_name}*.csv'))
+                if map_candidates:
+                    chrom_mapping = load_mapping(str(map_candidates[0]), mapType="chromosome")
+
+        mut_path = str(mutations_input) if mutations_input else None
+
+        pipeline.process_gene(
+            fasta_path=str(fasta_input),
+            mutations_path=mut_path,
+            chrom=chrom,
+            tx_start=args.tx_start,
+            strand=args.strand,
+            chrom_mapping=chrom_mapping
+        )
 
     # Write outputs
     pipeline.write_outputs(args.prefix)
+    pipeline.af3_runner.shutdown()
 
 
 if __name__ == '__main__':
