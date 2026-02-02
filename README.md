@@ -32,8 +32,7 @@ Modular bioinformatics framework for automated feature extraction, coordinate ma
 - **Unified mutation processing** keeps mutant sequence analysis consistent across pipelines.  
 - **Shared utilities** in `utils/utility.py` provide discovery helpers, mapping loaders, and mutation filters for every pipeline.  
 - **Multiple processing modes** let you run full pipelines, single tools, or parse-only passes.  
-- **Parallel execution** leverages multiprocessing/threading tuned per tool (`ProcessPoolExecutor`, `ThreadPoolExecutor`).  
-- **Cross-platform support** via Docker images and helper scripts for Linux and macOS (Apple Silicon).  
+- **Parallel execution** leverages multiprocessing/threading tuned per tool (`ProcessPoolExecutor`, `ThreadPoolExecutor`).
 - **Comprehensive logging** ensures validation, warnings, and errors are traceable.  
 
 ---
@@ -67,8 +66,8 @@ Each script auto-discovers dependencies via `utils/utility.py` if the repository
 
 N-linked glycosylation site prediction with modern SignalP 6.0 integration.
 
-- Dockerized NetNGlyc 1.0/SignalP 6.0 stack that runs on Intel + Apple Silicon.  
-- On Linux hosts the pipeline auto-detects native `netNglyc` installations (`--native-netnglyc-bin`, `--force-native`) and falls back to Docker otherwise.  
+- Native NetNGlyc 1.0 execution with host-side SignalP 6.0 integration.
+- Auto-detects native `netNglyc` installations via `--native-netnglyc-bin` or `NETNGLYC_PATH`/`NETNGLYC_HOME` environment variables.
 - Intelligent FASTA/mapping discovery (any filename/extension) for WT + mutant protein sets.  
 - Per-mutation glyco calls plus SignalP confidence summaries suitable for modeling.  
 
@@ -76,7 +75,7 @@ N-linked glycosylation site prediction with modern SignalP 6.0 integration.
 
 Kinase-specific phosphorylation site prediction using the NetPhos/APE system.
 
-- On Linux hosts the pipeline auto-detects native APE/NetPhos installations (`--native-ape-path`, `--force-native`), while macOS/Windows reuse the shared NetNGlyc container.  
+- Auto-detects native APE/NetPhos installations via `--native-ape-path` or `NETPHOS_APE_PATH`/`NETPHOS_HOME` environment variables.
 - Flexible FASTA/mapping discovery identical to NetNGlyc; supports WT vs mutant comparisons.  
 - Produces kinase-aware probability tables with caching for repeated runs.  
 
@@ -120,7 +119,7 @@ MHC class I and II binding prediction for WT vs mutant sequences.
 
 - Predicts peptide-MHC binding across multiple HLA alleles.
 - Identifies gained/lost epitopes and binding strength changes.
-- Supports netMHCpan, netMHC, and netMHCII tools via Docker.
+- Supports netMHCpan, netMHC, and netMHCII tools via native execution.
 
 ### NetSurfP3 Pipeline
 
@@ -181,7 +180,7 @@ This registers the `utils` package so all pipelines can import shared helpers wi
 - `utils/utility.py` serves as the core helper module for NetNGlyc, NetPhos, Miranda, GeneSplicer, SpliceAI preprocessors, and RNAfold.
 - The `utils` package is installed via `pip install -e .` (see [Installation](#installation)).
 - Helpers include directory discovery (`get_input_dir`, `get_output_dir`), mutation CSV loaders, exon-aware mapping filters, FASTA retrieval utilities, and logging wrappers.
-- `docker/` contains Dockerfiles and compose snippets for NetNGlyc and NetPhos.
+- All net-tool pipelines (NetNGlyc, NetPhos, NetMHC) require native binary installations.
 
 ---
 
