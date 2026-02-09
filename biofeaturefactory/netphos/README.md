@@ -6,7 +6,7 @@
 
   | Component | Notes |
   |-----------|-------|
-  | NetPhos 3.1 + APE | Install NetPhos, ensure `tcsh` exists, and point to the binary via `--native-ape-path` or `NETPHOS_APE_PATH/NETPHOS_HOME`. |
+  | NetPhos 3.1 + APE | Download from [DTU Health Tech](https://services.healthtech.dtu.dk/services/NetPhos-3.1/) (academic license). Requires `tcsh`. Set path via `--native-ape-path` or `NETPHOS_APE_PATH`/`NETPHOS_HOME` env var. |
   | Python ≥3.9 | With dependencies in `../utils/`. |
   | Mutation mapping CSVs | `{GENE}`-specific CSVs used for pkey generation (`mutations/combined/aa/` style). |
   | FASTA inputs | WT and/or mutant AA FASTAs, one gene per file. Extensions: `.fasta`, `.fa`, `.fas`, `.fna`. |

@@ -66,17 +66,19 @@ Each script auto-discovers dependencies via `utils/utility.py` if the repository
 
 N-linked glycosylation site prediction with modern SignalP 6.0 integration.
 
-- Native NetNGlyc 1.0 execution with host-side SignalP 6.0 integration.
-- Auto-detects native `netNglyc` installations via `--native-netnglyc-bin` or `NETNGLYC_PATH`/`NETNGLYC_HOME` environment variables.
-- Intelligent FASTA/mapping discovery (any filename/extension) for WT + mutant protein sets.  
+- Requires [NetNGlyc 1.0](https://services.healthtech.dtu.dk/services/NetNGlyc-1.0/) and [SignalP 6.0 fast](https://services.healthtech.dtu.dk/services/SignalP-6.0/) from DTU (academic license).
+- SignalP 6.0 integration via `signalp6_adapter` bridges modern SignalP output to NetNGlyc's legacy format.
+- Auto-detects installations via `--native-netnglyc-bin` or `NETNGLYC_PATH`/`NETNGLYC_HOME` environment variables.
+- Intelligent FASTA/mapping discovery (any filename/extension) for WT + mutant protein sets.
 - Per-mutation glyco calls plus SignalP confidence summaries suitable for modeling.  
 
 ### NetPhos Pipeline
 
 Kinase-specific phosphorylation site prediction using the NetPhos/APE system.
 
-- Auto-detects native APE/NetPhos installations via `--native-ape-path` or `NETPHOS_APE_PATH`/`NETPHOS_HOME` environment variables.
-- Flexible FASTA/mapping discovery identical to NetNGlyc; supports WT vs mutant comparisons.  
+- Requires [NetPhos 3.1](https://services.healthtech.dtu.dk/services/NetPhos-3.1/) from DTU (academic license).
+- Auto-detects APE/NetPhos installations via `--native-ape-path` or `NETPHOS_APE_PATH`/`NETPHOS_HOME` environment variables.
+- Flexible FASTA/mapping discovery identical to NetNGlyc; supports WT vs mutant comparisons.
 - Produces kinase-aware probability tables with caching for repeated runs.  
 
 ### Miranda Pipeline
@@ -119,7 +121,7 @@ MHC class I and II binding prediction for WT vs mutant sequences.
 
 - Predicts peptide-MHC binding across multiple HLA alleles.
 - Identifies gained/lost epitopes and binding strength changes.
-- Supports netMHCpan, netMHC, and netMHCII tools via native execution.
+- Supports netMHCpan, netMHC, and netMHCII tools from DTU (academic license).
 
 ### NetSurfP3 Pipeline
 
@@ -165,13 +167,20 @@ Rare codon enrichment detection using sliding window analysis.
 
 ## Installation
 
-From the repository root, install the shared utilities as an editable package:
+From the repository root, install BioFeatureFactory and its dependencies:
 
 ```bash
 pip install -e .
 ```
 
-This registers the `utils` package so all pipelines can import shared helpers without path manipulation. Re-run after pulling updates that modify `pyproject.toml`.
+This installs:
+- Core dependencies: `biopython`, `pandas`, `numpy<2`, `requests`, `pysam`
+- The `biofeaturefactory` package in editable mode (changes take effect immediately)
+
+Pipeline-specific dependencies (install separately as needed):
+- **RNAfold**: `conda install -c bioconda viennarna`
+- **NetSurfP3**: `pip install nsp3`
+- **NetNGlyc with SignalP**: Download SignalP 6.0 fast from DTU, then `pip install /path/to/signalp-6-package`
 
 ---
 

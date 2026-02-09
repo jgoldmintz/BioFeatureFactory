@@ -33,6 +33,7 @@ from collections import Counter
 from pathlib import Path
 from urllib.parse import unquote
 from Bio import Entrez
+from Bio.Seq import Seq
 from typing import Dict, List, Tuple
 
 chromosome_map = {
@@ -1382,10 +1383,10 @@ def extract_gene_from_filename(filename: str) -> str:
     return strip_all_extensions(Path(filename).stem)
 
 def discover_mapping_files(mapping_dir):
-    """Scan directory for CSV mapping files and extract gene names flexibly
+    """Scan directory (or accept a single CSV) for mapping files and extract gene names flexibly.
 
     Args:
-        mapping_dir: Directory path containing mapping CSV files
+        mapping_dir: Directory path containing mapping CSV files, or path to a single CSV file
 
     Returns:
         dict: {gene_name: file_path} mapping
@@ -1395,6 +1396,13 @@ def discover_mapping_files(mapping_dir):
     mapping_files = {}
 
     if not mapping_dir or not Path(mapping_dir).exists():
+        return mapping_files
+
+    p = Path(mapping_dir)
+    if p.is_file():
+        gene_name = extract_gene_from_filename(p.stem)
+        if validate_mapping_content(p)[0]:
+            mapping_files[gene_name] = str(p)
         return mapping_files
 
     # Scan for all CSV files
@@ -1552,6 +1560,207 @@ def load_wt_sequences(input_dir: str, wt_header: str = "transcript") -> Dict[str
     header_label = wt_header.upper() if wt_header else "SEQUENCES"
     print(f"[WT] Loaded {len(sequences)} WT {header_label} into memory")
     return sequences
+
+
+def resolve_output_base(output_arg, input_arg, tool_name):
+    """Resolve the output base path when the user supplies a directory or '.'.
+
+    If *output_arg* points to an existing directory (including '.'), the
+    output base is constructed inside that directory using the gene name
+    extracted from *input_arg* and the *tool_name* as a suffix.
+
+    Args:
+        output_arg: The raw output argument from argparse.
+        input_arg:  The raw input argument (FASTA path / directory).
+        tool_name:  Short tool identifier appended to the gene name
+                    (e.g. 'netphos', 'netnglyc').
+
+    Returns:
+        str: A resolved output base path suitable for appending '.tsv' etc.
+    """
+    out = Path(output_arg)
+    if out.is_dir():
+        gene = extract_gene_from_filename(Path(input_arg).stem) or Path(input_arg).stem
+        return str(out / f"{gene}_{tool_name}")
+    return output_arg
+
+
+# =============================================================================
+# Shared FASTA Synthesis Functions
+# =============================================================================
+
+def translate_orf_sequence(nt_sequence: str) -> str:
+    """Translate a nucleotide ORF into an amino acid sequence, trimming trailing stops."""
+    if not nt_sequence:
+        return ""
+    cleaned = nt_sequence.strip().upper().replace("U", "T")
+    if not cleaned:
+        return ""
+    aa_seq = str(Seq(cleaned).translate(to_stop=False))
+    return aa_seq.rstrip('*').strip()
+
+
+def load_wt_sequence_map(input_path: str, wt_header: str = "ORF"):
+    """
+    Load WT nucleotide sequences from a file or directory using shared utility helpers.
+
+    Returns:
+        tuple(dict, tempfile.TemporaryDirectory | None): (gene -> nt sequence, temp dir holder)
+    """
+    import tempfile as _tmpmod
+    source = Path(input_path)
+    temp_dir = None
+
+    if source.is_dir():
+        load_path = str(source)
+    elif source.is_file():
+        temp_dir = _tmpmod.TemporaryDirectory(prefix="wt_src_")
+        shutil.copy2(str(source), os.path.join(temp_dir.name, source.name))
+        load_path = temp_dir.name
+    else:
+        raise FileNotFoundError(f"Input FASTA path not found: {input_path}")
+
+    sequences = load_wt_sequences(load_path, wt_header=wt_header)
+    return sequences, temp_dir
+
+
+def infer_aamutation_from_nt(mutant_id: str, nt_sequence: str):
+    """Infer the amino-acid mutation string (e.g., K543E) from a nucleotide mutation."""
+    nt_info = get_mutation_data_bioAccurate(mutant_id)
+    if nt_info[0] is None:
+        return None
+    aa_info = get_mutant_aa(nt_info, nt_sequence)
+    if not aa_info:
+        return None
+    (aa_pos, (wt_aa, mut_aa)), _ = aa_info
+    if not wt_aa or not mut_aa:
+        return None
+    aa_pos = int(aa_pos)
+    return aa_pos, wt_aa, mut_aa
+
+
+def build_mutant_sequences_for_gene(
+    gene_name: str,
+    nt_sequence: str,
+    aa_sequence: str,
+    mapping_file,
+    log_path,
+    failure_map,
+):
+    """Return a dict of {header: sequence} for all mutants of a given gene."""
+    if not mapping_file or not os.path.exists(mapping_file):
+        return {}
+
+    allowed_mutations = None
+    if log_path:
+        try:
+            allowed_mutations = {
+                entry.split(',')[0].strip().upper()
+                for entry in trim_muts(mapping_file, log=log_path, gene_name=gene_name)
+                if entry
+            }
+        except Exception:
+            allowed_mutations = None
+
+    mutant_sequences = {}
+    try:
+        with open(mapping_file, 'r') as handle:
+            reader = csv.DictReader(handle)
+            mutant_keys = ['mutant', 'mutation', 'nt_mutation', 'ntmutant']
+            aa_keys = ['aamutant', 'aa_mutation', 'amino_acid_mutation', 'protein_mutation']
+
+            for row in reader:
+                mutant_id = ""
+                for key in mutant_keys:
+                    if key in row and row[key]:
+                        mutant_id = row[key].strip()
+                        break
+                if not mutant_id:
+                    continue
+
+                mutant_clean = mutant_id.replace(" ", "")
+                if allowed_mutations and mutant_clean.upper() not in allowed_mutations:
+                    continue
+                if should_skip_mutation(gene_name, mutant_clean, failure_map):
+                    continue
+
+                aa_string = ""
+                for key in aa_keys:
+                    if key in row and row[key]:
+                        aa_string = row[key].strip()
+                        break
+
+                pos = None
+                wt_aa = mut_aa = None
+                if aa_string:
+                    pos, nts = get_mutation_data_bioAccurate(aa_string)
+                    if pos is not None and nts:
+                        wt_aa, mut_aa = nts
+                if pos is None or not wt_aa or not mut_aa:
+                    inferred = infer_aamutation_from_nt(mutant_clean, nt_sequence)
+                    if inferred is None:
+                        continue
+                    pos, wt_aa, mut_aa = inferred
+
+                idx = int(pos) - 1
+                if idx < 0 or idx >= len(aa_sequence):
+                    continue
+                if wt_aa and aa_sequence[idx].upper() != wt_aa.upper():
+                    continue
+
+                header = f"{gene_name}-{mutant_clean}"
+                mutant_sequences[header] = update_str(aa_sequence, mut_aa, idx)
+    except Exception as exc:
+        print(f"Warning: Failed to synthesize mutants for {gene_name} ({mapping_file}): {exc}")
+        return {}
+
+    return mutant_sequences
+
+
+def synthesize_gene_fastas(wt_sequences, mapping_lookup, sequence_root, log_path=None, failure_map=None):
+    """Create WT and mutant FASTAs for each gene, returning the directories and summary."""
+    sequence_root = Path(sequence_root)
+    wt_dir = sequence_root / "wt"
+    mut_dir = sequence_root / "mut"
+    wt_dir.mkdir(parents=True, exist_ok=True)
+    mut_dir.mkdir(parents=True, exist_ok=True)
+
+    summary = []
+    for gene_name, nt_seq in wt_sequences.items():
+        gene_name = gene_name.upper()
+        nt_seq_upper = nt_seq.strip().upper()
+        aa_seq = translate_orf_sequence(nt_seq_upper)
+        if not aa_seq:
+            print(f"Skipping {gene_name}: unable to translate ORF")
+            continue
+
+        wt_header = f"{gene_name}-wt"
+        wt_path = wt_dir / f"{gene_name}-wt.fasta"
+        write_fasta(wt_path, {wt_header: aa_seq})
+
+        mapping_file = mapping_lookup.get(gene_name.upper())
+        mutant_sequences = build_mutant_sequences_for_gene(
+            gene_name,
+            nt_seq_upper,
+            aa_seq,
+            mapping_file,
+            log_path,
+            failure_map,
+        )
+
+        mut_path = None
+        if mutant_sequences:
+            mut_path = mut_dir / f"{gene_name}_aa.fasta"
+            write_fasta(mut_path, mutant_sequences)
+
+        summary.append({
+            "gene": gene_name,
+            "wt_path": str(wt_path),
+            "mut_path": str(mut_path) if mut_path else None,
+            "mutant_count": len(mutant_sequences),
+        })
+
+    return wt_dir, mut_dir, summary
 
 
 # =============================================================================

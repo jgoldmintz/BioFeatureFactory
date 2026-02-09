@@ -36,8 +36,6 @@ from datetime import datetime
 import logging
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from typing import Optional
-from Bio.Seq import Seq
-
 
 # Import utility functions
 from biofeaturefactory.utils.utility import (
@@ -58,6 +56,12 @@ from biofeaturefactory.utils.utility import (
     update_str,
     extract_gene_from_filename,
     extract_mutation_from_sequence_name,
+    translate_orf_sequence,
+    load_wt_sequence_map,
+    infer_aamutation_from_nt,
+    build_mutant_sequences_for_gene,
+    synthesize_gene_fastas,
+    resolve_output_base,
 )
 
 
@@ -108,180 +112,6 @@ def resolve_native_netnglyc_path(user_path=None):
             return os.path.abspath(path)
 
     return None
-
-
-def translate_orf_sequence(nt_sequence: str) -> str:
-    """Translate a nucleotide ORF into an amino acid sequence, trimming trailing stops."""
-    if not nt_sequence:
-        return ""
-    cleaned = nt_sequence.strip().upper().replace("U", "T")
-    if not cleaned:
-        return ""
-    aa_seq = str(Seq(cleaned).translate(to_stop=False))
-    return aa_seq.rstrip('*').strip()
-
-
-def load_wt_sequence_map(input_path: str, wt_header: str = "ORF"):
-    """
-    Load WT nucleotide sequences from a file or directory using shared utility helpers.
-
-    Returns:
-        tuple(dict, tempfile.TemporaryDirectory | None): (gene -> nt sequence, temp dir holder)
-    """
-    source = Path(input_path)
-    temp_dir = None
-
-    if source.is_dir():
-        load_path = str(source)
-    elif source.is_file():
-        temp_dir = tempfile.TemporaryDirectory(prefix="netnglyc_wt_src_")
-        shutil.copy2(str(source), os.path.join(temp_dir.name, source.name))
-        load_path = temp_dir.name
-    else:
-        raise FileNotFoundError(f"Input FASTA path not found: {input_path}")
-
-    sequences = load_wt_sequences(load_path, wt_header=wt_header)
-    return sequences, temp_dir
-
-
-def infer_aamutation_from_nt(mutant_id: str, nt_sequence: str):
-    """Infer the amino-acid mutation string (e.g., K543E) from a nucleotide mutation."""
-    nt_info = get_mutation_data_bioAccurate(mutant_id)
-    if nt_info[0] is None:
-        return None
-    aa_info = get_mutant_aa(nt_info, nt_sequence)
-    if not aa_info:
-        return None
-    (aa_pos, (wt_aa, mut_aa)), _ = aa_info
-    if not wt_aa or not mut_aa:
-        return None
-    aa_pos = int(aa_pos)
-    return aa_pos, wt_aa, mut_aa
-
-
-def build_mutant_sequences_for_gene(
-    gene_name: str,
-    nt_sequence: str,
-    aa_sequence: str,
-    mapping_file: Optional[str],
-    log_path: Optional[str],
-    failure_map: Optional[dict],
-):
-    """Return a dict of {header: sequence} for all mutants of a given gene."""
-    if not mapping_file or not os.path.exists(mapping_file):
-        return {}
-
-    allowed_mutations = None
-    if log_path:
-        try:
-            allowed_mutations = {
-                entry.split(',')[0].strip().upper()
-                for entry in trim_muts(mapping_file, log=log_path, gene_name=gene_name)
-                if entry
-            }
-        except Exception:
-            allowed_mutations = None
-
-    mutant_sequences = {}
-    try:
-        with open(mapping_file, 'r') as handle:
-            reader = csv.DictReader(handle)
-            mutant_keys = ['mutant', 'mutation', 'nt_mutation', 'ntmutant']
-            aa_keys = ['aamutant', 'aa_mutation', 'amino_acid_mutation', 'protein_mutation']
-
-            for row in reader:
-                mutant_id = ""
-                for key in mutant_keys:
-                    if key in row and row[key]:
-                        mutant_id = row[key].strip()
-                        break
-                if not mutant_id:
-                    continue
-
-                mutant_clean = mutant_id.replace(" ", "")
-                if allowed_mutations and mutant_clean.upper() not in allowed_mutations:
-                    continue
-                if should_skip_mutation(gene_name, mutant_clean, failure_map):
-                    continue
-
-                aa_string = ""
-                for key in aa_keys:
-                    if key in row and row[key]:
-                        aa_string = row[key].strip()
-                        break
-
-                pos = None
-                wt_aa = mut_aa = None
-                if aa_string:
-                    pos, nts = get_mutation_data_bioAccurate(aa_string)
-                    if pos is not None and nts:
-                        wt_aa, mut_aa = nts
-                if pos is None or not wt_aa or not mut_aa:
-                    inferred = infer_aamutation_from_nt(mutant_clean, nt_sequence)
-                    if inferred is None:
-                        continue
-                    pos, wt_aa, mut_aa = inferred
-
-                idx = int(pos) - 1
-                if idx < 0 or idx >= len(aa_sequence):
-                    continue
-                if wt_aa and aa_sequence[idx].upper() != wt_aa.upper():
-                    # Skip if reference AA does not match translated ORF
-                    continue
-
-                header = f"{gene_name}-{mutant_clean}"
-                mutant_sequences[header] = update_str(aa_sequence, mut_aa, idx)
-    except Exception as exc:
-        print(f"Warning: Failed to synthesize mutants for {gene_name} ({mapping_file}): {exc}")
-        return {}
-
-    return mutant_sequences
-
-
-def synthesize_gene_fastas(wt_sequences, mapping_lookup, sequence_root, log_path=None, failure_map=None):
-    """Create WT and mutant FASTAs for each gene, returning the directories and summary."""
-    sequence_root = Path(sequence_root)
-    wt_dir = sequence_root / "wt"
-    mut_dir = sequence_root / "mut"
-    wt_dir.mkdir(parents=True, exist_ok=True)
-    mut_dir.mkdir(parents=True, exist_ok=True)
-
-    summary = []
-    for gene_name, nt_seq in wt_sequences.items():
-        gene_name = gene_name.upper()
-        nt_seq_upper = nt_seq.strip().upper()
-        aa_seq = translate_orf_sequence(nt_seq_upper)
-        if not aa_seq:
-            print(f"Skipping {gene_name}: unable to translate ORF")
-            continue
-
-        wt_header = f"{gene_name}-wt"
-        wt_path = wt_dir / f"{gene_name}-wt.fasta"
-        write_fasta(wt_path, {wt_header: aa_seq})
-
-        mapping_file = mapping_lookup.get(gene_name.upper())
-        mutant_sequences = build_mutant_sequences_for_gene(
-            gene_name,
-            nt_seq_upper,
-            aa_seq,
-            mapping_file,
-            log_path,
-            failure_map,
-        )
-
-        mut_path = None
-        if mutant_sequences:
-            mut_path = mut_dir / f"{gene_name}_aa.fasta"
-            write_fasta(mut_path, mutant_sequences)
-
-        summary.append({
-            "gene": gene_name,
-            "wt_path": str(wt_path),
-            "mut_path": str(mut_path) if mut_path else None,
-            "mutant_count": len(mutant_sequences),
-        })
-
-    return wt_dir, mut_dir, summary
 
 
 def normalize_mutation_id(mut_id: str) -> str:
@@ -696,12 +526,16 @@ class RobustDockerNetNGlyc:
             return True
         return False
 
-    def _run_native_netnglyc(self, fasta_file):
+    def _run_native_netnglyc(self, fasta_file, signalp_output_dir=None):
         """
         Run NetNGlyc using native Linux binary.
 
         Args:
             fasta_file: Path to input FASTA file
+            signalp_output_dir: Path to SignalP 6 output directory containing
+                prediction_results.txt. When provided, SIGNALP6_RESULTS_DIR is
+                set in the subprocess environment so the signalp6_adapter can
+                feed pre-computed results into NetNGlyc's tcsh script.
 
         Returns:
             NetNGlyc output as string
@@ -710,12 +544,17 @@ class RobustDockerNetNGlyc:
             Exception: If native execution fails
         """
         try:
+            env = os.environ.copy()
+            if signalp_output_dir:
+                env["SIGNALP6_RESULTS_DIR"] = signalp_output_dir
+
             result = subprocess.run(
                 [self.native_path, fasta_file],
                 capture_output=True,
                 text=True,
                 timeout=self.docker_timeout,
-                cwd=os.path.dirname(self.native_path)
+                cwd=os.path.dirname(self.native_path),
+                env=env,
             )
 
             if result.returncode == 0:
@@ -777,7 +616,7 @@ class RobustDockerNetNGlyc:
                             pass  # SignalP info processed elsewhere
     
             # Step 2: Run NetNGlyc with ORIGINAL FASTA
-            netnglyc_output = self._run_native_netnglyc(fasta_file)
+            netnglyc_output = self._run_native_netnglyc(fasta_file, signalp_output_dir)
 
             if netnglyc_output:
                 # Step 3: Save results
@@ -955,8 +794,7 @@ class RobustDockerNetNGlyc:
                             jury = parts[4] if len(parts) > 4 else ""
                             result = parts[5] if len(parts) > 5 else ""
                             
-                            if potential >= threshold:
-                                predictions.append({
+                            predictions.append({
                                     'seq_name': seq_name,
                                     'position': position,
                                     'sequon': sequon,
@@ -966,10 +804,10 @@ class RobustDockerNetNGlyc:
                                 })
                         except (ValueError, IndexError) as e:
                             continue
-                            
+
         except Exception as e:
             print(f"Error parsing NetNGlyc output {file_path}: {e}")
-            
+
         return predictions
 
 
@@ -1132,28 +970,25 @@ class RobustDockerNetNGlyc:
                             result = parts[5] if len(parts) > 5 else ""
                             
                             
-                            if potential >= threshold:
-                                # If the current sequence has yet to be detected, use seq_name
-                                if current_sequence is None:
-                                    current_sequence = seq_name
-                                    predictions_by_sequence[current_sequence] = []
-                                
-                                prediction = {
-                                    'seq_name': seq_name,
-                                    'position': position,
-                                    'sequon': sequon,
-                                    'potential': potential,
-                                    'jury_agreement': jury,
-                                    'n_glyc_result': result
-                                }
-                                
-                                # Add to the appropriate sequence's predictions
-                                if seq_name in predictions_by_sequence:
-                                    predictions_by_sequence[seq_name].append(prediction)
-                                else:
-                                    predictions_by_sequence[seq_name] = [prediction]
+                            # If the current sequence has yet to be detected, use seq_name
+                            if current_sequence is None:
+                                current_sequence = seq_name
+                                predictions_by_sequence[current_sequence] = []
+
+                            prediction = {
+                                'seq_name': seq_name,
+                                'position': position,
+                                'sequon': sequon,
+                                'potential': potential,
+                                'jury_agreement': jury,
+                                'n_glyc_result': result
+                            }
+
+                            # Add to the appropriate sequence's predictions
+                            if seq_name in predictions_by_sequence:
+                                predictions_by_sequence[seq_name].append(prediction)
                             else:
-                                pass  # Prediction below threshold
+                                predictions_by_sequence[seq_name] = [prediction]
                         except (ValueError, IndexError) as e:
                             continue
             
@@ -1209,8 +1044,7 @@ class RobustDockerNetNGlyc:
                             jury = parts[4] if len(parts) > 4 else ""
                             result = parts[5] if len(parts) > 5 else ""
                             
-                            if potential >= threshold:
-                                predictions.append({
+                            predictions.append({
                                     'seq_name': seq_name,
                                     'position': position,
                                     'sequon': sequon,
@@ -1220,10 +1054,10 @@ class RobustDockerNetNGlyc:
                                 })
                         except (ValueError, IndexError):
                             continue
-            
+
         except Exception as e:
             print(f"Error in simple NetNGlyc parsing: {e}")
-        
+
         return predictions
 
     def parse_mutant_files(self, input_dir, threshold=0.5, mapping_dir=None, fasta_dir=None, failure_map=None):
@@ -2600,6 +2434,8 @@ def run_full_pipeline_mode(args, failure_map, parser):
     if not args.mapping_dir:
         parser.error("For full-pipeline mode: --mapping-dir is REQUIRED (directory containing mutation mapping CSV files)")
 
+    args.output = resolve_output_base(args.output, args.input, "netnglyc")
+
     temp_output_dir = tempfile.mkdtemp(prefix="netnglyc_outputs_")
     temp_sequence_dir = tempfile.mkdtemp(prefix="netnglyc_sequences_")
     wt_temp_holder = None
@@ -2788,11 +2624,13 @@ def main():
     if args.mode == "parse":
         if not args.input or not args.output:
             parser.error("For parse mode: both input (NetNGlyc output directory) and output (TSV file) are required")
-        
+
         # Validate parsing requirements
         if not args.mapping_dir:
             parser.error("For parse mode: --mapping-dir is REQUIRED (directory containing mutation mapping CSV files)")
-        
+
+        args.output = resolve_output_base(args.output, args.input, "netnglyc")
+
         mapping_lookup = discover_mapping_files(args.mapping_dir)
         processor = RobustDockerNetNGlyc(
             use_signalp=False,

@@ -1,0 +1,83 @@
+#!/usr/bin/env python3
+"""
+SignalP 6 to legacy SignalP 3/4 format adapter for NetNGlyc.
+
+NetNGlyc's tcsh script calls $SIGNALP as:
+    $SIGNALP -t euk -m nn -trunc 60 -short <fasta> > $GLYCTMP/signalp.out
+
+It then parses column 1 (sequence name) and column 14 (D? = Y/N) from
+the old short-format output.
+
+This adapter ignores all legacy flags, reads pre-computed SignalP 6
+results from $SIGNALP6_RESULTS_DIR/prediction_results.txt, and writes
+the 14-column format to stdout.
+
+Usage:
+    1. Run SignalP 6 via the Python pipeline (sets SIGNALP6_RESULTS_DIR)
+    2. In your NetNGlyc installation's netNglyc tcsh script, set:
+         setenv SIGNALP /path/to/biofeaturefactory/netNglyc/bin/signalp6_adapter
+"""
+
+import os
+import sys
+
+
+def format_signalp_line(seq_id, prediction, sp_prob):
+    """
+    Produce one line in the old SignalP short-format (14 whitespace-separated
+    columns). NetNGlyc only inspects column 1 (name) and column 14 (D? Y/N).
+
+    Columns:
+        1  name
+        2  Cmax   3 pos   4 Cmax?
+        5  Ymax   6 pos   7 Ymax?
+        8  Smax   9 pos  10 Smax?
+       11  Smean 12 Smean?
+       13  D     14 D?
+    """
+    if prediction == "SP":
+        score = max(sp_prob, 0.51)
+        d_flag = "Y"
+    else:
+        score = min(sp_prob, 0.10) if sp_prob else 0.05
+        d_flag = "N"
+
+    s = f"{score:.3f}"
+    return (
+        f"{seq_id}  {s}  1  Y  {s}  1  Y  {s}  1  Y  "
+        f"{s}  Y  {s}  {d_flag}"
+    )
+
+
+def main():
+    # Consume and ignore all legacy flags; last positional arg is the fasta file.
+    # We don't need the fasta — results are pre-computed.
+    results_dir = os.environ.get("SIGNALP6_RESULTS_DIR", "")
+    if not results_dir:
+        sys.exit(0)
+
+    pred_file = os.path.join(results_dir, "prediction_results.txt")
+    if not os.path.isfile(pred_file):
+        sys.exit(0)
+
+    with open(pred_file, "r") as fh:
+        for line in fh:
+            if line.startswith("#") or not line.strip():
+                continue
+            parts = line.strip().split("\t")
+            if len(parts) < 4:
+                parts = line.strip().split()
+            if len(parts) < 4:
+                continue
+            seq_id = parts[0].strip()
+            prediction = parts[1].strip().upper()
+            try:
+                sp_prob = float(parts[3])
+            except (ValueError, IndexError):
+                sp_prob = 0.0
+
+            print(format_signalp_line(seq_id, prediction, sp_prob))
+
+
+if __name__ == "__main__":
+    main()

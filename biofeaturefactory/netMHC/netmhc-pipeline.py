@@ -45,7 +45,6 @@ from datetime import datetime
 import logging
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from typing import Optional, Dict, List, Tuple
-from Bio.Seq import Seq
 
 
 # Import utility functions
@@ -62,23 +61,16 @@ from biofeaturefactory.utils.utility import (
     load_validation_failures,
     should_skip_mutation,
     load_wt_sequences,
+    load_wt_sequence_map,
     trim_muts,
     get_mutant_aa,
     update_str,
     extract_gene_from_filename,
     extract_mutation_from_sequence_name,
+    translate_orf_sequence,
+    build_mutant_sequences_for_gene,
+    resolve_output_base,
 )
-
-
-def translate_orf_sequence(nt_sequence: str) -> str:
-    """Translate a nucleotide ORF into an amino acid sequence, trimming trailing stops."""
-    if not nt_sequence:
-        return ""
-    cleaned = nt_sequence.strip().upper().replace("U", "T")
-    if not cleaned:
-        return ""
-    aa_seq = str(Seq(cleaned).translate(to_stop=False))
-    return aa_seq.rstrip('*').strip()
 
 
 def is_linux_host():
@@ -321,95 +313,6 @@ def write_netmhc_tsv(predictions, output_file, include_pkey=False):
         writer.writerows(predictions)
 
     print(f"Wrote {len(predictions)} NetMHC predictions to {output_file}")
-
-
-def build_mutant_sequences_for_gene(
-    gene_name: str,
-    nt_sequence: str,
-    aa_sequence: str,
-    mapping_file: Optional[str],
-    log_path: Optional[str],
-    failure_map: Optional[dict],
-):
-    """
-    Build mutant amino acid sequences from nucleotide mutations.
-
-    Returns a dict of {header: sequence} for all mutants of a given gene.
-    """
-    if not mapping_file or not os.path.exists(mapping_file):
-        return {}
-
-    allowed_mutations = None
-    if log_path:
-        try:
-            allowed_mutations = {
-                entry.split(',')[0].strip().upper()
-                for entry in trim_muts(mapping_file, log=log_path, gene_name=gene_name)
-                if entry
-            }
-        except Exception:
-            allowed_mutations = None
-
-    mutant_sequences = {}
-    try:
-        with open(mapping_file, 'r') as handle:
-            reader = csv.DictReader(handle)
-            mutant_keys = ['mutant', 'mutation', 'nt_mutation', 'ntmutant']
-            aa_keys = ['aamutant', 'aa_mutation', 'amino_acid_mutation', 'protein_mutation']
-
-            for row in reader:
-                mutant_id = ""
-                for key in mutant_keys:
-                    if key in row and row[key]:
-                        mutant_id = row[key].strip()
-                        break
-                if not mutant_id:
-                    continue
-
-                mutant_clean = mutant_id.replace(" ", "")
-                if allowed_mutations and mutant_clean.upper() not in allowed_mutations:
-                    continue
-                if should_skip_mutation(gene_name, mutant_clean, failure_map):
-                    continue
-
-                aa_string = ""
-                for key in aa_keys:
-                    if key in row and row[key]:
-                        aa_string = row[key].strip()
-                        break
-
-                pos = None
-                wt_aa = mut_aa = None
-                if aa_string:
-                    pos, nts = get_mutation_data_bioAccurate(aa_string)
-                    if pos is not None and nts:
-                        wt_aa, mut_aa = nts
-
-                if pos is None or not wt_aa or not mut_aa:
-                    # Try to infer from nucleotide mutation
-                    nt_info = get_mutation_data_bioAccurate(mutant_clean)
-                    if nt_info[0] is not None:
-                        aa_info = get_mutant_aa(nt_info, nt_sequence)
-                        if aa_info:
-                            (pos, (wt_aa, mut_aa)), _ = aa_info
-
-                if pos is None or not wt_aa or not mut_aa:
-                    continue
-
-                idx = int(pos) - 1
-                if idx < 0 or idx >= len(aa_sequence):
-                    continue
-                if wt_aa and aa_sequence[idx].upper() != wt_aa.upper():
-                    continue
-
-                header = f"{gene_name}-{mutant_clean}"
-                mutant_sequences[header] = update_str(aa_sequence, mut_aa, idx)
-
-    except Exception as exc:
-        print(f"Warning: Failed to synthesize mutants for {gene_name} ({mapping_file}): {exc}")
-        return {}
-
-    return mutant_sequences
 
 
 def compare_wt_mut_predictions(gene_name, mutation, wt_preds, mut_preds, threshold=0.5):
@@ -856,36 +759,25 @@ def main():
     all_sites = []
 
     if args.mode == 'full-pipeline':
-        # Discover FASTA files
-        fasta_files = discover_fasta_files(args.input)
-        if not fasta_files:
-            print(f"Error: No FASTA files found in {args.input}")
+        # Resolve output path (auto-generate from input if directory given)
+        args.output = resolve_output_base(args.output, args.input, "netmhc")
+
+        # Load WT sequences - handles both files and directories
+        wt_sequences, temp_holder = load_wt_sequence_map(args.input, wt_header='ORF')
+        if not wt_sequences:
+            print(f"Error: No FASTA sequences found in {args.input}")
             return 1
 
         if args.verbose:
-            print(f"Found {len(fasta_files)} FASTA files to process")
+            print(f"Loaded {len(wt_sequences)} WT sequences")
 
         # Discover mapping files
         mapping_files = discover_mapping_files(args.mapping_dir) if args.mapping_dir else {}
 
         # Process each gene
-        for gene_name, fasta_path in fasta_files.items():
-            # gene_name already extracted by discover_fasta_files
+        for gene_name, wt_nt_seq in wt_sequences.items():
             if args.verbose:
                 print(f"\nProcessing gene: {gene_name}")
-
-            # Load WT sequence
-            wt_sequences = read_fasta(fasta_path)
-            if not wt_sequences:
-                print(f"Warning: No sequences in {fasta_path}, skipping")
-                continue
-            if len(wt_sequences) > 1:
-                if 'ORF' in wt_sequences:
-                    wt_header, wt_nt_seq = 'ORF', wt_sequences['ORF']
-                else:
-                    wt_header, wt_nt_seq = next(iter(wt_sequences.items()))
-            else:
-                wt_header, wt_nt_seq = next(iter(wt_sequences.items()))
 
 
             # Translate to amino acids
@@ -921,7 +813,7 @@ def main():
                     batch_dir = os.path.join(gene_workdir, "wt_batches")
                     os.makedirs(batch_dir, exist_ok=True)
 
-                    batch_files = split_fasta_into_batches(wt_fasta, batch_dir, args.batch_size)
+                    batch_files = split_fasta_into_batches(wt_fasta, args.batch_size, batch_dir)
 
                     # Run NetMHC on each batch
                     for batch_file in batch_files:
@@ -976,7 +868,7 @@ def main():
                         batch_dir = os.path.join(gene_workdir, f"{mutation}_batches")
                         os.makedirs(batch_dir, exist_ok=True)
 
-                        batch_files = split_fasta_into_batches(mut_fasta, batch_dir, args.batch_size)
+                        batch_files = split_fasta_into_batches(mut_fasta, args.batch_size, batch_dir)
 
                         # Run NetMHC on each batch
                         for batch_file in batch_files:
@@ -1031,15 +923,27 @@ def main():
                     shutil.rmtree(gene_workdir, ignore_errors=True)
 
         # Write output files
-        write_summary_tsv(all_summary_rows, args.output)
-        write_events_tsv(all_events, args.output.replace('.tsv', '.events.tsv'))
-        write_sites_tsv(all_sites, args.output.replace('.tsv', '.sites.tsv'))
+        output_base = args.output
+        if output_base.endswith('.tsv'):
+            output_base = output_base[:-4]
+
+        summary_path = f"{output_base}.tsv"
+        events_path = f"{output_base}.events.tsv"
+        sites_path = f"{output_base}.sites.tsv"
+
+        write_summary_tsv(all_summary_rows, summary_path)
+        write_events_tsv(all_events, events_path)
+        write_sites_tsv(all_sites, sites_path)
 
         if args.verbose:
-            print(f"\n Pipeline complete!")
-            print(f"  Summary: {args.output}")
-            print(f"  Events: {args.output.replace('.tsv', '.events.tsv')}")
-            print(f"  Sites: {args.output.replace('.tsv', '.sites.tsv')}")
+            print(f"\nPipeline complete!")
+            print(f"  Summary: {summary_path}")
+            print(f"  Events: {events_path}")
+            print(f"  Sites: {sites_path}")
+
+        # Cleanup temp holder if used
+        if temp_holder:
+            temp_holder.cleanup()
 
     else:
         print(f"Mode {args.mode} not yet implemented")
