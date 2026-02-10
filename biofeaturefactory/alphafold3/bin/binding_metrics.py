@@ -34,6 +34,7 @@ class BindingEventClass(Enum):
     WEAKENED = "weakened"       # Both have binding, MUT weaker
     UNCHANGED = "unchanged"     # No significant change
     NO_BINDING = "no_binding"   # Neither WT nor MUT has binding
+    INCOMPLETE = "incomplete"   # WT or MUT prediction missing — no comparison possible
 
 
 @dataclass
@@ -124,9 +125,9 @@ def classify_binding_event(
     Returns:
         Event classification
     """
-    # Handle missing data
+    # Handle missing data — one or both sides failed, no valid comparison
     if wt_metrics is None or mut_metrics is None:
-        return BindingEventClass.UNCHANGED
+        return BindingEventClass.INCOMPLETE
 
     wt_binding = has_confident_binding(wt_metrics, config)
     mut_binding = has_confident_binding(mut_metrics, config)
@@ -248,10 +249,10 @@ def aggregate_mutation_summary(
     for d in delta_list:
         event_counts[d.event_class] += 1
 
-    # Find top event
+    # Find top event (exclude incomplete — no valid comparison happened)
     significant_events = [
         d for d in delta_list
-        if d.event_class not in [BindingEventClass.UNCHANGED, BindingEventClass.NO_BINDING]
+        if d.event_class not in [BindingEventClass.UNCHANGED, BindingEventClass.NO_BINDING, BindingEventClass.INCOMPLETE]
     ]
 
     if significant_events:
@@ -264,9 +265,10 @@ def aggregate_mutation_summary(
         top_class = "none"
         top_delta = 0.0
 
-    # Max absolute delta
+    # Max absolute delta (exclude incomplete — one-sided deltas are not real comparisons)
+    complete_deltas = [d for d in delta_list if d.event_class != BindingEventClass.INCOMPLETE]
     max_abs_delta = max(
-        (abs(d.delta_chain_pair_pae_min) for d in delta_list),
+        (abs(d.delta_chain_pair_pae_min) for d in complete_deltas),
         default=0.0
     )
 
@@ -327,7 +329,8 @@ def format_sites_rows(
     rbp_name: str,
     allele: str,
     sites: List,
-    contact_frequency: Optional[Dict[int, float]] = None
+    contact_frequency_rna: Optional[Dict[int, float]] = None,
+    contact_frequency_protein: Optional[Dict[int, float]] = None
 ) -> List[dict]:
     """
     Format interface sites as rows for sites.tsv.
@@ -337,13 +340,15 @@ def format_sites_rows(
         rbp_name: RBP identifier
         allele: 'WT' or 'MUT'
         sites: List of InterfaceSite objects
-        contact_frequency: Optional dict of res_id -> fraction (from ensemble)
+        contact_frequency_rna: Optional dict of res_id -> fraction for RNA chain
+        contact_frequency_protein: Optional dict of res_id -> fraction for protein chain
     """
     rows = []
     for s in sites:
         freq = ''
-        if contact_frequency and s.res_id in contact_frequency:
-            freq = round(contact_frequency[s.res_id], 3)
+        freq_dict = contact_frequency_rna if s.chain == 'R' else contact_frequency_protein
+        if freq_dict and s.res_id in freq_dict:
+            freq = round(freq_dict[s.res_id], 3)
         rows.append({
             'pkey': pkey,
             'rbp_name': rbp_name,

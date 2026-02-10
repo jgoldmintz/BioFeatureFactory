@@ -38,33 +38,16 @@ AlphaFold3 (Abramson *et al.*, 2024) provides the structural prediction engine; 
 
 ## AlphaFold3 Setup
 
-### 1. Clone the AlphaFold3 repository
+Follow the official [AlphaFold3 installation guide](https://github.com/google-deepmind/alphafold3/blob/main/docs/installation.md) through the **"Obtaining Model Parameters"** step. Stop before **"Obtaining Genetic Databases"** — this pipeline does not use AlphaFold3's genetic database pipeline. Instead, RBP binding site data is provided by the POSTAR3 database (`--postar-db`) and protein sequences/MSAs are supplied directly (`--msa-dir` or `--rbp-sequences`).
+
+After completing the installation guide steps (NVIDIA drivers, Docker, Container Toolkit, model weights), build the Docker image:
 
 ```bash
-git clone https://github.com/google-deepmind/alphafold3.git
 cd alphafold3
-```
-
-### 2. Build the Docker image
-
-```bash
 docker build -t alphafold3 -f docker/Dockerfile .
 ```
 
-This builds the image tagged as `alphafold3` (the default expected by `--docker-image`).
-
-### 3. Obtain model weights
-
-Request access and download the model weights per the [AlphaFold3 documentation](https://github.com/google-deepmind/alphafold3/blob/main/docs/installation.md). Extract them to a directory on the host, e.g.:
-
-```bash
-mkdir -p /path/to/af3_weights
-# Extract downloaded weights into this directory
-```
-
-This path is passed to the pipeline via `--model-dir`. At runtime, the pipeline mounts it into the container at `/root/models`.
-
-For full installation details (NVIDIA drivers, Container Toolkit, troubleshooting), see the [AlphaFold3 installation guide](https://github.com/google-deepmind/alphafold3/blob/main/docs/installation.md).
+Pass the model weights directory to this pipeline via `--model-dir`. At runtime, the pipeline mounts it into the container at `/root/models`.
 
 ---
 
@@ -262,6 +245,7 @@ This three-part filter excludes predictions where AF3 has low confidence in eith
 | **weakened** | Both bind confidently, $\Delta_{\text{PAE}} > +2.0$ |
 | **unchanged** | Both bind confidently, $\|\Delta_{\text{PAE}}\| \leq 2.0$ |
 | **no_binding** | Neither WT nor MUT has confident binding |
+| **incomplete** | WT or MUT prediction missing — no comparison possible |
 
 ---
 

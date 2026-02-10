@@ -497,14 +497,16 @@ class AlphaFold3Pipeline:
             for r in wt_results:
                 if r and r.structures:
                     sites_data = extract_interface_sites(r.structures[0])
-                    freq = r.aggregation.contact_frequency_rna if r.aggregation else None
-                    self.sites_rows.extend(format_sites_rows(context.pkey, rbp_name, 'WT', sites_data, freq))
+                    freq_rna = r.aggregation.contact_frequency_rna if r.aggregation else None
+                    freq_prot = r.aggregation.contact_frequency_protein if r.aggregation else None
+                    self.sites_rows.extend(format_sites_rows(context.pkey, rbp_name, 'WT', sites_data, freq_rna, freq_prot))
                     break
             for r in mut_results:
                 if r and r.structures:
                     sites_data = extract_interface_sites(r.structures[0])
-                    freq = r.aggregation.contact_frequency_rna if r.aggregation else None
-                    self.sites_rows.extend(format_sites_rows(context.pkey, rbp_name, 'MUT', sites_data, freq))
+                    freq_rna = r.aggregation.contact_frequency_rna if r.aggregation else None
+                    freq_prot = r.aggregation.contact_frequency_protein if r.aggregation else None
+                    self.sites_rows.extend(format_sites_rows(context.pkey, rbp_name, 'MUT', sites_data, freq_rna, freq_prot))
                     break
 
             delta = compute_delta_metrics(
@@ -529,12 +531,14 @@ class AlphaFold3Pipeline:
 
         if wt_parsed and wt_parsed.structures:
             sites_data = extract_interface_sites(wt_parsed.structures[0])
-            freq = wt_parsed.aggregation.contact_frequency_rna if wt_parsed.aggregation else None
-            self.sites_rows.extend(format_sites_rows(context.pkey, rbp_name, 'WT', sites_data, freq))
+            freq_rna = wt_parsed.aggregation.contact_frequency_rna if wt_parsed.aggregation else None
+            freq_prot = wt_parsed.aggregation.contact_frequency_protein if wt_parsed.aggregation else None
+            self.sites_rows.extend(format_sites_rows(context.pkey, rbp_name, 'WT', sites_data, freq_rna, freq_prot))
         if mut_parsed and mut_parsed.structures:
             sites_data = extract_interface_sites(mut_parsed.structures[0])
-            freq = mut_parsed.aggregation.contact_frequency_rna if mut_parsed.aggregation else None
-            self.sites_rows.extend(format_sites_rows(context.pkey, rbp_name, 'MUT', sites_data, freq))
+            freq_rna = mut_parsed.aggregation.contact_frequency_rna if mut_parsed.aggregation else None
+            freq_prot = mut_parsed.aggregation.contact_frequency_protein if mut_parsed.aggregation else None
+            self.sites_rows.extend(format_sites_rows(context.pkey, rbp_name, 'MUT', sites_data, freq_rna, freq_prot))
 
         return compute_delta_metrics(
             rbp_name=rbp_name,
@@ -831,10 +835,16 @@ def main():
     if not mutations_input and not chrom_map_input:
         parser.error("Provide --mutations or --chromosome-mapping")
 
-    # When using --mutations without --chromosome-mapping, require genomic coordinate flags
+    # Chromosome name is always required for POSTAR3 lookup — chromosome-mapping only provides
+    # genomic positions, not the chromosome name itself
+    if not args.chrom and not vcf_input:
+        parser.error("--chrom or --vcf is required to resolve chromosome name for POSTAR3 lookup")
+
+    # When using --mutations without --chromosome-mapping, also require --tx-start
+    # to convert transcript positions to genomic coordinates
     if mutations_input and not chrom_map_input:
-        if not args.chrom or args.tx_start is None:
-            parser.error("--chrom and --tx-start are required when using --mutations without --chromosome-mapping")
+        if args.tx_start is None:
+            parser.error("--tx-start is required when using --mutations without --chromosome-mapping")
 
     if fasta_input.is_dir():
         # --- Directory mode ---
