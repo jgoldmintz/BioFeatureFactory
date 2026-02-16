@@ -210,7 +210,10 @@ def main():
             continue
         gene_name = extract_gene_from_filename(str(file))
         fasta_dict = read_fasta(str(file))
-        transcript_seq = next(iter(fasta_dict.values()))
+        if "transcript" in fasta_dict:
+            transcript_seq = fasta_dict["transcript"]
+        else:
+            transcript_seq = next(iter(fasta_dict.values()))
 
         if len(maps) == 1:
             transcript_map = maps[0]
