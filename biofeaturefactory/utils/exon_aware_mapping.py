@@ -581,7 +581,7 @@ def map_orf_mutations_to_transcript_and_genome(orf_mutations: list[str], tx_map:
 
 # CLI
 
-def main():
+def main(argv=None):
     p = argparse.ArgumentParser(
         description="Generate exon-aware mapping CSVs and FASTAs (ORF/transcript/genomic) per gene."
     )
@@ -589,27 +589,27 @@ def main():
                    help="Path to a mutations CSV or a directory of CSVs (expects '<GENE>_mutations.csv').")
     p.add_argument("-r", "--reference", required=True, help="Reference genome FASTA (indexed).")
     p.add_argument("-a", "--annotation", required=True, help="Gene annotation file consumed by utility.get_genome_loc.")
-    p.add_argument("--out-fasta", required=True, help="Output directory for gene FASTAs.")
-    p.add_argument("--out-chromosome-mapping", required=True, help="Output directory for chromosome mapping CSVs (combined_<GENE>.csv with absolute genomic coordinates).")
-    p.add_argument("--out-genomic-mapping", help="Optional output directory for gDNA mapping CSVs (relative to gene genomic slice).")
-    p.add_argument("--out-transcript-mapping", help="Optional output dir for transcript mapping CSVs.")
-    p.add_argument("--out-aa-mapping", help="Optional output dir for amino-acid mapping CSVs.")
+    p.add_argument("-o", "--output", help="Output directory; defaults to current working directory.")
+    p.add_argument("-Ec", "--exclude-chromosome", action="store_true", help="Exclude the chromosome mapping CSV.")
+    p.add_argument("-Eg", "--exclude-genomic", action="store_true", help="Exclude the gDNA mapping CSVs (relative to gene genomic slice).")
+    p.add_argument("-Et", "--exclude-transcript", action="store_true", help="Exclude the transcript mapping CSVs.")
+    p.add_argument("-EA", "--exclude-aa", action="store_true", help="Exclude the amino-acid mapping CSVs.")
     p.add_argument("--orf", help="Optional ORF FASTA (file or directory). If omitted, ORF is inferred from transcript.")
     p.add_argument("--force-cds",
         help="Force specific transcript: single accession (e.g., NM_022162.3) for all genes, "
              "or CSV file mapping genes to transcript IDs (gene,transcript_id columns).")
     p.add_argument("--verbose", action="store_true", help="Print detailed ORF/mutation validation messages.")
-    args = p.parse_args()
+    args = p.parse_args(argv)
 
     mut_path = Path(args.mutations)
-    fasta_out = Path(args.out_fasta)
-    chrom_out = Path(args.out_chromosome_mapping)
-    gdna_out = Path(args.out_genomic_mapping) if args.out_genomic_mapping else None
-    tmap_out = Path(args.out_transcript_mapping) if args.out_transcript_mapping else None
-    aa_out = Path(args.out_aa_mapping) if args.out_aa_mapping else None
-    aa_out = Path(args.out_aa_mapping) if args.out_aa_mapping else None
+    output = Path(args.output) if args.output else Path.cwd()
 
-    capture_verbose = args.verbose #and mut_path.is_dir()
+    do_chrom = not args.exclude_chromosome
+    do_genomic = not args.exclude_genomic
+    do_transcript = not args.exclude_transcript
+    do_aa = not args.exclude_aa
+
+    capture_verbose = args.verbose
     verbose_log: list[str] | None = [] if capture_verbose else None
     gene_metrics = {
         "total_genes": 0,
@@ -690,37 +690,38 @@ def main():
             )
 
             # Write FASTA with ORF / transcript / genomic
+            gene_dir = output / gene
+            fasta_path = gene_dir / f"{gene}.fasta"
+            mapping_dir = gene_dir / "mapping"
+
             write_fasta(
-                fasta_out / f"{gene}.fasta",
+                fasta_path,
                 {
                     "ORF": tx_map["orf_seq"],
                     "transcript": tx_map["transcript_seq"],
                     "genomic": tx_map["gdna_seq"],
                 },
             )
-            print(f"  FASTA: {fasta_out / (gene + '.fasta')}")
+            print(f"  FASTA: {fasta_path}")
 
             # Build mappings
             tx_rows, chrom_rows, gdna_rows, aa_rows = map_orf_mutations_to_transcript_and_genome(muts, tx_map)
 
-            # Chromosome mapping CSV (required)
-            write_mapping_csv(chrom_out / f"chr_mapping_{gene}.csv", "chromosome", chrom_rows)
-            print(f"  Chromosome mapping: {chrom_out / ('chr_mapping_' + gene + '.csv')}  ({len(chrom_rows)} rows)")
+            if do_chrom:
+                write_mapping_csv(mapping_dir / f"chr_mapping_{gene}.csv", "chromosome", chrom_rows)
+                print(f"  Chromosome mapping: {mapping_dir / f'chr_mapping_{gene}.csv'}  ({len(chrom_rows)} rows)")
 
-            # Genomic (relative gDNA) mapping CSV (optional)
-            if gdna_out:
-                write_mapping_csv(gdna_out / f"genomic_mapping_{gene}.csv", "genomic", gdna_rows)
-                print(f"  Genomic mapping: {gdna_out / ('genomic_mapping_' + gene + '.csv')}  ({len(gdna_rows)} rows)")
+            if do_genomic:
+                write_mapping_csv(mapping_dir / f"genomic_mapping_{gene}.csv", "genomic", gdna_rows)
+                print(f"  Genomic mapping: {mapping_dir / f'genomic_mapping_{gene}.csv'}  ({len(gdna_rows)} rows)")
 
-            # Transcript mapping CSV (optional)
-            if tmap_out:
-                write_mapping_csv(tmap_out / f"transcript_mapping_{gene}.csv", "transcript", tx_rows)
-                print(f"  Transcript mapping: {tmap_out / ('transcript_mapping_' + gene + '.csv')}  ({len(tx_rows)} rows)")
+            if do_transcript:
+                write_mapping_csv(mapping_dir / f"transcript_mapping_{gene}.csv", "transcript", tx_rows)
+                print(f"  Transcript mapping: {mapping_dir / f'transcript_mapping_{gene}.csv'}  ({len(tx_rows)} rows)")
 
-            # Amino-acid mapping CSV (optional)
-            if aa_out:
-                write_mapping_csv(aa_out / f"{gene}_nt_to_aa_mapping.csv", "aamutant", aa_rows)
-                print(f"  Amino-acid mapping: {aa_out / (gene + '_nt_to_aa_mapping.csv')}  ({len(aa_rows)} rows)")
+            if do_aa:
+                write_mapping_csv(mapping_dir / f"{gene}_nt_to_aa_mapping.csv", "aamutant", aa_rows)
+                print(f"  Amino-acid mapping: {mapping_dir / f'{gene}_nt_to_aa_mapping.csv'}  ({len(aa_rows)} rows)")
             len_issues = tx_map.get("validation_length_issues") or []
             mismatches = tx_map.get("validation_mismatches") or []
             total_mut = len(muts)
@@ -773,7 +774,7 @@ def main():
     if verbose_log:
         from datetime import datetime
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        log_path = fasta_out / f"validation_{timestamp}.log"
+        log_path = output / f"validation_{timestamp}.log"
         try:
             log_path.parent.mkdir(parents=True, exist_ok=True)
             with open(log_path, "w") as log_file:
