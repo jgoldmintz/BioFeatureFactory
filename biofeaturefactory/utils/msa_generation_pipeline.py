@@ -39,6 +39,8 @@ from Bio import SeqIO
 from Bio.Seq import Seq
 from Bio.SeqRecord import SeqRecord
 
+from utility import prepare_protein_query, extract_gene_from_filename
+
 
 def run_jackhmmer(query_fasta, database, output_sto, jackhmmer_binary,
                   iterations=5, evalue_inclusion=1e-3, threads=4):
@@ -89,16 +91,25 @@ def parse_stockholm(stockholm_file):
         stockholm_file: Path to Stockholm file
 
     Returns:
-        dict: {seq_id: sequence} mapping
+        tuple: (dict {seq_id: sequence}, rf_annotation str or None)
+            rf_annotation is the concatenated #=GC RF string where 'x' marks
+            match columns and '.' marks insert columns. None if absent.
     """
-    msa = {}
     current_seqs = defaultdict(str)
+    rf_parts = []
 
     with open(stockholm_file, 'r') as f:
         for line in f:
             line = line.rstrip()
 
-            # Skip comments and empty lines
+            # Capture RF column annotation before skipping other # lines
+            if line.startswith('#=GC RF'):
+                parts = line.split()
+                if len(parts) >= 3:
+                    rf_parts.append(parts[2])
+                continue
+
+            # Skip remaining comments and empty lines
             if line.startswith('#') or line.startswith('//') or not line:
                 continue
 
@@ -109,14 +120,11 @@ def parse_stockholm(stockholm_file):
                 seq = parts[1]
                 current_seqs[seq_id] += seq
 
-    # Convert to final dict
-    for seq_id, seq in current_seqs.items():
-        msa[seq_id] = seq
-
-    return msa
+    rf_annotation = ''.join(rf_parts) if rf_parts else None
+    return dict(current_seqs), rf_annotation
 
 
-def stockholm_to_a2m(msa, focus_seq_id):
+def stockholm_to_a2m(msa, focus_seq_id, rf_annotation=None):
     """
     Convert Stockholm MSA to A2M format.
 
@@ -129,6 +137,10 @@ def stockholm_to_a2m(msa, focus_seq_id):
     Args:
         msa: dict {seq_id: sequence}
         focus_seq_id: ID of the focus/query sequence
+        rf_annotation: #=GC RF string from parse_stockholm where 'x' = match
+            column and '.' = insert column. When provided, this is used as the
+            authoritative match/insert column definition. Falls back to focus
+            sequence non-gap positions when None.
 
     Returns:
         dict: {seq_id: a2m_sequence}
@@ -142,23 +154,25 @@ def stockholm_to_a2m(msa, focus_seq_id):
         else:
             raise ValueError(f"Focus sequence '{focus_seq_id}' not found in MSA")
 
-    focus_seq = msa[focus_seq_id]
-
-    # Identify match columns (non-gap in focus sequence)
-    match_columns = [i for i, c in enumerate(focus_seq) if c not in '-.' ]
+    # Identify match columns using RF annotation when available
+    if rf_annotation is not None:
+        match_columns = {i for i, c in enumerate(rf_annotation) if c == 'x'}
+    else:
+        focus_seq = msa[focus_seq_id]
+        match_columns = {i for i, c in enumerate(focus_seq) if c not in '-.'}
 
     a2m_msa = {}
     for seq_id, seq in msa.items():
         a2m_seq = []
         for i, c in enumerate(seq):
             if i in match_columns:
-                # Match column: uppercase
+                # Match column: uppercase or deletion marker
                 if c in '-.':
                     a2m_seq.append('-')
                 else:
                     a2m_seq.append(c.upper())
             else:
-                # Insert column: lowercase or '.'
+                # Insert column: lowercase or gap marker
                 if c in '-.':
                     a2m_seq.append('.')
                 else:
@@ -169,7 +183,7 @@ def stockholm_to_a2m(msa, focus_seq_id):
     return a2m_msa
 
 
-def filter_msa_by_gaps(msa, max_seq_gaps=0.4, max_col_gaps=0.6):
+def filter_msa_by_gaps(msa, max_seq_gaps=0.4, max_col_gaps=0.6, a2m_format=False):
     """
     Filter MSA by removing gappy sequences and columns.
 
@@ -177,6 +191,10 @@ def filter_msa_by_gaps(msa, max_seq_gaps=0.4, max_col_gaps=0.6):
         msa: dict {seq_id: sequence}
         max_seq_gaps: Maximum fraction of gaps allowed per sequence
         max_col_gaps: Maximum fraction of gaps allowed per column
+        a2m_format: When True, gap fractions are computed over match-state
+            columns only (uppercase + '-'). Insert columns ('.' and lowercase)
+            are structural in A2M and excluded from gap accounting. Column
+            filtering also operates on match-state columns only.
 
     Returns:
         dict: Filtered MSA
@@ -184,7 +202,38 @@ def filter_msa_by_gaps(msa, max_seq_gaps=0.4, max_col_gaps=0.6):
     if not msa:
         return {}
 
-    # Step 1: Remove sequences with too many gaps
+    if a2m_format:
+        sample = next(iter(msa.values()))
+        match_cols = [i for i, c in enumerate(sample) if c == '-' or c.isupper()]
+
+        filtered_seqs = {}
+        for seq_id, seq in msa.items():
+            match_states = [seq[i] for i in match_cols]
+            gap_count = sum(1 for c in match_states if c == '-')
+            gap_frac = gap_count / len(match_states) if match_states else 1.0
+            if gap_frac <= max_seq_gaps:
+                filtered_seqs[seq_id] = seq
+
+        if not filtered_seqs:
+            print("Warning: All sequences filtered out by gap threshold", file=sys.stderr)
+            return {}
+
+        seq_list = list(filtered_seqs.values())
+        n_seqs = len(seq_list)
+        cols_to_keep = []
+        for i in match_cols:
+            col = [s[i] for s in seq_list]
+            gap_frac = sum(1 for c in col if c == '-') / n_seqs
+            if gap_frac <= max_col_gaps:
+                cols_to_keep.append(i)
+
+        final_msa = {}
+        for seq_id, seq in filtered_seqs.items():
+            final_msa[seq_id] = ''.join(seq[i] for i in cols_to_keep)
+
+        return final_msa
+
+    # Stockholm / non-A2M path
     filtered_seqs = {}
     for seq_id, seq in msa.items():
         gap_count = seq.count('-') + seq.count('.') + seq.count('!')
@@ -196,7 +245,6 @@ def filter_msa_by_gaps(msa, max_seq_gaps=0.4, max_col_gaps=0.6):
         print("Warning: All sequences filtered out by gap threshold", file=sys.stderr)
         return {}
 
-    # Step 2: Identify columns with too many gaps
     seq_list = list(filtered_seqs.values())
     seq_len = len(seq_list[0])
     n_seqs = len(seq_list)
@@ -209,7 +257,6 @@ def filter_msa_by_gaps(msa, max_seq_gaps=0.4, max_col_gaps=0.6):
         if gap_frac <= max_col_gaps:
             cols_to_keep.append(i)
 
-    # Step 3: Remove gappy columns
     final_msa = {}
     for seq_id, seq in filtered_seqs.items():
         new_seq = ''.join(seq[i] for i in cols_to_keep)
@@ -335,32 +382,39 @@ def generate_msa(query_fasta, database, output_path, jackhmmer_binary,
     Returns:
         dict: MSA statistics
     """
-    query_length = get_query_length(query_fasta)
-    focus_id = get_focus_id(query_fasta)
-    min_neff = min_neff_ratio * query_length
+    # Translate nucleotide query to protein if necessary
+    protein_fasta, tmp_protein = prepare_protein_query(query_fasta)
 
-    print(f"Query: {focus_id}, Length: {query_length}")
-    print(f"Target N_eff: >={min_neff:.0f} (ratio {min_neff_ratio}xL)")
+    try:
+        query_length = get_query_length(protein_fasta)
+        focus_id = get_focus_id(protein_fasta)
+        min_neff = min_neff_ratio * query_length
 
-    # Create temporary file for Stockholm output
-    output_dir = Path(output_path).parent
-    output_dir.mkdir(parents=True, exist_ok=True)
-    sto_path = str(output_path).replace('.a2m', '.sto')
+        print(f"Query: {focus_id}, Length: {query_length}")
+        print(f"Target N_eff: >={min_neff:.0f} (ratio {min_neff_ratio}xL)")
 
-    # Run jackhmmer
-    run_jackhmmer(
-        query_fasta=query_fasta,
-        database=database,
-        output_sto=sto_path,
-        jackhmmer_binary=jackhmmer_binary,
-        iterations=iterations,
-        evalue_inclusion=evalue_inclusion,
-        threads=threads
-    )
+        # Create temporary file for Stockholm output
+        output_dir = Path(output_path).parent
+        output_dir.mkdir(parents=True, exist_ok=True)
+        sto_path = str(output_path).replace('.a2m', '.sto')
+
+        # Run jackhmmer
+        run_jackhmmer(
+            query_fasta=protein_fasta,
+            database=database,
+            output_sto=sto_path,
+            jackhmmer_binary=jackhmmer_binary,
+            iterations=iterations,
+            evalue_inclusion=evalue_inclusion,
+            threads=threads
+        )
+    finally:
+        if tmp_protein and os.path.exists(tmp_protein):
+            os.remove(tmp_protein)
 
     # Parse Stockholm
     print("Parsing Stockholm output...")
-    msa = parse_stockholm(sto_path)
+    msa, rf_annotation = parse_stockholm(sto_path)
     n_raw = len(msa)
     print(f"Raw sequences: {n_raw}")
 
@@ -369,16 +423,22 @@ def generate_msa(query_fasta, database, output_path, jackhmmer_binary,
 
     # Convert to A2M format
     print("Converting to A2M format...")
-    a2m_msa = stockholm_to_a2m(msa, focus_id)
+    a2m_msa = stockholm_to_a2m(msa, focus_id, rf_annotation)
 
     # Filter by gaps
     print(f"Filtering MSA (max_seq_gaps={max_seq_gaps}, max_col_gaps={max_col_gaps})...")
-    filtered_msa = filter_msa_by_gaps(a2m_msa, max_seq_gaps, max_col_gaps)
+    filtered_msa = filter_msa_by_gaps(a2m_msa, max_seq_gaps, max_col_gaps, a2m_format=True)
     n_filtered = len(filtered_msa)
     print(f"Filtered sequences: {n_filtered}")
 
     if n_filtered == 0:
         raise RuntimeError("All sequences filtered out")
+
+    # Rename focus sequence to gene name derived from query filename
+    gene_name = extract_gene_from_filename(query_fasta) or focus_id
+    if gene_name != focus_id and focus_id in filtered_msa:
+        filtered_msa[gene_name] = filtered_msa.pop(focus_id)
+        focus_id = gene_name
 
     # Compute N_eff
     print("Computing N_eff...")
@@ -423,17 +483,17 @@ def generate_msa(query_fasta, database, output_path, jackhmmer_binary,
         'query_length': query_length,
         'n_sequences_raw': n_raw,
         'n_sequences_filtered': n_filtered,
-        'n_eff': round(neff, 1),
-        'n_eff_ratio': round(neff_ratio, 2),
-        'coverage': round(coverage, 3),
-        'mean_identity': round(mean_identity, 3),
+        'n_eff': float(round(neff, 1)),
+        'n_eff_ratio': float(round(neff_ratio, 2)),
+        'coverage': float(round(coverage, 3)),
+        'mean_identity': float(round(mean_identity, 3)),
         'bitscore_threshold_used': bitscore_threshold,
         'iterations': iterations,
         'evalue_inclusion': evalue_inclusion,
         'max_seq_gaps': max_seq_gaps,
         'max_col_gaps': max_col_gaps,
         'identity_threshold': identity_threshold,
-        'quality_pass': neff >= min_neff
+        'quality_pass': bool(neff >= min_neff)
     }
 
     # Write stats JSON

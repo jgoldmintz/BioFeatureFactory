@@ -25,9 +25,9 @@ Both reference and alternate sequences are folded, sampled, and compared at mult
 
 4. **Variant Comparison**  
    - Ensemble and MFE energies compared between reference and alternate windows.  
-   - **ΔΔG metrics** quantify energetic shifts.  
+   - **$\Delta\Delta G$ metrics** quantify energetic shifts.  
    - **Jensen–Shannon divergence (JSD)** captures overall structural rearrangements.  
-   - **Per-position Δu** measures the change in accessibility at every base in the window.
+   - **Per-position $\Delta u$** measures the change in accessibility at every base in the window.
 
 5. **Parallel Execution**  
    - Uses `ProcessPoolExecutor` with automatic worker detection (`_autodetect_workers`).  
@@ -49,7 +49,7 @@ Each row represents a single SNV-centered comparison (`pkey` = gene + mutation).
 | `d_meanE_kcalmol` | Difference in mean sampled energy from the Boltzmann ensemble. Represents average energetic shift across sampled conformations.                     | kcal/mol |
 | `ref_sdE_kcalmol`, `alt_sdE_kcalmol` | Standard deviations of sampled energies for reference and alternate. Higher SD = more structural diversity (less rigidity).                         | kcal/mol |
 | `jsd_unpaired_bits` | Jensen–Shannon divergence between per-base unpaired probability distributions. Quantifies structural dissimilarity (0 = identical, >0 = divergent). | bits |
-| `delta_central` | Change in unpaired probability (Δu) at the SNV-centered position (midpoint of the window). Useful for pinpointing direct local effects.             | unitless (0–1) |
+| `delta_central` | Change in unpaired probability ($\Delta u$) at the SNV-centered position (midpoint of the window). Useful for pinpointing direct local effects.             | unitless (0–1) |
 
 ---
 
@@ -62,8 +62,8 @@ Each row represents a single nucleotide position within the analyzed window.
 | `transcript_pos` | Transcript coordinate of the variant (matches summary table)                                                                             | nt |
 | `pos` | Position index within the window (1 = start, window_length = end). Position 76 corresponds to the SNV.                                   | integer |
 | `delta_u` | Per-position change in unpaired probability (Alt – Ref). Positive values indicate increased accessibility in the alternate structure.    | float |
-| `change_flag` | 1 if \|Δu\| ≥ τ (τ = 0.05 default) else 0. Marks positions with deterministic meaningful shifts.                       | 0/1 |
-| `direction` | Sign of Δu: 1 = increased unpaired probability, –1 = decreased, 0 = unchanged. Indicates direction of accessibility change.              | –1/0/1 |
+| `change_flag` | 1 if $|\Delta u| \geq \tau$ ($\tau = 0.05$ default) else 0. Marks positions with deterministic meaningful shifts.      | 0/1 |
+| `direction` | Sign of $\Delta u$: 1 = increased unpaired probability, –1 = decreased, 0 = unchanged. Indicates direction of accessibility change. | –1/0/1 |
 | `mfe_change_flag` | 1 if base-pairing status differs between Ref/Alt MFE structures (paired <-> unpaired).                                                     | 0/1 |
 | `mfe_change_dir` | Encodes the type of base-pairing change: 0 = unpaired->paired, 1 = paired->unpaired. Indicates structural opening or closing at that base. | 0/1 |
 
@@ -71,26 +71,26 @@ Each row represents a single nucleotide position within the analyzed window.
 
 ## Interpretation
 
-- **ΔΔG (MFE / Ensemble)**  
-  - Positive ΔΔG -> Alt structure is less stable (higher energy).  
-  - Negative ΔΔG -> Alt structure is more stable (lower energy).  
-  - Ensemble ΔΔG captures thermodynamic stability averaged across all possible folds, while MFE ΔΔG isolates the most stable structure.
+- **$\Delta\Delta G$ (MFE / Ensemble)**
+  - Positive $\Delta\Delta G$ -> Alt structure is less stable (higher energy).
+  - Negative $\Delta\Delta G$ -> Alt structure is more stable (lower energy).
+  - Ensemble $\Delta\Delta G$ captures thermodynamic stability averaged across all possible folds, while MFE $\Delta\Delta G$ isolates the most stable structure.
 
 - **JSD_unpaired_bits**  
   - Measures how much the overall accessibility landscape changes.  
   - Values < 0.02 indicate near-identical folds; 0.05–0.1 indicate local rearrangements; >0.1 suggests significant structural change.
 
-- **Δu (Per-base accessibility shift)**  
-  - Indicates how much each nucleotide’s unpaired probability changes.  
-  - Large Δu around the variant may signify disruption of local base pairing.  
-  - Nonlocal Δu patterns (far from the SNV) suggest propagated conformational effects.
+- **$\Delta u$ (Per-base accessibility shift)**
+  - Indicates how much each nucleotide’s unpaired probability changes.
+  - Large $\Delta u$ around the variant may signify disruption of local base pairing.
+  - Nonlocal $\Delta u$ patterns (far from the SNV) suggest propagated conformational effects.
 
 - **change_flag and direction**  
   - Provide a thresholded binary signal for modeling or visualization.  
   - Useful for identifying structurally “sensitive” regions across variants.
 
 - **mfe_change_flag and mfe_change_dir**  
-  - Capture discrete MFE pairing state transitions, complementing Δu’s continuous probabilities.  
+  - Capture discrete MFE pairing state transitions, complementing $\Delta u$’s continuous probabilities.
   - Allow classification of “opening” vs “closing” effects in the predicted secondary structure.
 
 ---
@@ -133,7 +133,7 @@ where, $H(x) = -x\log_2(x) - (1-x)\log_2(1-x)$ is the Bernoulli entropy for the 
 
 
 ---
-## $Δu$ and $τ$
+## $\Delta u$ and $\tau$
 
 The symbol $u$ denotes the *unpaired probability* of a nucleotide — the marginal probability that position $i$ remains unpaired across all Boltzmann-weighted secondary structures:
 
@@ -145,18 +145,17 @@ For each position, the pipeline computes:
 
 $\Delta u_i = u_i^{(\text{alt})} - u_i^{(\text{ref})}$
 
-- **Positive $Δu$** -> base becomes more accessible (region opens).  
-- **Negative $Δu$** -> base becomes more paired (region closes).  
-- $Δu ≈ 0$ -> no local structural change.
+- **Positive $\Delta u$** -> base becomes more accessible (region opens).
+- **Negative $\Delta u$** -> base becomes more paired (region closes).
+- $\Delta u \approx 0$ -> no local structural change.
 
 The parameter **$τ$ (tau)** is a *magnitude threshold* applied to $|\Delta u|$ to define significant changes.  
-By default, $τ = 0.05$ ($≥5%$ change in unpaired probability).  
+By default, $\tau = 0.05$ ($\geq 5\%$ change in unpaired probability).  
 This threshold filters out small fluctuations due to ensemble sampling noise, allowing `change_flag` and `direction` to represent discrete, biologically meaningful **structural perturbations**.
 
 
 ---
 ## Notes
-- DNA sequences (A,C,G,T) are automatically converted to RNA (A,C,G,U).  
 - Default temperature is 37 °C. All energies are in kcal/mol.  
 - Boltzmann sampling is stochastic; minor variation across runs is expected.  
 - `OMP_NUM_THREADS=1` prevents oversubscription during multiprocessing.

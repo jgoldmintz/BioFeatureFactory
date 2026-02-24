@@ -267,7 +267,7 @@ The window is centered on each codon position:
 
 Before analysis, sequences are filtered by:
 1. **Length similarity**: Within 20% of focus sequence length
-2. **Sequence identity**: ≥50% amino acid identity to focus
+2. **Sequence identity**: $\geq 50\%$ amino acid identity to focus
 3. **Gap content**: Excessive gaps removed
 
 ### Null Models

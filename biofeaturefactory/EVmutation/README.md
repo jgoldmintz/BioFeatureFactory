@@ -261,9 +261,9 @@ make
 ## MSA Quality Guidelines
 
 ### Minimum Requirements
-- ≥100 effective sequences
-- ≤40% gaps per sequence
-- ≤60% gaps per column
+- $\geq 100$ effective sequences
+- $\leq 40\%$ gaps per sequence
+- $\leq 60\%$ gaps per column
 - Coverage of full protein length
 
 ### Optimal MSA
@@ -286,6 +286,7 @@ make
 | `PASS` | Successful prediction | Use for analysis |
 | `NOT_IN_MODEL` | Position not in MSA | Check MSA coverage |
 | `INVALID_MUTATION` | Parse error | Check input format |
+| `SYNONYMOUS` | Nucleotide mutation produces no amino acid change | No evolutionary effect score assigned |
 
 ---
 

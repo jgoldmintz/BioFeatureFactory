@@ -6,7 +6,7 @@ The AlphaFold3 pipeline performs **structure-based comparative analysis** of RNA
 For each mutation, the pipeline queries POSTAR3/ENCODE eCLIP binding data to identify RBPs with overlapping peaks, then runs AF3 to predict RNA-protein complex structures for both alleles.
 This enables quantitative assessment of how mutations perturb RBP binding.
 
-AlphaFold3 (Abramson *et al.*, 2024) provides the structural prediction engine; the Python layer structures inputs, extracts binding metrics, and computes Δ-based features suitable for biological interpretation and downstream modeling.
+AlphaFold3 (Abramson *et al.*, 2024) provides the structural prediction engine; the Python layer structures inputs, extracts binding metrics, and computes $\Delta$-based features suitable for biological interpretation and downstream modeling.
 
 ---
 
@@ -15,7 +15,7 @@ AlphaFold3 (Abramson *et al.*, 2024) provides the structural prediction engine; 
 - **Unified WT<->MUT execution** — WT predictions cached and reused across mutations in the same gene.
 - **RBP discovery** — Automatic query of POSTAR3/ENCODE eCLIP binding sites within configurable window (±50 bp).
 - **Multi-mode execution** — Local GPU, SLURM batch, or GCP cloud submission.
-- **Δ-based comparison** — Per-RBP delta metrics quantify mutation-driven perturbation.
+- **$\Delta$-based comparison** — Per-RBP delta metrics quantify mutation-driven perturbation.
 - **Event classification** — Gained, lost, strengthened, weakened binding states.
 - **Distance-weighted impact modeling** — Effects scaled by proximity to SNV using inverse distance weighting (Shepard, 1968).
 - **Ensemble aggregation** — Parses all AF3 seed/sample outputs (mean ± std across samples) for robust confidence estimates.
@@ -101,6 +101,7 @@ Each row represents a single mutation with aggregated RBP binding analysis.
 | Column | Description | Units |
 |--------|-------------|-------|
 | **pkey** | Unique variant identifier in the format `GENE-mutation`. | — |
+| **Gene** | Gene symbol. | string |
 | **n_rbps_tested** | Number of RBPs evaluated for this mutation. | count |
 | **n_rbps_binding_wt** | RBPs with confident binding in WT structure. | count |
 | **n_rbps_binding_mut** | RBPs with confident binding in MUT structure. | count |
@@ -108,10 +109,10 @@ Each row represents a single mutation with aggregated RBP binding analysis.
 | **global_count_lost** | Number of RBPs with lost binding ($S_{\text{wt}} \geq \tau$, $S_{\text{mut}} < \tau$). | count |
 | **global_count_strengthened** | RBPs with strengthened binding (both bind, MUT has lower PAE). | count |
 | **global_count_weakened** | RBPs with weakened binding (both bind, MUT has higher PAE). | count |
-| **global_max_abs_delta_pae** | Maximum $\|\Delta_{\text{PAE}}\|$ across all RBPs. | Å |
+| **global_max_abs_delta_pae** | Maximum $\|\Delta_{\text{PAE}}\|$ across all RBPs. | $\text{Å}$ |
 | **top_event_rbp** | RBP with highest priority score. | string |
 | **top_event_class** | Event classification: `gained`, `lost`, `strengthened`, `weakened`, `none`. | enum |
-| **top_event_delta_pae** | $\Delta_{\text{PAE}}$ for top-ranked RBP. | Å |
+| **top_event_delta_pae** | $\Delta_{\text{PAE}}$ for top-ranked RBP. | $\text{Å}$ |
 | **qc_flags** | Semicolon-separated quality flags. | — |
 
 ---
@@ -124,18 +125,18 @@ Each row represents a single RBP binding comparison for one mutation.
 |--------|-------------|-------|
 | **pkey** | Variant key (`GENE-mutation`). | — |
 | **rbp_name** | RBP gene symbol (e.g., HNRNPA1, SRSF1). | string |
-| **wt_chain_pair_pae_min** | Minimum PAE between RNA-protein chains (WT). | Å |
-| **mut_chain_pair_pae_min** | Minimum PAE between RNA-protein chains (MUT). | Å |
-| **delta_chain_pair_pae_min** | $\Delta_{PAE} = PAE_{mut} - PAE_{wt}$ | Å |
-| **wt_interface_contacts** | Number of cross-chain contacts < 8 Å (WT). | count |
-| **mut_interface_contacts** | Number of cross-chain contacts < 8 Å (MUT). | count |
+| **wt_chain_pair_pae_min** | Minimum PAE between RNA-protein chains (WT). | $\text{Å}$ |
+| **mut_chain_pair_pae_min** | Minimum PAE between RNA-protein chains (MUT). | $\text{Å}$ |
+| **delta_chain_pair_pae_min** | $\Delta_{PAE} = PAE_{mut} - PAE_{wt}$ | $\text{Å}$ |
+| **wt_interface_contacts** | Number of cross-chain contacts $< 8\,\text{Å}$ (WT). | count |
+| **mut_interface_contacts** | Number of cross-chain contacts $< 8\,\text{Å}$ (MUT). | count |
 | **delta_interface_contacts** | Change in interface contacts. | count |
 | **cls** | Event classification: `gained`, `lost`, `strengthened`, `weakened`, `unchanged`, `no_binding`. | enum |
 | **priority** | Ranking score: $\|\Delta_{\text{PAE}}\| \cdot \frac{1}{1+d/k}$. | numeric |
 | **n_samples_wt** | Number of AF3 samples parsed for WT (ensemble mode). | count |
 | **n_samples_mut** | Number of AF3 samples parsed for MUT (ensemble mode). | count |
-| **std_pae_wt** | Standard deviation of chain-pair PAE across WT samples. | Å |
-| **std_pae_mut** | Standard deviation of chain-pair PAE across MUT samples. | Å |
+| **std_pae_wt** | Standard deviation of chain-pair PAE across WT samples. | $\text{Å}$ |
+| **std_pae_mut** | Standard deviation of chain-pair PAE across MUT samples. | $\text{Å}$ |
 | **n_windows** | Number of windows used (multi-window mode only). | count |
 
 ---
@@ -153,28 +154,28 @@ Each row represents a single interface residue (RNA or protein) within the AF3 p
 | **res_id** | Residue sequence number. | int |
 | **res_name** | Residue name (3-letter code). | string |
 | **plddt** | Per-residue pLDDT confidence score. | 0–100 |
-| **is_contact** | Binary flag: 1 if residue contacts the other chain (< 8 Å). | 0/1 |
-| **min_contact_distance** | Minimum distance to nearest atom in the other chain. | Å |
+| **is_contact** | Binary flag: 1 if residue contacts the other chain ($< 8\,\text{Å}$). | 0/1 |
+| **min_contact_distance** | Minimum distance to nearest atom in the other chain. | $\text{Å}$ |
 | **contact_frequency** | Fraction of ensemble samples where this residue is a contact (ensemble mode). | 0–1 |
 
 ---
 
 ## Key Quantitative Features
 
-### Δchain_pair_pae_min (Primary Binding Proxy)
+### $\Delta$chain_pair_pae_min (Primary Binding Proxy)
 
 $$\Delta_{PAE} = PAE_{mut} - PAE_{wt}$$
 
 **What is PAE?** Predicted Aligned Error (PAE) is an AlphaFold confidence metric that estimates the positional error (in Angstroms) between two residues after optimal superposition. For inter-chain predictions, PAE quantifies how confidently AF3 predicts the relative positioning of the RNA and protein chains.
 
 **Interpretation:**
-- **Low PAE (< 10 Å)**: High confidence that the two chains interact in the predicted orientation
-- **High PAE (> 20 Å)**: Low confidence; chains may not interact or their relative position is uncertain
+- **Low PAE (< $10\,\text{Å}$)**: High confidence that the two chains interact in the predicted orientation
+- **High PAE (> $20\,\text{Å}$)**: Low confidence; chains may not interact or their relative position is uncertain
 
 **Delta interpretation:**
-- **Positive Δ** -> Weaker binding in mutant (PAE increased, meaning higher uncertainty)
-- **Negative Δ** -> Stronger binding in mutant (PAE decreased, meaning lower uncertainty)
-- **Δ ≈ 0** -> No significant change in predicted binding confidence
+- **Positive $\Delta$** -> Weaker binding in mutant (PAE increased, meaning higher uncertainty)
+- **Negative $\Delta$** -> Stronger binding in mutant (PAE decreased, meaning lower uncertainty)
+- **$\Delta \approx 0$** -> No significant change in predicted binding confidence
 
 ---
 
@@ -183,7 +184,7 @@ $$\Delta_{PAE} = PAE_{mut} - PAE_{wt}$$
 $$P = |\Delta_{PAE}| \times \frac{1}{1 + d/k}$$
 
 **Variables:**
-- $|\Delta_{PAE}|$ = absolute magnitude of PAE change (Å)
+- $|\Delta_{PAE}|$ = absolute magnitude of PAE change ($\text{Å}$)
 - $d$ = genomic distance (bp) between the SNV position and the RBP binding site center
 - $k$ = decay constant (default: 50 bp)
 
@@ -210,7 +211,7 @@ $$N_{contacts} = \sum_{i \in RNA} \sum_{j \in protein} \mathbf{1}[d_{ij} < 8 \te
 - $d_{ij}$ = Euclidean distance between atoms $i$ and $j$
 - $\mathbf{1}[\cdot]$ = indicator function (returns 1 if condition is true, 0 otherwise)
 
-**Interpretation:** Counts atom pairs where an RNA atom is within 8 Å of a protein atom. Higher contact counts suggest more extensive binding interfaces. The 8 Å threshold captures van der Waals contacts, hydrogen bonds, and electrostatic interactions.
+**Interpretation:** Counts atom pairs where an RNA atom is within $8\,\text{Å}$ of a protein atom. Higher contact counts suggest more extensive binding interfaces. The $8\,\text{Å}$ threshold captures van der Waals contacts, hydrogen bonds, and electrostatic interactions.
 
 ---
 
@@ -219,10 +220,10 @@ $$N_{contacts} = \sum_{i \in RNA} \sum_{j \in protein} \mathbf{1}[d_{ij} < 8 \te
 A binding event is classified as **confident** when ALL of the following conditions are met:
 
 1. **Sufficient contacts**: $N_{contacts} \geq 3$
-   - At least 3 RNA-protein atom pairs within 8 Å
+   - At least 3 RNA-protein atom pairs within $8\,\text{Å}$
 
-2. **Low inter-chain uncertainty**: $PAE_{min} \leq 10$ Å
-   - The minimum PAE between any RNA-protein residue pair is below 10 Å
+2. **Low inter-chain uncertainty**: $PAE_{min} \leq 10\,\text{Å}$
+   - The minimum PAE between any RNA-protein residue pair is below $10\,\text{Å}$
 
 3. **Adequate local structure quality**: $pLDDT_{RNA} \geq 50$ OR $pLDDT_{protein} \geq 50$
    - At least one chain at the interface has confident per-residue structure (pLDDT scale: 0-100, where >70 is high confidence)
@@ -347,8 +348,8 @@ By default, the mutation is centered in the RNA window. The `--multi-window` fla
 
 - **Localized perturbations** (large $|\Delta_{\text{PAE}}|$ at high priority) -> direct disruption of RBP binding interface.
 - **Multiple gained/lost events** -> mutation affects RBP binding landscape broadly.
-- **Low global Δ** with unchanged classifications -> negligible regulatory change.
-- **High Δ with lost classification** -> potential functional impact on post-transcriptional regulation.
+- **Low global $\Delta$** with unchanged classifications -> negligible regulatory change.
+- **High $\Delta$ with lost classification** -> potential functional impact on post-transcriptional regulation.
 
 ---
 
@@ -357,11 +358,11 @@ By default, the mutation is centered in the RNA window. The `--multi-window` fla
 | Parameter | Default | Description |
 |-----------|---------|-------------|
 | `min_contacts` | 3 | Minimum interface contacts for confident binding |
-| `max_pae_binding` | 10.0 | Maximum PAE for confident binding (Å) |
+| `max_pae_binding` | 10.0 | Maximum PAE for confident binding ($\text{Å}$) |
 | `min_plddt_interface` | 50.0 | Minimum pLDDT at interface |
-| `delta_pae_significant` | 2.0 | Δ threshold for strengthened/weakened classification (Å) |
+| `delta_pae_significant` | 2.0 | $\Delta$ threshold for strengthened/weakened classification ($\text{Å}$) |
 | `delta_contacts_significant` | 2 | Contact change threshold for classification |
-| `contact_threshold` | 8.0 | Distance threshold for interface contacts (Å) |
+| `contact_threshold` | 8.0 | Distance threshold for interface contacts ($\text{Å}$) |
 
 ---
 
@@ -369,14 +370,12 @@ By default, the mutation is centered in the RNA window. The `--multi-window` fla
 
 | Flag | Condition | Suggested Action |
 |------|-----------|------------------|
-| `no_rbps_in_region` | No RBP peaks within query window | Exclude variant |
-| `rbp_sequence_missing` | Could not find protein sequence | Check mapping file |
-| `af3_failed_wt` | AF3 prediction failed on WT | Exclude variant |
-| `af3_failed_mut` | AF3 prediction failed on MUT | Exclude variant |
-| `low_confidence` | pLDDT < 50 for all interface residues | Use cautiously |
-| `no_interface_contacts` | No cross-chain contacts detected | May indicate no binding |
-| `token_limit_exceeded` | RNA + protein > 5120 tokens | Reduce window size |
-| `PASS` | No issues detected | Safe for analysis |
+| `PASS` | All RBPs produced complete results | Safe for analysis |
+| `PARTIAL` | Some RBPs succeeded, some failed | Interpret with caution |
+| `ALL_FAILED` | All RBP predictions failed | Exclude variant or debug AF3 |
+| `no_rbps_tested` | No RBPs were evaluated (empty result) | Check upstream RBP lookup |
+| `no_rbps_in_region` | No RBP peaks found within query window | Exclude variant |
+| `FAILED:{error}` | Individual RBP prediction raised an exception | See stderr for details |
 
 ---
 

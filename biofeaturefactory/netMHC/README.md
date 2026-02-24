@@ -65,27 +65,11 @@ This flow:
 
 ### NetMHC-only processing (no parsing)
 
-```bash
-python netmhc-pipeline.py \
-    wt/ABCB1.fasta \
-    raw_outputs/ \
-    --mode netmhc-only \
-    --alleles HLA-A*02:01
-```
-
-Produces raw NetMHC output files without parsing.
+> **Not yet implemented.** The `--mode netmhc-only` argument is accepted but prints "not yet implemented" and exits with error code 1.
 
 ### Parse-only mode
 
-```bash
-python netmhc-pipeline.py \
-    netmhc_outputs/ \
-    parsed_results.tsv \
-    --mode parse-only \
-    --mapping-dir ../../mutations/combined/aa
-```
-
-Parses existing NetMHC outputs into ensemble TSV format.
+> **Not yet implemented.** The `--mode parse-only` argument is accepted but prints "not yet implemented" and exits with error code 1.
 
 ---
 
@@ -98,6 +82,8 @@ Per-mutation summary with epitope changes:
 | Column | Description | Units |
 |--------|-------------|-------|
 | `pkey` | `{GENE}-{MUTATION}` primary key | string |
+| `Gene` | Gene symbol | string |
+| `mutation` | Mutation identifier | string |
 | `n_epitopes_wt`, `n_epitopes_mut` | Count of predicted epitopes (rank < threshold) | count |
 | `count_gained`, `count_lost`, `count_strengthened`, `count_weakened` | Epitope classification counts | count |
 | `max_abs_delta_rank`, `sum_abs_delta_rank` | Maximum and sum of rank changes | percentile (0-100) |
@@ -113,14 +99,18 @@ Per-mutation, per-peptide, per-allele events:
 
 | Column | Description | Units |
 |--------|-------------|-------|
-| `classification` | gained/lost/strengthened/weakened/stable | categorical |
-| `classification_code` | Numeric encoding (gained=2, lost=-2, etc.) | integer |
-| `wt_rank`, `mut_rank`, `delta_rank` | WT rank, MUT rank, and Δ | percentile |
-| `wt_affinity`, `mut_affinity` | Binding affinity (nM) | nanomolar |
+| `pkey` | `{GENE}-{MUTATION}` primary key | string |
+| `Gene` | Gene symbol | string |
+| `mutation` | Mutation identifier | string |
 | `peptide` | Peptide sequence | string |
 | `pos` | Position in protein | residue index |
 | `mhc_allele` | HLA allele | string |
+| `wt_rank`, `mut_rank`, `delta_rank` | WT rank, MUT rank, and $\Delta$ | percentile |
+| `wt_affinity`, `mut_affinity` | Binding affinity (nM) | nanomolar |
+| `delta_affinity` | Change in binding affinity ($\text{MUT} - \text{WT}$) | nanomolar |
 | `bind_level_wt`, `bind_level_mut` | SB (strong) / WB (weak) / NB (non-binder) | categorical |
+| `classification` | gained/lost/strengthened/weakened/stable | categorical |
+| `classification_code` | Numeric encoding (gained=2, lost=-2, etc.) | integer |
 
 ### 5.3 Sites TSV (`*.sites.tsv`)
 
@@ -128,11 +118,17 @@ Raw predictions for all peptides:
 
 | Column | Description | Units |
 |--------|-------------|-------|
-| `pos`, `peptide`, `core` | Position, peptide, and core binding region | various |
-| `mhc_allele` | HLA allele | string |
-| `rank`, `affinity` | Percentile rank and binding affinity | percentile / nM |
-| `bind_level` | Strong binder (SB), Weak binder (WB), or non-binder | categorical |
+| `pkey` | `{GENE}-{MUTATION}` primary key | string |
+| `Gene` | Gene symbol | string |
 | `sequence_type` | wt or mut | categorical |
+| `pos` | Position in protein | residue index |
+| `mhc_allele` | HLA allele | string |
+| `peptide` | Peptide sequence | string |
+| `core` | Core binding region | string |
+| `affinity` | Binding affinity | nM |
+| `rank` | Percentile rank | percentile |
+| `bind_level` | Strong binder (SB), Weak binder (WB), or non-binder | categorical |
+| `identity` | Sequence name from NetMHC output | string |
 
 ---
 
@@ -160,10 +156,9 @@ The pipeline supports any HLA alleles recognized by NetMHCpan. Common choices:
 
 # Multiple alleles
 --alleles HLA-A*02:01 HLA-A*01:01 HLA-B*07:02
-
-# PSEUDOCODE: Default allele set
-# If --alleles is not specified, uses a default representative set covering major populations
 ```
+
+If `--alleles` is not specified, the pipeline defaults to `HLA-A*02:01` only. Specify multiple alleles explicitly for population coverage.
 
 ---
 
@@ -175,16 +170,16 @@ The pipeline supports any HLA alleles recognized by NetMHCpan. Common choices:
 |---------------|---------|-------------------|
 | **Gained** | New strong binder in mutant (WT was non-binder) | Potential neoantigen - may trigger immune response |
 | **Lost** | Strong binder in WT becomes non-binder in mutant | Immune escape - tumor may evade detection |
-| **Strengthened** | Both bind, but mutant binds stronger (Δrank > 5%) | Enhanced immunogenicity |
-| **Weakened** | Both bind, but mutant binds weaker (Δrank > 5%) | Reduced immunogenicity |
-| **Stable** | Both bind with minimal change (Δrank ≤ 5%) | No significant immune impact |
+| **Strengthened** | Both bind, but mutant binds stronger ($\Delta$rank $> 5\%$) | Enhanced immunogenicity |
+| **Weakened** | Both bind, but mutant binds weaker ($\Delta$rank $> 5\%$) | Reduced immunogenicity |
+| **Stable** | Both bind with minimal change ($\Delta$rank $\leq 5\%$) | No significant immune impact |
 
 ### Binding Thresholds
 
 NetMHC uses percentile rank to classify binders:
-- **Strong Binder (SB)**: rank ≤ 0.5%
-- **Weak Binder (WB)**: 0.5% < rank ≤ 2%
-- **Non-Binder**: rank > 2%
+- **Strong Binder (SB)**: rank $\leq 0.5\%$
+- **Weak Binder (WB)**: $0.5\% <$ rank $\leq 2\%$
+- **Non-Binder**: rank $> 2\%$
 
 ---
 
@@ -290,9 +285,11 @@ python netmhc-pipeline.py input/ output.tsv --batch-size 0
 ### Known Limitations
 
 1. **Default alleles**: When `--alleles` not specified, uses HLA-A*02:01 only. For population coverage, specify multiple alleles explicitly.
-2. **Caching**: Not yet implemented. Each run executes NetMHC fresh (consider using `--keep-intermediates` for debugging).
-3. **Parse-only mode**: Implemented for full-pipeline; parse-only and netmhc-only modes pending.
+2. **Caching**: Caching code exists but is not called in the pipeline. Each run executes NetMHC fresh.
+3. **Parse-only and netmhc-only modes**: These modes are accepted by the CLI but print "not yet implemented" and exit.
 4. **Parallel processing**: Batches processed sequentially; could parallelize across genes/batches for large datasets.
+5. **`--peptide-lengths`**: Flag is accepted but not passed to the NetMHC binary — has no effect.
+6. **`--netmhc-tool`**: Selects the binary path but does not adjust command-line flags per tool.
 
 ---
 

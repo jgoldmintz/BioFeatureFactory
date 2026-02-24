@@ -1,6 +1,6 @@
 # NetSurfP-3.0 Pipeline
 
-High-throughput protein structure prediction for WT and mutant sequences using NetSurfP-3.0. Predicts surface accessibility, secondary structure, disorder regions, and binding sites.
+High-throughput protein structure prediction for WT and mutant sequences using NetSurfP-3.0. Predicts surface accessibility, secondary structure, and disorder regions.
 
 ---
 
@@ -9,8 +9,7 @@ High-throughput protein structure prediction for WT and mutant sequences using N
 NetSurfP-3.0 predicts multiple structural features per residue:
 - **Surface Accessibility** (RSA/ASA): Solvent exposure
 - **Secondary Structure** (SS3/SS8): Helix, strand, coil assignments
-- **Disorder**: Intrinsically disordered regions
-- **Binding Sites**: Protein-protein and protein-nucleic acid binding
+- **Disorder**: Intrinsically disordered regions (two disorder scores: `disorder_pf` and `disorder_pt`)
 
 This pipeline:
 - Compares WT vs mutant structural changes at the mutation site and globally
@@ -43,19 +42,18 @@ The pipeline imports directly from the `nsp3/` subdirectory.
 
 ## 3. Installation
 
-### Native Installation (Linux/macOS with PyTorch)
+### Installation
 
-1. Clone NetSurfP-3.0 from the official repository
-2. Install dependencies (PyTorch, ESM model weights)
-3. Ensure `predict.py` is accessible via `--native-netsurfp-path`
+1. Clone NetSurfP-3.0 into the `nsp3/` subdirectory (see §2)
+2. Install PyTorch and ESM model weights per the NetSurfP-3.0 repository instructions
 
 ```bash
-# Example installation
-git clone https://github.com/... netsurfp-3.0
-cd netsurfp-3.0
-pip install -r requirements.txt
-# Download ESM model weights as per NetSurfP documentation
+cd NetSurfP3/
+git clone https://github.com/Eryk96/NetSurfP-3.0.git nsp3
+pip install -r nsp3/requirements.txt
 ```
+
+The pipeline imports directly from the cloned `nsp3/` directory. The required `--model` and `--config` arguments point to the ESM model weights and configuration file.
 
 ---
 
@@ -67,42 +65,17 @@ pip install -r requirements.txt
 python netsurfp3-pipeline.py \
     ../../FASTA_files/newnt3/ \
     results/netsurfp_summary.tsv \
-    --mode full-pipeline \
-    --mapping-dir ../../mutations/combined/aa \
-    --log /path/to/validation.log \
-    --rsa-threshold 0.1 \
-    --disorder-threshold 0.1 \
-    --keep-intermediates
+    --mutation-dir ../../mutations/combined/aa \
+    --model /path/to/esm_model \
+    --config /path/to/nsp3_config.yaml \
+    --log /path/to/validation.log
 ```
 
 This flow:
 1. Loads ORF nucleotide FASTAs and translates to amino acids
-2. Synthesizes mutant AA sequences from mapping CSVs
+2. Synthesizes mutant AA sequences from mutation CSVs
 3. Runs NetSurfP-3.0 on both WT and mutant sequences
 4. Generates ensemble TSV with structural change analysis
-
-### NetSurfP-only processing (no parsing)
-
-```bash
-python netsurfp3-pipeline.py \
-    wt/ABCB1.fasta \
-    raw_outputs/ \
-    --mode netsurfp-only
-```
-
-Produces raw NetSurfP output files without parsing.
-
-### Parse-only mode
-
-```bash
-python netsurfp3-pipeline.py \
-    netsurfp_outputs/ \
-    parsed_results.tsv \
-    --mode parse-only \
-    --mapping-dir ../../mutations/combined/aa
-```
-
-Parses existing NetSurfP outputs into ensemble TSV format.
 
 ---
 
@@ -117,18 +90,18 @@ Per-mutation summary with structural changes:
 | `pkey` | `{GENE}-{MUTATION}` primary key | string |
 | `mutation_pos` | Position of the mutation | residue index |
 | `wt_aa`, `mut_aa` | WT and mutant amino acids | single-letter |
-| `delta_rsa`, `delta_asa` | Change in relative/absolute surface accessibility | 0-1 / Ų |
-| `delta_disorder` | Change in disorder probability | 0-1 |
-| `delta_binding` | Change in binding site probability | 0-1 |
-| `ss3_change`, `ss8_change` | Secondary structure transitions | categorical |
-| `burial_classification` | Buried/Intermediate/Exposed change | categorical |
-| `disorder_classification` | Ordered/Disordered change | categorical |
-| `local_structural_impact` | Sum of \|Δ\| within ±5 residues | various |
-| `global_mean_delta_rsa` | Average RSA change across all residues | 0-1 |
+| `delta_rsa` | Change in relative surface accessibility | 0–1 |
+| `delta_disorder_pf`, `delta_disorder_pt` | Change in disorder probability (two scoring methods) | 0–1 |
+| `ss3_change` | 1 if 3-state secondary structure changed, else 0 | 0/1 |
+| `ss8_change` | 1 if 8-state secondary structure changed, else 0 | 0/1 |
+| `burial_classification` | Buried/Intermediate/Exposed change (-2 to +2) | integer |
+| `disorder_classification` | Ordered/Disordered change (-2 to +2) | integer |
+| `local_structural_impact` | Sum of $|\Delta|$ within ±5 residues | various |
+| `global_mean_delta_rsa` | Average RSA change across all residues | 0–1 |
 | `global_ss_changes` | Count of secondary structure changes | count |
 | `qc_flags` | Quality control flags | string |
 
-### 5.2 Per-Residue TSV (`*.sites.tsv`)
+### 5.2 Per-Residue TSV (`*.residues.tsv`)
 
 Raw predictions for all residues:
 
@@ -136,24 +109,29 @@ Raw predictions for all residues:
 |--------|-------------|-------|
 | `pos` | Residue position | residue index |
 | `aa` | Amino acid | single-letter |
-| `rsa` | Relative Solvent Accessibility | 0-1 (0=buried, 1=exposed) |
-| `asa` | Absolute Solvent Accessibility | Ų |
+| `rsa` | Relative Solvent Accessibility | 0–1 (0=buried, 1=exposed) |
+| `asa` | Absolute Solvent Accessibility | $\text{Å}^2$ |
 | `ss3` | 3-state secondary structure | H/E/C (helix/strand/coil) |
 | `ss8` | 8-state secondary structure | G/H/I/B/E/S/T/C |
-| `disorder` | Disorder probability | 0-1 |
-| `binding` | Binding site probability | 0-1 |
+| `disorder_pf`, `disorder_pt` | Disorder probabilities (two scoring methods) | 0–1 |
+| `phi`, `psi` | Backbone dihedral angles | degrees |
 | `sequence_type` | wt or mut | categorical |
 
 ### 5.3 Local Changes TSV (`*.local.tsv`)
 
-Changes in the ±5 residue window around each mutation:
+Changes in the ±5 residue window around each mutation (14 columns):
 
 | Column | Description | Units |
 |--------|-------------|-------|
 | `pkey` | Mutation identifier | string |
-| `pos` | Position relative to mutation | residue index |
-| `delta_rsa`, `delta_disorder` | Structural changes at this position | 0-1 |
-| `is_mutation_site` | Whether this is the mutation position | boolean |
+| `relative_pos` | Position relative to mutation (−5 to +5) | residue index |
+| `absolute_pos` | Absolute residue position in protein | residue index |
+| `delta_rsa` | Change in RSA at this position | 0–1 |
+| `delta_disorder_pf`, `delta_disorder_pt` | Change in disorder at this position | 0–1 |
+| `wt_ss3`, `mut_ss3` | WT and MUT 3-state secondary structure | H/E/C |
+| `wt_ss8`, `mut_ss8` | WT and MUT 8-state secondary structure | G/H/I/B/E/S/T/C |
+| `delta_phi`, `delta_psi` | Change in backbone dihedral angles | degrees |
+| `is_mutation_site` | Whether this is the mutation position | 0/1 |
 
 ---
 
@@ -168,9 +146,9 @@ Changes in the ±5 residue window around each mutation:
 | 0.50 - 1.0 | **Exposed** | Surface residues, interaction interfaces, epitopes |
 
 **Delta RSA Interpretation:**
-- **Δ > +0.2**: Buried -> Exposed transition (potential new interaction site, epitope exposure)
-- **Δ < -0.2**: Exposed -> Buried transition (loss of interaction site, epitope masking)
-- **\|Δ\| > 0.1**: Significant accessibility change
+- **$\Delta > +0.2$**: Buried -> Exposed transition (potential new interaction site, epitope exposure)
+- **$\Delta < -0.2$**: Exposed -> Buried transition (loss of interaction site, epitope masking)
+- **$|\Delta| > 0.1$**: Significant accessibility change
 
 ### 6.2 Secondary Structure (SS3)
 
@@ -196,14 +174,6 @@ Changes in the ±5 residue window around each mutation:
 **Clinical Relevance:**
 - Disorder -> Order: May stabilize protein, affect binding
 - Order -> Disorder: May destabilize, create flexible linkers
-
-### 6.4 Binding Sites
-
-| Binding Score | Interpretation |
-|--------------|---------------|
-| > 0.5 | Predicted binding site (protein-protein or protein-nucleic acid) |
-| 0.3 - 0.5 | Potential binding region |
-| < 0.3 | Unlikely to bind |
 
 ---
 
@@ -242,27 +212,16 @@ Disordered   +2     +1             0
 
 ## 8. Command-Line Options
 
-### Mode Selection
-- `--mode {full-pipeline, netsurfp-only, parse-only}`: Processing mode (default: full-pipeline)
-
-### Execution Backend
-- `--native-netsurfp-path PATH`: Path to NetSurfP-3.0 predict.py script
+### Required
+- `--mutation-dir DIR`: Mutation CSV directory
+- `--model PATH`: ESM model weights (required; passed to NetSurfP-3.0)
+- `--config PATH`: NetSurfP-3.0 configuration file (required)
 
 ### Processing Options
-- `--mapping-dir DIR`: Mutation mapping CSV directory (required for full-pipeline)
 - `--log FILE`: Validation log to skip failed mutations
-- `--batch-size N`: Batch size for large FASTAs (default: 100)
+- `--batch-size N`: Chunk size for sequences longer than N amino acids (default: 1500; 50 aa overlap)
 - `--timeout SEC`: Command timeout (default: 600)
-
-### Analysis Thresholds
-- `--rsa-threshold FLOAT`: Minimum delta RSA for significant changes (default: 0.1)
-- `--disorder-threshold FLOAT`: Minimum delta disorder for significant changes (default: 0.1)
-
-### Cache and Output
-- `--cache-dir DIR`: Custom cache directory
-- `--no-cache`: Disable caching
-- `--keep-intermediates`: Keep temp files for debugging
-- `--verbose`: Enable verbose output
+- `--input-type {nt, aa}`: Whether input FASTAs contain nucleotide or amino acid sequences (default: `nt`)
 
 ---
 
@@ -270,12 +229,11 @@ Disordered   +2     +1             0
 
 | Symptom | Resolution |
 |---------|------------|
-| `NetSurfP not found` | Install NetSurfP-3.0 and provide `--native-netsurfp-path` |
-| `PyTorch/ESM not found` | Install PyTorch and download ESM model weights for native mode |
+| `NetSurfP not found` | Confirm `nsp3/` is cloned correctly and PyTorch/ESM weights are available |
+| `PyTorch/ESM not found` | Install PyTorch and provide valid `--model` and `--config` paths |
 | Execution timeout | Increase `--timeout` (NetSurfP can be slow for long sequences) |
-| `No mapping file found` | Verify `--mapping-dir` contains `{GENE}*.csv` files |
-| `Out of memory` | Reduce `--batch-size` or use sequential processing for long proteins |
-| Binary not found | Ensure Python 3.7+ with PyTorch installed, and provide `--native-netsurfp-path` |
+| `No mapping file found` | Verify `--mutation-dir` contains `{GENE}*.csv` files |
+| `Out of memory` | Reduce `--batch-size` (default: 1500 AA chunks with 50 AA overlap) |
 
 ---
 
@@ -292,9 +250,9 @@ Mutations can alter:
 python netsurfp3-pipeline.py \
     wt_fastas/ \
     immunogenicity_analysis.tsv \
-    --mode full-pipeline \
-    --mapping-dir mappings/ \
-    --rsa-threshold 0.15
+    --mutation-dir mappings/ \
+    --model /path/to/esm_model \
+    --config /path/to/nsp3_config.yaml
 ```
 
 ### 10.2 Protein Stability Analysis
@@ -308,40 +266,17 @@ Identify mutations causing:
 python netsurfp3-pipeline.py \
     wt_fastas/ \
     stability_analysis.tsv \
-    --mode full-pipeline \
-    --mapping-dir mappings/ \
-    --disorder-threshold 0.2
+    --mutation-dir mappings/ \
+    --model /path/to/esm_model \
+    --config /path/to/nsp3_config.yaml
 ```
 
 ### 10.3 Interaction Interface Mapping
 
 Detect changes in:
-1. **Binding site predictions** -> Loss/gain of interaction capability
-2. **Local structural context** -> Altered binding geometry
-3. **Surface patches** -> Modified interaction interfaces
-
----
-
-## 11. PSEUDOCODE Sections
-
-### Implementation Status
-
-**Completed:**
-- Pipeline structure and CLI interface
-- WT/mutant sequence synthesis
-- Mapping CSV integration
-- Validation log filtering
-- Batch processing framework
-- Structural comparison logic framework
-
-**Needs Implementation:**
-1. **Docker command structure** (`_run_docker_netsurfp`): Determine exact Docker image and command format
-2. **NetSurfP output parsing** (`parse_netsurfp_output`): Implement based on actual output format (CSV/TSV/JSON)
-3. **Native execution** (`_run_native_netsurfp`): Verify predict.py command-line arguments
-4. **Caching system**: Implement hash-based caching similar to NetPhos
-5. **Ensemble TSV generation**: Complete WT vs MUT comparison and output formatting
-6. **Local window analysis**: Finalize ±5 residue context analysis
-7. **Classification thresholds**: Tune RSA/disorder thresholds based on validation data
+1. **Local structural context** -> Altered residue geometry near interface
+2. **RSA transitions** -> Burial changes at interaction surfaces
+3. **Surface patches** -> Modified solvent-accessible regions
 
 ---
 
@@ -352,14 +287,14 @@ Detect changes in:
 
 ---
 
-## 13. Example Workflow
+## 11. Example Workflow
 
 ```bash
 # 1. Prepare WT ORF FASTAs
 ls ../../FASTA_files/newnt3/
 # ABCB1_nt.fasta, BRCA1_nt.fasta, TP53_nt.fasta, ...
 
-# 2. Ensure mapping CSVs exist
+# 2. Ensure mutation CSVs exist
 ls ../../mutations/combined/aa/
 # ABCB1_transcript_mapping.csv, BRCA1_transcript_mapping.csv, ...
 
@@ -367,28 +302,25 @@ ls ../../mutations/combined/aa/
 python netsurfp3-pipeline.py \
     ../../FASTA_files/newnt3/ \
     results/netsurfp_summary.tsv \
-    --mode full-pipeline \
-    --mapping-dir ../../mutations/combined/aa \
-    --rsa-threshold 0.1 \
-    --disorder-threshold 0.1 \
-    --verbose \
-    --keep-intermediates
+    --mutation-dir ../../mutations/combined/aa \
+    --model /path/to/esm_model \
+    --config /path/to/nsp3_config.yaml
 
 # 4. Analyze outputs
-# results/netsurfp_summary.tsv - Per-mutation structural summary
-# results/netsurfp_summary.sites.tsv - Per-residue predictions
-# results/netsurfp_summary.local.tsv - Local context changes
+# results/netsurfp_summary.tsv        - Per-mutation structural summary
+# results/netsurfp_summary.residues.tsv - Per-residue predictions
+# results/netsurfp_summary.local.tsv  - Local context changes (±5 residues)
 
 # 5. Filter for significant structural changes
 # Look for:
 # - delta_rsa > 0.2 (major burial changes)
-# - delta_disorder > 0.2 (disorder transitions)
-# - ss3_change != '=' (secondary structure changes)
+# - delta_disorder_pf > 0.2 (disorder transitions)
+# - ss3_change = 1 (secondary structure changed)
 ```
 
 ---
 
-## 14. Integration with Other Pipelines
+## 12. Integration with Other Pipelines
 
 NetSurfP-3.0 predictions complement other BioFeatureFactory analyses:
 

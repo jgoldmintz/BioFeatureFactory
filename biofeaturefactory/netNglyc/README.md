@@ -95,12 +95,12 @@ python netnglyc-pipeline.py \
 | Column                                                                               | Description                                                                                  | Units             |
 |--------------------------------------------------------------------------------------|----------------------------------------------------------------------------------------------|-------------------|
 | `pkey`                                                                               | `{GENE}-{MUTATION}` primary key sourced from mapping CSV.                                    | string            |
-| `n_sites_wt`, `n_sites_mut`                                                          | Count of WT/MUT sites with potential ≥ `--threshold`.                                        | count             |
+| `n_sites_wt`, `n_sites_mut`                                                          | Count of WT/MUT sites with potential $\geq$ `--threshold`.                                   | count             |
 | `count_gained`, `count_lost`, `count_strengthened`, `count_weakened`, `count_stable` | Classification tallies for each mutation.                                                    | count             |
 | `max_abs_delta`, `sum_abs_delta`                                                     | Maximum change in potential and sum of absolute changes.                                     | probability (0–1) |
 | `top_event_type`                                                                     | Text label of dominant event.                                                                | categorical       |
 | `top_event_classification_code`                                                      | Numeric encoding of dominant event (`gained=2`, `lost=-2`, etc.).                            | integer           |
-| `top_event_delta`                                                                    | Δpotential for the dominant event.                                                           | probability (0–1) |
+| `top_event_delta`                                                                    | $\Delta$potential for the dominant event.                                                    | probability (0–1) |
 | `top_event_position`                                                                 | Amino-acid index of dominant event.                                                          | residue index     |
 | `wt_signalp_has_signal`, `mut_signalp_has_signal`                                    | 1 if SignalP predicts a signal peptide, else 0.                                              | boolean (0/1)     |
 | `wt_signalp_probability`, `mut_signalp_probability`                                  | SignalP cleavage probability.                                                                | probability (0–1) |
@@ -125,11 +125,18 @@ Per mutation/per motif position.
 
 | Column                                                          | Description                                               | Units                                 |
 |-----------------------------------------------------------------|-----------------------------------------------------------|---------------------------------------|
+| `pkey`                                                          | `{GENE}-{MUTATION}` primary key.                          | string                                |
+| `Gene`                                                          | Gene symbol.                                              | string                                |
+| `allele`                                                        | Sequence label (WT or mutant ID).                         | string                                |
+| `seq_name`                                                      | Full sequence name from NetNGlyc output.                  | string                                |
+| `position`                                                      | Amino-acid index of the sequon.                           | residue index                         |
+| `sequon`                                                        | N-X-S/T sequon string (e.g., `NKSE`).                    | string                                |
+| `potential`                                                     | NetNGlyc glycosylation potential score.                   | probability (0–1)                     |
 | `jury_agreement`                                                | Raw NetNGlyc `(votes/total)` string.                      | string                                |
 | `jury_agreement_score`                                          | Parsed float $\frac{\text{votes}}{\text{total}}$.         | fraction (0–1)                        |
 | `n_glyc_result`, `n_glyc_result_code`                           | NetNGlyc symbol and numeric code (`+++ = 3 … --- = -3`).  | categorical / integer                 |
 | `signalp_has_signal`, `signalp_probability`, `signalp_cleavage` | SignalP prediction (1/0), probability, and cleavage site. | boolean / probability / residue index |
-| `above_threshold`                                               | Whether potential ≥ `--threshold`.                        | boolean (0/1)                         |
+| `above_threshold`                                               | Whether potential $\geq$ `--threshold`.                   | boolean (0/1)                         |
 
 ---
 
@@ -171,7 +178,7 @@ Classifications align with NetNGlyc visibility thresholds: a site is **gained** 
 
 | Symptom                                             | Resolution                                                                                                                                                                                                   |
 |-----------------------------------------------------|--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
-| `ProcessPoolExecutor ... SC_SEM_NSEMS_MAX` on macOS | Set `--processing-mode single` or run in Linux/native mode (macOS limits POSIX semaphores).                                                                                                                  |
+| `ProcessPoolExecutor ... SC_SEM_NSEMS_MAX` on macOS | Set `--workers 1` or run in Linux/native mode (macOS limits POSIX semaphores).                                                                                                                  |
 | Parser says WT/MUT missing despite completed run    | Ensure `netnglyc_outputs_*` (with `wt/` and `mut/` directories) is passed to `--mode parse`; FASTA inputs are not valid parse targets.                                                                       |
 | SignalP columns blank in parse mode                 | Confirm `--cache-dir` matches the location containing `*_sp6_output/prediction_results.txt`, or omit `--cache-dir` to fall back to `~/.signalp6_cache`.                                                      |
 | Repeated mutants flagged `missing_mut`              | No predictions were emitted (NetNGlyc wrote "No sites predicted"). Lower `--threshold` if you expect weaker signals.                                                                                         |

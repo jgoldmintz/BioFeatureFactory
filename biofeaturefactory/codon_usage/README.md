@@ -29,8 +29,8 @@ This pipeline computes codon and codon-pair usage statistics, quantifying transl
 | Metric | Full Name | Description | Range |
 |--------|-----------|-------------|-------|
 | **RSCPU** | Relative Synonymous Codon Pair Usage | Observed pair frequency / expected | 0 to ~10 |
-| **CPS** | Codon Pair Score | ln(observed/expected) for codon pairs | -∞ to +∞ |
-| **noln CPS** | Non-log CPS | observed/expected ratio (no logarithm) | 0 to +∞ |
+| **CPS** | Codon Pair Score | ln(observed/expected) for codon pairs | $-\infty$ to $+\infty$ |
+| **noln CPS** | Non-log CPS | observed/expected ratio (no logarithm) | 0 to $+\infty$ |
 | **W_CP** | Relative Adaptiveness (Pair) | Pair frequency relative to most frequent pair | 0 to 1 |
 
 ---
@@ -167,7 +167,7 @@ Where:
 - $W_i$ = reference W value for codon $i$ (from highly expressed genes)
 
 **Interpretation**:
-- CAI ≈ 1.0: Gene uses optimal codons (highly expressed gene pattern)
+- CAI $\approx 1.0$: Gene uses optimal codons (highly expressed gene pattern)
 - CAI < 0.5: Gene uses suboptimal codons
 - Reference W values derived from human highly expressed genes (Sharp & Li 1987)
 
@@ -180,7 +180,7 @@ Where:
 - $w_i$ = tRNA adaptation weight for codon $i$ based on tRNA gene copy numbers
 
 **Interpretation**:
-- tAI ≈ 1.0: Codons match abundant tRNAs (fast translation)
+- tAI $\approx 1.0$: Codons match abundant tRNAs (fast translation)
 - Low tAI: Codons require rare tRNAs (slow translation)
 - Weights from dos Reis et al. 2004, Tuller et al. 2010
 
@@ -218,7 +218,6 @@ The `bicodon_context` field indicates what codon pairs are available:
 |------|---------|
 | `PASS` | All metrics computed successfully |
 | `NO_BICODON` | Could not extract codon pairs |
-| `INVALID_CODON` | Codon contains non-standard bases |
 
 ---
 

@@ -2093,6 +2093,53 @@ def extract_codon_with_bicodons(ntposnt, seq):
 # MSA Generation and Processing Utilities
 # =============================================================================
 
+def detect_alphabet(sequence):
+    """Return 'nucleotide' or 'protein' based on character composition.
+
+    Treats a sequence as nucleotide when >=90% of non-gap characters are
+    unambiguous or IUPAC nucleotide codes (ACGTNURYWSKMBDHV).
+    """
+    seq = sequence.upper().replace('-', '').replace('.', '').replace('*', '')
+    if not seq:
+        raise ValueError("Empty sequence.")
+    nt_chars = set('ACGTNURYWSKMBDHV')
+    nt_count = sum(1 for c in seq if c in nt_chars)
+    return 'nucleotide' if nt_count / len(seq) >= 0.90 else 'protein'
+
+
+def prepare_protein_query(query_fasta):
+    """Return a protein FASTA path suitable for jackhmmer.
+
+    If the query sequence is nucleotide, translates to protein (to stop codon)
+    and writes the result to a temporary file.
+
+    Returns:
+        (protein_fasta_path, tmp_path_or_None)
+        Caller must delete tmp_path when finished if it is not None.
+    """
+    import tempfile
+    from Bio import SeqIO
+    from Bio.SeqRecord import SeqRecord
+
+    record = next(SeqIO.parse(query_fasta, 'fasta'))
+    alphabet = detect_alphabet(str(record.seq))
+
+    if alphabet == 'protein':
+        return query_fasta, None
+
+    print(f"Nucleotide query detected for '{record.id}' — translating to protein.")
+    aa_seq = record.seq.translate(to_stop=True)
+    if not aa_seq:
+        raise ValueError(f"Translation of '{record.id}' produced an empty protein sequence.")
+
+    aa_record = SeqRecord(aa_seq, id=record.id, description='translated')
+    tmp = tempfile.NamedTemporaryFile(mode='w', suffix='.fasta', delete=False)
+    SeqIO.write([aa_record], tmp, 'fasta')
+    tmp.close()
+    print(f"Translated protein length: {len(aa_seq)} aa")
+    return tmp.name, tmp.name
+
+
 def run_jackhmmer(query_fasta, database, output_sto, jackhmmer_binary,
                   iterations=5, evalue_inclusion=1e-3, threads=4):
     """
@@ -2137,14 +2184,26 @@ def parse_stockholm(stockholm_file):
         stockholm_file: Path to Stockholm file
 
     Returns:
-        dict: {seq_id: sequence} mapping
+        tuple: (dict {seq_id: sequence}, rf_annotation str or None)
+            rf_annotation is the concatenated #=GC RF string where 'x' marks
+            match columns and '.' marks insert columns. None if absent.
     """
     from collections import defaultdict
     current_seqs = defaultdict(str)
+    rf_parts = []
 
     with open(stockholm_file, 'r') as f:
         for line in f:
             line = line.rstrip()
+
+            # Capture RF column annotation before skipping other # lines
+            if line.startswith('#=GC RF'):
+                parts = line.split()
+                if len(parts) >= 3:
+                    rf_parts.append(parts[2])
+                continue
+
+            # Skip remaining comments and empty lines
             if line.startswith('#') or line.startswith('//') or not line:
                 continue
             parts = line.split()
@@ -2153,10 +2212,11 @@ def parse_stockholm(stockholm_file):
                 seq = parts[1]
                 current_seqs[seq_id] += seq
 
-    return dict(current_seqs)
+    rf_annotation = ''.join(rf_parts) if rf_parts else None
+    return dict(current_seqs), rf_annotation
 
 
-def stockholm_to_a2m(msa, focus_seq_id):
+def stockholm_to_a2m(msa, focus_seq_id, rf_annotation=None):
     """
     Convert Stockholm MSA to A2M format.
 
@@ -2169,6 +2229,10 @@ def stockholm_to_a2m(msa, focus_seq_id):
     Args:
         msa: dict {seq_id: sequence}
         focus_seq_id: ID of the focus/query sequence
+        rf_annotation: #=GC RF string from parse_stockholm where 'x' = match
+            column and '.' = insert column. When provided, this is used as the
+            authoritative match/insert column definition. Falls back to focus
+            sequence non-gap positions when None.
 
     Returns:
         dict: {seq_id: a2m_sequence}
@@ -2181,8 +2245,12 @@ def stockholm_to_a2m(msa, focus_seq_id):
         else:
             raise ValueError(f"Focus sequence '{focus_seq_id}' not found in MSA")
 
-    focus_seq = msa[focus_seq_id]
-    match_columns = [i for i, c in enumerate(focus_seq) if c not in '-.']
+    # Identify match columns using RF annotation when available
+    if rf_annotation is not None:
+        match_columns = {i for i, c in enumerate(rf_annotation) if c == 'x'}
+    else:
+        focus_seq = msa[focus_seq_id]
+        match_columns = {i for i, c in enumerate(focus_seq) if c not in '-.'}
 
     a2m_msa = {}
     for seq_id, seq in msa.items():
@@ -2203,7 +2271,7 @@ def stockholm_to_a2m(msa, focus_seq_id):
     return a2m_msa
 
 
-def filter_msa_by_gaps(msa, max_seq_gaps=0.4, max_col_gaps=0.6):
+def filter_msa_by_gaps(msa, max_seq_gaps=0.4, max_col_gaps=0.6, a2m_format=False):
     """
     Filter MSA by removing gappy sequences and columns.
 
@@ -2211,6 +2279,10 @@ def filter_msa_by_gaps(msa, max_seq_gaps=0.4, max_col_gaps=0.6):
         msa: dict {seq_id: sequence}
         max_seq_gaps: Maximum fraction of gaps allowed per sequence
         max_col_gaps: Maximum fraction of gaps allowed per column
+        a2m_format: When True, gap fractions are computed over match-state
+            columns only (uppercase + '-'). Insert columns ('.' and lowercase)
+            are structural in A2M and excluded from gap accounting. Column
+            filtering also operates on match-state columns only.
 
     Returns:
         dict: Filtered MSA
@@ -2218,7 +2290,42 @@ def filter_msa_by_gaps(msa, max_seq_gaps=0.4, max_col_gaps=0.6):
     if not msa:
         return {}
 
-    # Remove sequences with too many gaps
+    if a2m_format:
+        # Identify match-state column indices (uppercase or '-' in any sequence)
+        sample = next(iter(msa.values()))
+        match_cols = [i for i, c in enumerate(sample) if c == '-' or c.isupper()]
+
+        # Remove sequences with too many deletions in match-state columns
+        filtered_seqs = {}
+        for seq_id, seq in msa.items():
+            match_states = [seq[i] for i in match_cols]
+            gap_count = sum(1 for c in match_states if c == '-')
+            gap_frac = gap_count / len(match_states) if match_states else 1.0
+            if gap_frac <= max_seq_gaps:
+                filtered_seqs[seq_id] = seq
+
+        if not filtered_seqs:
+            return {}
+
+        # Remove match-state columns with too many gaps
+        seq_list = list(filtered_seqs.values())
+        n_seqs = len(seq_list)
+        cols_to_keep = []
+        for i in match_cols:
+            col = [s[i] for s in seq_list]
+            gap_frac = sum(1 for c in col if c == '-') / n_seqs
+            if gap_frac <= max_col_gaps:
+                cols_to_keep.append(i)
+
+        # Reconstruct full sequences keeping only retained match columns;
+        # insert columns are dropped since downstream tools use match states only
+        final_msa = {}
+        for seq_id, seq in filtered_seqs.items():
+            final_msa[seq_id] = ''.join(seq[i] for i in cols_to_keep)
+
+        return final_msa
+
+    # Stockholm / non-A2M path
     filtered_seqs = {}
     for seq_id, seq in msa.items():
         gap_count = seq.count('-') + seq.count('.') + seq.count('!')
@@ -2229,7 +2336,6 @@ def filter_msa_by_gaps(msa, max_seq_gaps=0.4, max_col_gaps=0.6):
     if not filtered_seqs:
         return {}
 
-    # Identify columns with too many gaps
     seq_list = list(filtered_seqs.values())
     seq_len = len(seq_list[0])
     n_seqs = len(seq_list)
@@ -2242,7 +2348,6 @@ def filter_msa_by_gaps(msa, max_seq_gaps=0.4, max_col_gaps=0.6):
         if gap_frac <= max_col_gaps:
             cols_to_keep.append(i)
 
-    # Remove gappy columns
     final_msa = {}
     for seq_id, seq in filtered_seqs.items():
         new_seq = ''.join(seq[i] for i in cols_to_keep)

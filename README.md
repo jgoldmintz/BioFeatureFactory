@@ -47,7 +47,7 @@ Modular bioinformatics framework for automated feature extraction, coordinate ma
 | **NetSurfP3** | `NetSurfP3/netsurfp3-pipeline.py` | WT/mutant protein FASTA, mapping CSV dir | RSA, secondary structure, disorder predictions |
 | **Miranda** | `miranda/miranda-ensemble.py` | WT transcript FASTA, MirandA binary, miRNA DB | Δ-based miRNA binding summaries |
 | **GeneSplicer** | `genesplicer/genesplicer_ensemble.py` | Genomic FASTA, mutation CSV dir, GeneSplicer binary | Donor/acceptor delta summaries |
-| **SpliceAI** | `spliceai/spliceai-pipeline-controller.py` | Mutation CSVs or VCFs, reference genome | SpliceAI VCFs, parsed consequence tables |
+| **SpliceAI** | `spliceai/spliceai-pipeline-controller.py` | Mutation CSVs or VCFs, reference genome, annotation file, transcript/genomic/chromosome mapping dirs | SpliceAI VCFs, parsed consequence tables |
 | **RNAfold** | `RNAfold/run_viennaRNA_pipeline.py` | Transcript FASTA, transcript-mapping CSV dir | ΔΔG summaries, accessibility deltas |
 | **AlphaFold3** | `alphafold3/alphafold3_pipeline.py` | Mutation CSV, RBP binding data (POSTAR3/eCLIP) | RNA-RBP structure predictions, PAE metrics |
 | **EVmutation** | `EVmutation/evmutation-pipeline.py` | Protein MSA, plmc binary | Epistatic mutation effect scores |
@@ -101,10 +101,12 @@ WT<->ALT ensemble delta caller for splice donor/acceptor sites.
 
 Deep learning-based splice site prediction orchestrated by an adaptive controller.
 
-- `spliceai-pipeline-controller.py` wraps `nextflow run main.nf`, so one command handles VCF generation, SpliceAI inference, and result parsing.  
-- Automatically launches the live tracker and monitors `.nextflow.log` for rapid `exit 134` events; when ≤6 genes thrash, it restarts with `--maxforks tail_maxforks` (default 1) to finish deterministically.  
-- Supports both mutation-driven runs (auto-build per-gene VCFs) and reuse of pre-built VCFs via `--input_vcf_path --skip_vcf_generation`.  
-- Outputs raw SpliceAI VCFs plus exon-aware parsed consequence tables for downstream modeling.  
+- `spliceai-pipeline-controller.py` wraps `nextflow run main.nf`, so one command handles VCF generation, SpliceAI inference, and result parsing.
+- Automatically launches `spliceai-tracker.py` to report per-gene processed/total mutation counts in real time; disable with `--disable_tracker`.
+- Supports mutation-driven runs (auto-build per-gene VCFs) and reuse of pre-built VCFs via `--input_vcf_path --skip_vcf_generation`.
+- Intelligent isoform management: genes exceeding `--max_isoforms_per_gene` (default 50) are filtered via hybrid stratified sampling to prevent processing bottlenecks; override with `--forceAll_isoforms`.
+- TensorFlow exit 134 crashes can be mitigated by setting `--maxforks 1` to serialize SpliceAI tasks.
+- Outputs raw SpliceAI VCFs plus exon-aware parsed consequence tables for downstream modeling.
 
 ### RNAfold Pipeline
 

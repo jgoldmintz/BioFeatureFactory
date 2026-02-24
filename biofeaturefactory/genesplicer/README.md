@@ -19,12 +19,23 @@ Run GeneSplicer on full genomic context (or configurable context), compare WT vs
 - Python 3.9+, `pandas`, `numpy`
 
 ## Inputs
-- `--input`: directory of per-gene genomic FASTA files  
-  Preference: sequence named `genomic`; else first record in file.
-- `--mapping-dir`: directory of per-gene mutation CSVs  
-  Mutation column auto-detected: one of `genomic | mutant | mutation | nt_mutation | ntmutant`.  
-  Tokens like `G1211T` parsed via `get_mutation_data()`.
-- `--log` (optional): validation logs used by `should_skip_mutation()`.
+
+### Required Arguments
+- `-i, --input`: directory of per-gene genomic FASTA files. Preference: sequence named `genomic`; else first record in file.
+- `-m, --mapping-dir`: directory of per-gene mutation CSVs. Mutation column auto-detected: one of `genomic | mutant | mutation | nt_mutation | ntmutant`. Tokens like `G1211T` parsed via `get_mutation_data()`.
+- `-g, --genesplicer-dir`: directory containing the GeneSplicer binary.
+- `-o, --output`: output TSV base path.
+
+### Optional Arguments
+- `--pipeline {full, window, custom}`: scan mode (default: `full`)
+- `--window N`: window size in nt for `window` pipeline mode
+- `--report-radius N`: local triage radius in bp; marks `in_radius` column
+- `--distance-k N`: exponential decay constant in bp (default: 75)
+- `--visibility-threshold F`: minimum score for a site to be considered visible (default: 1.0)
+- `--high-cutoff F`: score threshold for "high-confidence" gained/lost events (default: 5.0)
+- `--shift-bp N`: minimum positional shift to classify as `shifted` (default: 3)
+- `--workers N`: number of parallel workers
+- `--log FILE`: validation log file or directory to skip failed mutations
 
 ## Outputs
 
@@ -49,31 +60,31 @@ Each row represents a single SNV comparison (`pkey = GENE-mutation`). Global vie
 | Column                      | Description                                                                                | Units                           |
 |-----------------------------|--------------------------------------------------------------------------------------------|---------------------------------|
 | `pkey`                      | Unique variant key `GENE-mutation`                                                         | —                               |
-| `n_sites_wt`                | Count of **visible** WT sites (score ≥ `--visibility-threshold`)                           | count                           |
+| `n_sites_wt`                | Count of **visible** WT sites (score $\geq$ `--visibility-threshold`)                      | count                           |
 | `n_sites_mut`               | Count of **visible** MUT sites                                                             | count                           |
 | `n_clusters`                | Number of donor/acceptor clusters evaluated                                                | count                           |
-| `global_count_gained_high`  | Gained clusters where max(wt,mut) ≥ `--high-cutoff`                                        | count                           |
-| `global_count_lost_high`    | Lost clusters where max(wt,mut) ≥ `--high-cutoff`                                          | count                           |
-| `global_count_shifted`      | Clusters with positional shift (                                                           | `dpos`                          | ≥ `--shift-bp`) | count |
-| `global_max_abs_Δscore`     | Max absolute score change across all clusters                                              | dimensionless                   |
-| `global_sum_weighted_abs_Δ` | Σ\|Δscore\| · exp(−distance/`--distance-k`) across clusters                                | dimensionless                   |
+| `global_count_gained_high`  | Gained clusters where max(wt,mut) $\geq$ `--high-cutoff`                                   | count                           |
+| `global_count_lost_high`    | Lost clusters where max(wt,mut) $\geq$ `--high-cutoff`                                     | count                           |
+| `global_count_shifted`      | Clusters with positional shift (`dpos` $\geq$ `--shift-bp`)                                | count                           |
+| `global_max_abs_deltascore` | Max absolute score change across all clusters                                              | dimensionless                   |
+| `global_sum_weighted_abs_delta` | $\sum \|\Delta\text{score}\| \cdot \exp(-\text{distance}/\texttt{--distance-k})$ across clusters | dimensionless              |
 | `nearest_event_bp_any`      | Minimum distance to SNV among all events                                                   | bp                              |
 | `local_count_gained_high`   | As above, restricted to `distance ≤ --report-radius`                                       | count                           |
 | `local_count_lost_high`     | As above, restricted local                                                                 | count                           |
 | `local_count_shifted`       | As above, restricted local                                                                 | count                           |
-| `local_max_abs_Δscore`      | Max abs Δscore within local radius                                                         | dimensionless                   |
+| `local_max_abs_deltascore`  | Max abs $\Delta$score within local radius                                                  | dimensionless                   |
 | `nearest_event_bp_local`    | Nearest event within local radius                                                          | bp                              |
-| `frac_effect_in_radius`     | (Σ\|Δ\| in radius) / (Σ\|Δ\| global)                                                       | 0–1                             |
+| `frac_effect_in_radius`     | $(\sum |\Delta|$ in radius$) / (\sum |\Delta|$ global$)$                                   | 0–1                             |
 | `top_event_type`            | Event class of highest‐priority cluster (`gained/lost/shifted/strengthened/weakened/none`) | enum                            |
-| `top_event_Δscore`          | Δscore of the highest‐priority event                                                       | dimensionless                   |
+| `top_event_deltascore`      | $\Delta$score of the highest‐priority event                                                | dimensionless                   |
 | `top_event_pos`             | Representative position of top event (MUT if present else WT)                              | bp (absolute) or index (window) |
-| `dominant_boundary`         | Boundary with largest Σ\|Δ\| (`donor` or `acceptor`)                                       | enum                            |
+| `dominant_boundary`         | Boundary with largest $\sum |\Delta|$ (`donor` or `acceptor`)                               | enum                            |
 | `qc_flags`                  | Semicolon‐separated flags: `no_sites;far_event>2kb;low_signal_only`                        | —                               |
 
 **Interpretation**
-- Local impact: `local_max_abs_Δscore` and local gained/lost counts.
+- Local impact: `local_max_abs_deltascore` and local gained/lost counts.
 - Distant cryptic promotion: `global_count_gained_high > 0` with large `nearest_event_bp_any`.
-- Clean negatives: `n_clusters=0` or `global_max_abs_Δscore≈0` and `frac_effect_in_radius≈0`.
+- Clean negatives: `n_clusters=0` or `global_max_abs_deltascore≈0` and `frac_effect_in_radius≈0`.
 
 ---
 
@@ -99,12 +110,12 @@ Each row represents a donor/acceptor **cluster** (merged nearby sites) and compa
 | `conf_mut`            | Confidence weight of MUT (`0.5/0.75/1.0`)                                                 | numeric                                          |
 | `conf_weighted_delta` | `conf_mut·mut_score − conf_wt·wt_score`                                                   | dimensionless                                    |
 | `cls`                 | Event class                                                                               | `gained/lost/shifted/strengthened/weakened/none` |
-| `is_high_impact`      | High Δ or high gained/lost (policy thresholds)                                            | 0/1                                              |
+| `is_high_impact`      | High $\Delta$ or high gained/lost (policy thresholds)                                     | 0/1                                              |
 | `priority`            | Sorting key: $\\|\text{dscore}\\|*\text{e}^{(−distance/\text{"--distance-k"})}$ + bonuses | numeric                                          |
 | `in_radius`           | Inside local triage radius (`distance ≤ --report-radius`)                                 | 0/1                                              |
 
 **Event taxonomy**
-- `gained`: WT absent, MUT visible (≥ visibility threshold).
+- `gained`: WT absent, MUT visible ($\geq$ visibility threshold).
 - `lost`: MUT absent, WT visible.
 - `shifted`: both visible and `|dpos| ≥ --shift-bp`.
 - `strengthened / weakened`: same/near position with `|dscore| ≥ 1.0`.
@@ -132,13 +143,13 @@ Per‐allele per‐site audit rows used to build clusters and events.
 **Consistency checks**
 - `n_sites_wt` = count of `visible_flag=1` where `allele=WT` for that `pkey`.
 - `n_sites_mut` = count of `visible_flag=1` where `allele=MUT` for that `pkey`.
-- `n_clusters` ≥ number of unique `(type, cluster_id)` rows in `events` for that `pkey`.
+- `n_clusters` $\geq$ number of unique `(type, cluster_id)` rows in `events` for that `pkey`.
 
 
 ## Quick heuristics
-- Prioritize SNVs with `global_count_gained_high + global_count_lost_high > 0` or large `global_max_abs_Δscore`.
+- Prioritize SNVs with `global_count_gained_high + global_count_lost_high > 0` or large `global_max_abs_deltascore`.
 - Far‐field cryptic activation: high‐impact `gained` with large `distance_to_snv`.
-- Local disruption: high local counts or `local_max_abs_Δscore` near the SNV.
+- Local disruption: high local counts or `local_max_abs_deltascore` near the SNV.
 
 Priority = `|dscore| * exp(−distance/k)` with bonuses for high-score gained/lost and large shifts.
 
@@ -149,63 +160,52 @@ Priority = `|dscore| * exp(−distance/k)` with bonuses for high-score gained/lo
 ---
 
 ## Modes and Pipeline
-- `--pipeline full`  
+- `--pipeline full`
   Scan entire genomic sequence for WT and ALT; absolute coordinates; global reporting; local triage flag via `--report-radius`.
-- `--pipeline custom` with `--scan-mode`:
-  - `genome` — same as full
-  - `extended` — slice `[pos − L, pos + L]` with `--context-bp L`
-  - `window` — centered window with `--window` (odd). Use only when speed is critical.
+- `--pipeline window`
+  Centered window scan with `--window` (odd nt). Use only when speed is critical. Results may be less biologically accurate.
+- `--pipeline custom`
+  Custom mode; behavior determined by additional implementation details.
 
 `--report-radius` marks `in_radius`. It does not suppress global rows.
 
 ## CLI Examples
-Full genomic scan with local triage:  
+Full genomic scan with local triage:
 
-```Bash
-python genesplicer_full.py \
+```bash
+python genesplicer_ensemble.py \
   -i FASTA/genomic \
   -m mutations/combined \
   -g /opt/genesplicer \
   -o out/splice_summary.tsv \
   --pipeline full --report-radius 150
 ```
-Extended context (±2000 bp), global + local:  
 
-```Bash
-python genesplicer_full.py \
-  -i FASTA/genomic \
-  -m mutations/combined \
-  -g /opt/genesplicer \
-  -o out/splice_summary.ext.tsv \
-  --pipeline custom \
-  --scan-mode extended \ 
-  --context-bp 2000 \
-  --report-radius 250
-```
 Window mode (speed), local radius 150. _**Use with caution**_: results may not be biologically accurate.
 
 _A local triage slice (`--report-radius`) is a review aid, not a filter._
+
 ```bash
-python genesplicer_full.py \
+python genesplicer_ensemble.py \
   -i FASTA/genomic \
   -m mutations/combined \
   -g /opt/genesplicer \
   -o out/splice_summary.win.tsv \
-  --pipeline custom \
-  --scan-mode window \
+  --pipeline window \
   --window 151 \
   --report-radius 150
 ```
 ## Thresholds and Policy
 - `--visibility-threshold` (default 1.0)
 - `--high-cutoff` (default 5.0)
-- `--med-cutoff` (default 3.0)
-- `--cluster-radius` in bp (default 3)
 - `--shift-bp` in bp (default 3)
 - `--distance-k` in bp (default 75)
+- `--report-radius` in bp (optional local triage radius)
+- `--window` in nt (default varies; used in `window` pipeline mode)
+- Cluster radius is hardcoded to 3 bp and is not a CLI parameter.
 
 ## Performance
-- Cost dominated by GeneSplicer scan length: `genome` ≥ `extended` ≫ `window`.
+- Cost dominated by GeneSplicer scan length: `genome` $\geq$ `extended` $\gg$ `window`.
 - Cache WT once per gene in `genome` mode; run ALT per SNV only.
 - Memory scales with site count; use per-gene writes if millions of rows are expected.
 
@@ -238,7 +238,7 @@ $H = \text{--high-cutoff}$ (default 5.0), $V = \text{--visibility-threshold}$ (d
 
 ## Summary Table fields
 
-### global_sum_weighted_abs_Δ
+### global_sum_weighted_abs_delta
 Weighted aggregate magnitude emphasizing proximity (Tobler, 1970; Cressie, 1993).
 - **Definition**: $S_{\text{weighted}} = \sum_i w_i \cdot |\Delta_i|$, with $w_i = e^{- d_i / k}$.
 - **Interpretation**: exponential distance decay. Half-weight distance $d_{1/2} = k \ln 2$. Example: $k=75 \Rightarrow d_{1/2} \approx 52$ bp.
@@ -272,8 +272,8 @@ Fraction of effect mass within the local radius.
 - **Definition**: $\Phi = \dfrac{\sum_{d_i \le R} |\Delta_i|}{\sum_{\text{all } i} |\Delta_i|}$.
 - **Interpretation**: localization metric. Near $1$ -> impact concentrated near SNV; near $0$ -> mostly distal.
 
-### global_max_abs_Δscore, local_max_abs_Δscore
-- **Definitions**: 
+### global_max_abs_deltascore, local_max_abs_deltascore
+- **Definitions**:
   - `max_global` = $\max_i |\Delta_i|$
   - `max local` = $\max_{i: d_i \le R} |\Delta_i|$
 - **Interpretation**: 
@@ -315,7 +315,7 @@ Site is **visible** if $\text{score} \ge V$. Cluster class depends on visibility
 ## Design levers
 
 ### Distance kernel k (`--distance-k`)
-Controls decay in `global_sum_weighted_abs_Δ` and `priority`. Larger $k$ spreads weight to distal events; smaller $k$ concentrates weight locally (Tobler, 1970; Cressie, 1993).
+Controls decay in `global_sum_weighted_abs_delta` and `priority`. Larger $k$ spreads weight to distal events; smaller $k$ concentrates weight locally (Tobler, 1970; Cressie, 1993).
 
 ### Shift threshold S (`--shift-bp`)
 Higher $S$ demands larger positional moves for `shifted`; lower $S$ captures micro-shifts.
