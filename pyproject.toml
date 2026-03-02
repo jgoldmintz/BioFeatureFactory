@@ -17,3 +17,10 @@ dependencies = [
 
 [tool.setuptools.packages.find]
 include = ["biofeaturefactory*"]
+
+[project.optional-dependencies]
+dev = ["pytest>=7.0"]
+
+[tool.pytest.ini_options]
+testpaths = ["test"]
+addopts = "-v"
