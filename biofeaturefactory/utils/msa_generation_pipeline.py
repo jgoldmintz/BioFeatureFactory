@@ -183,7 +183,7 @@ def stockholm_to_a2m(msa, focus_seq_id, rf_annotation=None):
     return a2m_msa
 
 
-def filter_msa_by_gaps(msa, max_seq_gaps=0.4, max_col_gaps=0.6, a2m_format=False):
+def filter_msa_by_gaps(msa, max_seq_gaps=0.4, max_col_gaps=0.6, a2m_format=False, focus_id=None):
     """
     Filter MSA by removing gappy sequences and columns.
 
@@ -195,6 +195,8 @@ def filter_msa_by_gaps(msa, max_seq_gaps=0.4, max_col_gaps=0.6, a2m_format=False
             columns only (uppercase + '-'). Insert columns ('.' and lowercase)
             are structural in A2M and excluded from gap accounting. Column
             filtering also operates on match-state columns only.
+        focus_id: When provided, columns where the focus sequence has a residue
+            (non-gap match state) are always retained regardless of gap fraction.
 
     Returns:
         dict: Filtered MSA
@@ -218,10 +220,15 @@ def filter_msa_by_gaps(msa, max_seq_gaps=0.4, max_col_gaps=0.6, a2m_format=False
             print("Warning: All sequences filtered out by gap threshold", file=sys.stderr)
             return {}
 
+        focus_seq = filtered_seqs.get(focus_id) if focus_id else None
+
         seq_list = list(filtered_seqs.values())
         n_seqs = len(seq_list)
         cols_to_keep = []
         for i in match_cols:
+            if focus_seq is not None and focus_seq[i] != '-':
+                cols_to_keep.append(i)
+                continue
             col = [s[i] for s in seq_list]
             gap_frac = sum(1 for c in col if c == '-') / n_seqs
             if gap_frac <= max_col_gaps:
@@ -427,7 +434,7 @@ def generate_msa(query_fasta, database, output_path, jackhmmer_binary,
 
     # Filter by gaps
     print(f"Filtering MSA (max_seq_gaps={max_seq_gaps}, max_col_gaps={max_col_gaps})...")
-    filtered_msa = filter_msa_by_gaps(a2m_msa, max_seq_gaps, max_col_gaps, a2m_format=True)
+    filtered_msa = filter_msa_by_gaps(a2m_msa, max_seq_gaps, max_col_gaps, a2m_format=True, focus_id=focus_id)
     n_filtered = len(filtered_msa)
     print(f"Filtered sequences: {n_filtered}")
 
