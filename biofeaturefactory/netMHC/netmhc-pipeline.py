@@ -69,7 +69,6 @@ from biofeaturefactory.utils.utility import (
     extract_mutation_from_sequence_name,
     translate_orf_sequence,
     build_mutant_sequences_for_gene,
-    resolve_output_base,
 )
 
 
@@ -690,14 +689,14 @@ def main():
     )
 
     parser.add_argument('input', nargs='?',
-                       help='Input: WT FASTA file/directory (full-pipeline mode) or NetMHC output directory (parse mode)')
+                       help='Input: WT FASTA file/directory')
     parser.add_argument('output', nargs='?',
-                       help='Output TSV file')
+                       help='Output base directory')
 
     # Mode selection
-    parser.add_argument('--mode', choices=['full-pipeline', 'netmhc-only', 'parse-only'],
+    parser.add_argument('--mode', choices=['full-pipeline'],
                        default='full-pipeline',
-                       help='Processing mode: full pipeline (NetMHC + parse), NetMHC-only (no parsing), or parse-only')
+                       help='Processing mode (only full-pipeline is supported)')
 
     # MHC-specific options
     parser.add_argument('--alleles', nargs='+',
@@ -740,7 +739,7 @@ def main():
     if not args.input or not args.output:
         parser.error("input and output arguments are required")
 
-    if args.mode == 'full-pipeline' and not args.mapping_dir:
+    if not args.mapping_dir:
         parser.error("--mapping-dir is REQUIRED for full-pipeline mode")
 
     # Build NetMHC executor
@@ -753,67 +752,115 @@ def main():
         if args.verbose:
             print(f"Loaded validation failures from {args.log}")
 
-    # Initialize result collections
-    all_summary_rows = []
-    all_events = []
-    all_sites = []
+    # Load WT sequences - handles both files and directories
+    wt_sequences, temp_holder = load_wt_sequence_map(args.input, wt_header='ORF')
+    if not wt_sequences:
+        print(f"Error: No FASTA sequences found in {args.input}")
+        return 1
 
-    if args.mode == 'full-pipeline':
-        # Resolve output path (auto-generate from input if directory given)
-        args.output = resolve_output_base(args.output, args.input, "netmhc")
+    if args.verbose:
+        print(f"Loaded {len(wt_sequences)} WT sequences")
 
-        # Load WT sequences - handles both files and directories
-        wt_sequences, temp_holder = load_wt_sequence_map(args.input, wt_header='ORF')
-        if not wt_sequences:
-            print(f"Error: No FASTA sequences found in {args.input}")
-            return 1
+    # Discover mapping files
+    mapping_files = discover_mapping_files(args.mapping_dir) if args.mapping_dir else {}
+
+    # Process each gene
+    for gene_name, wt_nt_seq in wt_sequences.items():
+        gene_summary_rows = []
+        gene_events = []
+        gene_sites = []
+        if args.verbose:
+            print(f"\nProcessing gene: {gene_name}")
+
+        # Translate to amino acids
+        wt_aa_seq = translate_orf_sequence(wt_nt_seq)
+        if not wt_aa_seq:
+            print(f"Warning: Could not translate {gene_name}, skipping")
+            continue
+
+        # Build mutant sequences
+        mapping_file = mapping_files.get(gene_name)
+        mutant_seqs = build_mutant_sequences_for_gene(
+            gene_name, wt_nt_seq, wt_aa_seq, mapping_file, args.log, failure_map
+        )
 
         if args.verbose:
-            print(f"Loaded {len(wt_sequences)} WT sequences")
+            print(f"  Generated {len(mutant_seqs)} mutant sequences")
 
-        # Discover mapping files
-        mapping_files = discover_mapping_files(args.mapping_dir) if args.mapping_dir else {}
+        # Create temp directory for this gene
+        gene_workdir = tempfile.mkdtemp(prefix=f"netmhc_{gene_name}_")
 
-        # Process each gene
-        for gene_name, wt_nt_seq in wt_sequences.items():
+        try:
+            # Write WT FASTA
+            wt_fasta = os.path.join(gene_workdir, f"{gene_name}_wt.fasta")
+            write_fasta(Path(wt_fasta), {f"{gene_name}_WT": wt_aa_seq})
+
+            # Check if batching is needed for WT
+            wt_predictions = []
+            if len(wt_aa_seq) > args.batch_size and args.batch_size > 0:
+                # Split into batches
+                if args.verbose:
+                    print(f"  Batching WT sequence ({len(wt_aa_seq)} AA) into chunks of {args.batch_size}")
+
+                batch_dir = os.path.join(gene_workdir, "wt_batches")
+                os.makedirs(batch_dir, exist_ok=True)
+
+                batch_files = split_fasta_into_batches(wt_fasta, args.batch_size, batch_dir)
+
+                # Run NetMHC on each batch
+                for batch_file in batch_files:
+                    batch_output = batch_file.replace('.fasta', '.out')
+                    success, _, error = executor(batch_file, batch_output, args.timeout, args.alleles)
+
+                    if not success:
+                        print(f"Warning: NetMHC failed for {gene_name} WT batch {batch_file}: {error}")
+                        continue
+
+                    # Parse batch predictions
+                    batch_preds = parse_netmhc_output(batch_output)
+                    wt_predictions.extend(batch_preds)
+            else:
+                # Run NetMHC on full WT sequence
+                wt_output = os.path.join(gene_workdir, f"{gene_name}_wt.out")
+                success, _, error = executor(wt_fasta, wt_output, args.timeout, args.alleles)
+
+                if not success:
+                    print(f"Warning: NetMHC failed for {gene_name} WT: {error}")
+                    continue
+
+                # Parse WT predictions
+                wt_predictions = parse_netmhc_output(wt_output)
             if args.verbose:
-                print(f"\nProcessing gene: {gene_name}")
+                print(f"  WT: {len(wt_predictions)} predictions")
 
+            # Add to sites output (all WT predictions)
+            for pred in wt_predictions:
+                gene_sites.append({
+                    'Gene': gene_name,
+                    'pkey': f"{gene_name}-WT",
+                    'sequence_type': 'wt',
+                    **pred
+                })
 
-            # Translate to amino acids
-            wt_aa_seq = translate_orf_sequence(wt_nt_seq)
-            if not wt_aa_seq:
-                print(f"Warning: Could not translate {gene_name}, skipping")
-                continue
+            # Process each mutant
+            for mut_header, mut_aa_seq in mutant_seqs.items():
+                mutation = mut_header.split('-', 1)[1] if '-' in mut_header else mut_header
 
-            # Build mutant sequences
-            mapping_file = mapping_files.get(gene_name)
-            mutant_seqs = build_mutant_sequences_for_gene(
-                gene_name, wt_nt_seq, wt_aa_seq, mapping_file, args.log, failure_map
-            )
+                # Write mutant FASTA
+                mut_fasta = os.path.join(gene_workdir, f"{gene_name}_{mutation}.fasta")
+                write_fasta(Path(mut_fasta), {mut_header: mut_aa_seq})
 
-            if args.verbose:
-                print(f"  Generated {len(mutant_seqs)} mutant sequences")
-
-            # Create temp directory for this gene
-            gene_workdir = tempfile.mkdtemp(prefix=f"netmhc_{gene_name}_")
-
-            try:
-                # Write WT FASTA
-                wt_fasta = os.path.join(gene_workdir, f"{gene_name}_wt.fasta")
-                write_fasta(Path(wt_fasta), {f"{gene_name}_WT": wt_aa_seq})
-
-                # Check if batching is needed for WT
-                wt_predictions = []
-                if len(wt_aa_seq) > args.batch_size and args.batch_size > 0:
+                # Check if batching is needed for mutant
+                mut_predictions = []
+                if len(mut_aa_seq) > args.batch_size and args.batch_size > 0:
                     # Split into batches
                     if args.verbose:
-                        print(f"  Batching WT sequence ({len(wt_aa_seq)} AA) into chunks of {args.batch_size}")
+                        print(f"  Batching {mutation} sequence ({len(mut_aa_seq)} AA)")
 
-                    batch_dir = os.path.join(gene_workdir, "wt_batches")
+                    batch_dir = os.path.join(gene_workdir, f"{mutation}_batches")
                     os.makedirs(batch_dir, exist_ok=True)
 
-                    batch_files = split_fasta_into_batches(wt_fasta, args.batch_size, batch_dir)
+                    batch_files = split_fasta_into_batches(mut_fasta, args.batch_size, batch_dir)
 
                     # Run NetMHC on each batch
                     for batch_file in batch_files:
@@ -821,133 +868,64 @@ def main():
                         success, _, error = executor(batch_file, batch_output, args.timeout, args.alleles)
 
                         if not success:
-                            print(f"Warning: NetMHC failed for {gene_name} WT batch {batch_file}: {error}")
+                            print(f"Warning: NetMHC failed for {gene_name} {mutation} batch {batch_file}: {error}")
                             continue
 
                         # Parse batch predictions
                         batch_preds = parse_netmhc_output(batch_output)
-                        wt_predictions.extend(batch_preds)
+                        mut_predictions.extend(batch_preds)
                 else:
-                    # Run NetMHC on full WT sequence
-                    wt_output = os.path.join(gene_workdir, f"{gene_name}_wt.out")
-                    success, _, error = executor(wt_fasta, wt_output, args.timeout, args.alleles)
+                    # Run NetMHC on full mutant sequence
+                    mut_output = os.path.join(gene_workdir, f"{gene_name}_{mutation}.out")
+                    success, _, error = executor(mut_fasta, mut_output, args.timeout, args.alleles)
 
                     if not success:
-                        print(f"Warning: NetMHC failed for {gene_name} WT: {error}")
+                        print(f"Warning: NetMHC failed for {gene_name} {mutation}: {error}")
                         continue
 
-                    # Parse WT predictions
-                    wt_predictions = parse_netmhc_output(wt_output)
+                    # Parse mutant predictions
+                    mut_predictions = parse_netmhc_output(mut_output)
                 if args.verbose:
-                    print(f"  WT: {len(wt_predictions)} predictions")
+                    print(f"  {mutation}: {len(mut_predictions)} predictions")
 
-                # Add to sites output (all WT predictions)
-                for pred in wt_predictions:
-                    all_sites.append({
+                # Add to sites output (all mutant predictions)
+                for pred in mut_predictions:
+                    gene_sites.append({
                         'Gene': gene_name,
-                        'pkey': f"{gene_name}-WT",
-                        'sequence_type': 'wt',
+                        'pkey': f"{gene_name}-{mutation}",
+                        'sequence_type': 'mut',
                         **pred
                     })
 
-                # Process each mutant
-                for mut_header, mut_aa_seq in mutant_seqs.items():
-                    mutation = mut_header.split('-', 1)[1] if '-' in mut_header else mut_header
+                # Compare WT vs MUT and classify epitope changes
+                epitope_events = compare_wt_mut_predictions(
+                    gene_name, mutation, wt_predictions, mut_predictions, args.threshold
+                )
 
-                    # Write mutant FASTA
-                    mut_fasta = os.path.join(gene_workdir, f"{gene_name}_{mutation}.fasta")
-                    write_fasta(Path(mut_fasta), {mut_header: mut_aa_seq})
+                # Add events to collection
+                gene_events.extend(epitope_events)
 
-                    # Check if batching is needed for mutant
-                    mut_predictions = []
-                    if len(mut_aa_seq) > args.batch_size and args.batch_size > 0:
-                        # Split into batches
-                        if args.verbose:
-                            print(f"  Batching {mutation} sequence ({len(mut_aa_seq)} AA)")
+                # Generate summary for this mutation
+                summary = summarize_epitope_changes(gene_name, mutation, epitope_events)
+                gene_summary_rows.append(summary)
 
-                        batch_dir = os.path.join(gene_workdir, f"{mutation}_batches")
-                        os.makedirs(batch_dir, exist_ok=True)
+        finally:
+            # Clean up temp directory
+            if not args.keep_intermediates and os.path.exists(gene_workdir):
+                shutil.rmtree(gene_workdir, ignore_errors=True)
 
-                        batch_files = split_fasta_into_batches(mut_fasta, args.batch_size, batch_dir)
+        gene_out = Path(args.output) / gene_name / "NetMHC"
+        gene_out.mkdir(parents=True, exist_ok=True)
+        write_summary_tsv(gene_summary_rows, str(gene_out / f"{gene_name}.tsv"))
+        write_events_tsv(gene_events, str(gene_out / f"{gene_name}.events.tsv"))
+        write_sites_tsv(gene_sites, str(gene_out / f"{gene_name}.sites.tsv"))
 
-                        # Run NetMHC on each batch
-                        for batch_file in batch_files:
-                            batch_output = batch_file.replace('.fasta', '.out')
-                            success, _, error = executor(batch_file, batch_output, args.timeout, args.alleles)
+    if args.verbose:
+        print(f"\nPipeline complete!")
 
-                            if not success:
-                                print(f"Warning: NetMHC failed for {gene_name} {mutation} batch {batch_file}: {error}")
-                                continue
-
-                            # Parse batch predictions
-                            batch_preds = parse_netmhc_output(batch_output)
-                            mut_predictions.extend(batch_preds)
-                    else:
-                        # Run NetMHC on full mutant sequence
-                        mut_output = os.path.join(gene_workdir, f"{gene_name}_{mutation}.out")
-                        success, _, error = executor(mut_fasta, mut_output, args.timeout, args.alleles)
-
-                        if not success:
-                            print(f"Warning: NetMHC failed for {gene_name} {mutation}: {error}")
-                            continue
-
-                        # Parse mutant predictions
-                        mut_predictions = parse_netmhc_output(mut_output)
-                    if args.verbose:
-                        print(f"  {mutation}: {len(mut_predictions)} predictions")
-
-                    # Add to sites output (all mutant predictions)
-                    for pred in mut_predictions:
-                        all_sites.append({
-                            'Gene': gene_name,
-                            'pkey': f"{gene_name}-{mutation}",
-                            'sequence_type': 'mut',
-                            **pred
-                        })
-
-                    # Compare WT vs MUT and classify epitope changes
-                    epitope_events = compare_wt_mut_predictions(
-                        gene_name, mutation, wt_predictions, mut_predictions, args.threshold
-                    )
-
-                    # Add events to collection
-                    all_events.extend(epitope_events)
-
-                    # Generate summary for this mutation
-                    summary = summarize_epitope_changes(gene_name, mutation, epitope_events)
-                    all_summary_rows.append(summary)
-
-            finally:
-                # Clean up temp directory
-                if not args.keep_intermediates and os.path.exists(gene_workdir):
-                    shutil.rmtree(gene_workdir, ignore_errors=True)
-
-        # Write output files
-        output_base = args.output
-        if output_base.endswith('.tsv'):
-            output_base = output_base[:-4]
-
-        summary_path = f"{output_base}.tsv"
-        events_path = f"{output_base}.events.tsv"
-        sites_path = f"{output_base}.sites.tsv"
-
-        write_summary_tsv(all_summary_rows, summary_path)
-        write_events_tsv(all_events, events_path)
-        write_sites_tsv(all_sites, sites_path)
-
-        if args.verbose:
-            print(f"\nPipeline complete!")
-            print(f"  Summary: {summary_path}")
-            print(f"  Events: {events_path}")
-            print(f"  Sites: {sites_path}")
-
-        # Cleanup temp holder if used
-        if temp_holder:
-            temp_holder.cleanup()
-
-    else:
-        print(f"Mode {args.mode} not yet implemented")
-        return 1
+    # Cleanup temp holder if used
+    if temp_holder:
+        temp_holder.cleanup()
 
     return 0
 

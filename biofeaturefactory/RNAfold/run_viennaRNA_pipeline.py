@@ -47,7 +47,18 @@ from biofeaturefactory.utils.utility import (
 R = 1.98717e-3  # kcal/mol/K
 
 
-def _task(pkey, transcript_pos, seq_ref, seq_alt, samples, tau):
+SUMMARY_HEADER = "pkey\ttranscript_pos\tddg_mfe_kcalmol\tddg_ensemble_kcalmol\td_meanE_kcalmol\tref_sdE_kcalmol\talt_sdE_kcalmol\tjsd_unpaired_bits\tdelta_central"
+POS_HEADER = "pkey\ttranscript_pos\tpos\tdelta_u\tchange_flag\tdirection\tmfe_change_flag\tmfe_change_dir"
+
+
+def _write_rnafold_tsv(path, header, rows):
+    with open(path, 'w') as f:
+        f.write(header + "\n")
+        for r in rows:
+            f.write("\t".join(map(str, r)) + "\n")
+
+
+def _task(pkey, transcript_pos, seq_ref, seq_alt, samples, tau, gene_name):
     res = compare_ref_alt(seq_ref, seq_alt, samples=samples)
     summary = (
         pkey, transcript_pos,
@@ -70,7 +81,7 @@ def _task(pkey, transcript_pos, seq_ref, seq_alt, samples, tau):
         mfe_change_flag = 1 if ref_paired != alt_paired else 0
         mfe_change_dir = 0 if not mfe_change_flag else (0 if (ref_paired == 0 and alt_paired == 1) else 1)
         rows.append((pkey, transcript_pos, pos1, rdu, change_flag, direction, mfe_change_flag, mfe_change_dir))
-    return summary, rows
+    return summary, rows, gene_name
 
 def analyze_seq(seq: str, samples: int = 1000):
     md = RNA.md()
@@ -153,25 +164,18 @@ def main():
         description="Compute ddG, JSD, and per-position deltau for variant-centered RNA folding windows using ViennaRNA."
     )
     parser.add_argument("-i", "--input", required=True, help="Input fasta sequence file/dir")
-    parser.add_argument("-o", "--output", required=True, help="Output TSV (summary table)")
+    parser.add_argument("-o", "--output", required=True, help="Output base directory")
     parser.add_argument("-w", "--window", type=int, default=151, help="Window size (odd; truncates near ends)")
     parser.add_argument("--transcript-mapping", help="Path to transcript mapping file/directory")
     parser.add_argument("--log", help="Validation log (file or dir) used to filter failed mutations")
     parser.add_argument("--samples", type=int, default=1000, help="Number of Boltzmann samples per sequence")
     parser.add_argument("--tau", type=float, default=0.05, help="Threshold for change_flag on deltau")
-    parser.add_argument("--positions-out", default=None, help="Per-position output TSV (default: <output>.positions.tsv)")
     parser.add_argument("--workers", type=int, default=None, help="Max parallel workers (processes)")
     args = parser.parse_args()
 
     if not os.path.exists(args.input):
         print(f"Error: Input file '{args.input}' does not exist", file=sys.stderr)
         sys.exit(1)
-
-    output_dir = os.path.dirname(args.output)
-    if output_dir and not os.path.exists(output_dir):
-        os.makedirs(output_dir)
-
-    positions_out = args.positions_out or (args.output + ".positions.tsv")
 
     input_path = Path(args.input)
     transcpt = Path(args.transcript_mapping) if args.transcript_mapping else None
@@ -192,15 +196,6 @@ def main():
         g = extract_gene_from_filename(str(m))
         if g:
             maps_by_gene.setdefault(g,[]).append(m)
-
-    need_sum_header = not os.path.exists(args.output) or os.path.getsize(args.output) == 0
-    need_pos_header = not os.path.exists(positions_out) or os.path.getsize(positions_out) == 0
-    if need_sum_header:
-        with open(args.output, "a") as f:
-            f.write("pkey\ttranscript_pos\tddg_mfe_kcalmol\tddg_ensemble_kcalmol\td_meanE_kcalmol\tref_sdE_kcalmol\talt_sdE_kcalmol\tjsd_unpaired_bits\tdelta_central\n")
-    if need_pos_header:
-        with open(positions_out, "a") as fpos:
-            fpos.write("pkey\ttranscript_pos\tpos\tdelta_u\tchange_flag\tdirection\tmfe_change_flag\tmfe_change_dir\n")
 
     work_items = []
 
@@ -244,22 +239,27 @@ def main():
             seq_ref = subseq(transcript_seq, pos, args.window)
             seq_alt = subseq(transcript_mutseq, pos, args.window)
 
-            work_items.append((pkey, transcript_pos, seq_ref, seq_alt, args.samples, args.tau))
+            work_items.append((pkey, transcript_pos, seq_ref, seq_alt, args.samples, args.tau, gene_name))
 
     n_tasks = len(work_items)
     if n_tasks == 0:
         return
     max_workers = args.workers or _autodetect_workers(n_tasks)
 
-
     with concurrent.futures.ProcessPoolExecutor(max_workers=max_workers) as ex:
         futures = [ex.submit(_task, *args_) for args_ in work_items]
-        with open(args.output, "a") as fs, open(positions_out, "a") as fp:
-            for fut in concurrent.futures.as_completed(futures):
-                summary, rows = fut.result()
-                fs.write("\t".join(map(str, summary)) + "\n")
-                for r in rows:
-                    fp.write("\t".join(map(str, r)) + "\n")
+        results_by_gene = {}
+        for fut in concurrent.futures.as_completed(futures):
+            summary, rows, gene_name = fut.result()
+            results_by_gene.setdefault(gene_name, {'summary': [], 'positions': []})
+            results_by_gene[gene_name]['summary'].append(summary)
+            results_by_gene[gene_name]['positions'].extend(rows)
+
+    for gname, data in results_by_gene.items():
+        out_dir = Path(args.output) / gname / "RNAfold"
+        out_dir.mkdir(parents=True, exist_ok=True)
+        _write_rnafold_tsv(out_dir / f"{gname}.rnafold.tsv", SUMMARY_HEADER, data['summary'])
+        _write_rnafold_tsv(out_dir / f"{gname}.rnafold.positions.tsv", POS_HEADER, data['positions'])
 
 if __name__ == "__main__":
     main()

@@ -12,16 +12,16 @@ AlphaFold3 (Abramson *et al.*, 2024) provides the structural prediction engine; 
 
 ## Capabilities
 
-- **Unified WT<->MUT execution** — WT predictions cached and reused across mutations in the same gene.
-- **RBP discovery** — Automatic query of POSTAR3/ENCODE eCLIP binding sites within configurable window (±50 bp).
-- **Multi-mode execution** — Local GPU, SLURM batch, or GCP cloud submission.
-- **$\Delta$-based comparison** — Per-RBP delta metrics quantify mutation-driven perturbation.
-- **Event classification** — Gained, lost, strengthened, weakened binding states.
-- **Distance-weighted impact modeling** — Effects scaled by proximity to SNV using inverse distance weighting (Shepard, 1968).
-- **Ensemble aggregation** — Parses all AF3 seed/sample outputs (mean ± std across samples) for robust confidence estimates.
-- **Interface sites table** — Per-residue pLDDT and contact data at the RNA-protein interface, with per-residue contact frequency from ensemble.
-- **Multi-window mode** — Optional placement of the mutation at multiple fractional offsets within the RNA window, aggregating across windows to reduce positional bias.
-- **Validation-aware filtering** — Exclusion of failed variants via `--validation-log`.
+- **Unified WT<->MUT execution** -- WT predictions cached and reused across mutations in the same gene.
+- **RBP discovery** -- Automatic query of POSTAR3/ENCODE eCLIP binding sites within configurable window ($\pm$50 bp).
+- **Multi-mode execution** -- Local GPU, SLURM batch, or GCP cloud submission.
+- **$\Delta$-based comparison** -- Per-RBP delta metrics quantify mutation-driven perturbation.
+- **Event classification** -- Gained, lost, strengthened, weakened binding states.
+- **Distance-weighted impact modeling** -- Effects scaled by proximity to SNV using inverse distance weighting (Shepard, 1968).
+- **Ensemble aggregation** -- Parses all AF3 seed/sample outputs (mean $\pm$ std across samples) for robust confidence estimates.
+- **Interface sites table** -- Per-residue pLDDT and contact data at the RNA-protein interface, with per-residue contact frequency from ensemble.
+- **Multi-window mode** -- Optional placement of the mutation at multiple fractional offsets within the RNA window, aggregating across windows to reduce positional bias.
+- **Validation-aware filtering** -- Exclusion of failed variants via `--validation-log`.
 
 ---
 
@@ -30,7 +30,7 @@ AlphaFold3 (Abramson *et al.*, 2024) provides the structural prediction engine; 
 - **AlphaFold3 Docker image** (local mode) or batch/cloud infrastructure
 - **NVIDIA GPU** with CUDA drivers and [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html)
 - **Docker**
-- **Python ≥ 3.8**
+- **Python $\geq$ 3.8**
 - **pysam** (for tabix queries)
 - **biofeaturefactory.utils.utility** helper functions
 
@@ -38,7 +38,7 @@ AlphaFold3 (Abramson *et al.*, 2024) provides the structural prediction engine; 
 
 ## AlphaFold3 Setup
 
-Follow the official [AlphaFold3 installation guide](https://github.com/google-deepmind/alphafold3/blob/main/docs/installation.md) through the **"Obtaining Model Parameters"** step. Stop before **"Obtaining Genetic Databases"** — this pipeline does not use AlphaFold3's genetic database pipeline. Instead, RBP binding site data is provided by the POSTAR3 database (`--postar-db`) and protein sequences/MSAs are supplied directly (`--msa-dir` or `--rbp-sequences`).
+Follow the official [AlphaFold3 installation guide](https://github.com/google-deepmind/alphafold3/blob/main/docs/installation.md) through the **"Obtaining Model Parameters"** step. Stop before **"Obtaining Genetic Databases"** -- this pipeline does not use AlphaFold3's genetic database pipeline. Instead, RBP binding site data is provided by the POSTAR3 database (`--postar-db`) and protein sequences/MSAs are supplied directly (`--msa-dir` or `--rbp-sequences`).
 
 After completing the installation guide steps (NVIDIA drivers, Docker, Container Toolkit, model weights), build the Docker image:
 
@@ -63,29 +63,28 @@ Pass the model weights directory to this pipeline via `--model-dir`. At runtime,
 | `--output` / `-o` | Output directory |
 
 One of:
-- `--rbp-sequences` — Protein sequences FASTA
-- `--msa-dir` — Directory with A3M MSA files (preferred)
+- `--rbp-sequences` -- Protein sequences FASTA
+- `--msa-dir` -- Directory with A3M MSA files (preferred)
 
 One of:
-- `--mutations` — Mutations CSV file or directory
-- `--chromosome-mapping` — Chromosome mapping CSV (provides mutations and chromosomal positions)
+- `--mutations` -- Mutations CSV file or directory
+- `--chromosome-mapping` -- Chromosome mapping CSV (provides mutations and chromosomal positions)
 
 ### Optional Arguments
 
 | Argument | Default | Description |
 |----------|---------|-------------|
-| `--prefix` | `alphafold3` | Output file prefix |
 | `--execution-mode` | `local` | Execution mode: `local`, `batch`, or `cloud` |
 | `--af3-binary` | `alphafold3` | Path to AF3 executable |
 | `--docker-image` | `alphafold3` | Docker image name for AF3 |
-| `--model-dir` | — | Path to AF3 model weights directory (required for local mode) |
+| `--model-dir` | -- | Path to AF3 model weights directory (required for local mode) |
 | `--window-size` | `101` | RNA window size around mutation (nt, odd number) |
-| `--rbp-window` | `50` | Window for RBP site lookup (±bp) |
-| `--validation-log` | — | Path to validation log for filtering failed mutations |
-| `--vcf` | — | Per-gene VCF file or directory (provides chromosome) |
-| `--chromosome-mapping` | — | Chromosome mapping CSV file or directory |
-| `--chrom` | — | Chromosome (alternative to `--vcf`) |
-| `--tx-start` | — | Transcript start position (alternative to `--chromosome-mapping`) |
+| `--rbp-window` | `50` | Window for RBP site lookup ($\pm$bp) |
+| `--validation-log` | -- | Path to validation log for filtering failed mutations |
+| `--vcf` | -- | Per-gene VCF file or directory (provides chromosome) |
+| `--chromosome-mapping` | -- | Chromosome mapping CSV file or directory |
+| `--chrom` | -- | Chromosome (alternative to `--vcf`) |
+| `--tx-start` | -- | Transcript start position (alternative to `--chromosome-mapping`) |
 | `--strand` | `+` | Strand (`+`/`-`) |
 | `--multi-window` | off | Run multiple windows per mutation (multiplies AF3 runs) |
 | `--multi-window-offsets` | `0.3,0.5,0.7` | Mutation position as fraction of window |
@@ -94,13 +93,26 @@ One of:
 
 ## Outputs
 
-### 1. Summary Table (`summary.tsv`)
+### Output Structure
+
+Output is written per gene to:
+
+```
+{output}/
+  {GENE}/
+    AlphaFold3/
+      {GENE}.tsv          -- per-mutation summary
+      {GENE}.events.tsv   -- per-RBP binding comparison
+      {GENE}.sites.tsv    -- per-residue interface data
+```
+
+### 1. Summary Table (`{GENE}.tsv`)
 
 Each row represents a single mutation with aggregated RBP binding analysis.
 
 | Column | Description | Units |
 |--------|-------------|-------|
-| **pkey** | Unique variant identifier in the format `GENE-mutation`. | — |
+| **pkey** | Unique variant identifier in the format `GENE-mutation`. | -- |
 | **Gene** | Gene symbol. | string |
 | **n_rbps_tested** | Number of RBPs evaluated for this mutation. | count |
 | **n_rbps_binding_wt** | RBPs with confident binding in WT structure. | count |
@@ -109,54 +121,54 @@ Each row represents a single mutation with aggregated RBP binding analysis.
 | **global_count_lost** | Number of RBPs with lost binding ($S_{\text{wt}} \geq \tau$, $S_{\text{mut}} < \tau$). | count |
 | **global_count_strengthened** | RBPs with strengthened binding (both bind, MUT has lower PAE). | count |
 | **global_count_weakened** | RBPs with weakened binding (both bind, MUT has higher PAE). | count |
-| **global_max_abs_delta_pae** | Maximum $\|\Delta_{\text{PAE}}\|$ across all RBPs. | $\text{Å}$ |
+| **global_max_abs_delta_pae** | Maximum $\|\Delta_{\text{PAE}}\|$ across all RBPs. | $\text{\AA}$ |
 | **top_event_rbp** | RBP with highest priority score. | string |
 | **top_event_class** | Event classification: `gained`, `lost`, `strengthened`, `weakened`, `none`. | enum |
-| **top_event_delta_pae** | $\Delta_{\text{PAE}}$ for top-ranked RBP. | $\text{Å}$ |
-| **qc_flags** | Semicolon-separated quality flags. | — |
+| **top_event_delta_pae** | $\Delta_{\text{PAE}}$ for top-ranked RBP. | $\text{\AA}$ |
+| **qc_flags** | Semicolon-separated quality flags. | -- |
 
 ---
 
-### 2. Events Table (`events.tsv`)
+### 2. Events Table (`{GENE}.events.tsv`)
 
 Each row represents a single RBP binding comparison for one mutation.
 
 | Column | Description | Units |
 |--------|-------------|-------|
-| **pkey** | Variant key (`GENE-mutation`). | — |
+| **pkey** | Variant key (`GENE-mutation`). | -- |
 | **rbp_name** | RBP gene symbol (e.g., HNRNPA1, SRSF1). | string |
-| **wt_chain_pair_pae_min** | Minimum PAE between RNA-protein chains (WT). | $\text{Å}$ |
-| **mut_chain_pair_pae_min** | Minimum PAE between RNA-protein chains (MUT). | $\text{Å}$ |
-| **delta_chain_pair_pae_min** | $\Delta_{PAE} = PAE_{mut} - PAE_{wt}$ | $\text{Å}$ |
-| **wt_interface_contacts** | Number of cross-chain contacts $< 8\,\text{Å}$ (WT). | count |
-| **mut_interface_contacts** | Number of cross-chain contacts $< 8\,\text{Å}$ (MUT). | count |
+| **wt_chain_pair_pae_min** | Minimum PAE between RNA-protein chains (WT). | $\text{\AA}$ |
+| **mut_chain_pair_pae_min** | Minimum PAE between RNA-protein chains (MUT). | $\text{\AA}$ |
+| **delta_chain_pair_pae_min** | $\Delta_{PAE} = PAE_{mut} - PAE_{wt}$ | $\text{\AA}$ |
+| **wt_interface_contacts** | Number of cross-chain contacts $< 8\,\text{\AA}$ (WT). | count |
+| **mut_interface_contacts** | Number of cross-chain contacts $< 8\,\text{\AA}$ (MUT). | count |
 | **delta_interface_contacts** | Change in interface contacts. | count |
 | **cls** | Event classification: `gained`, `lost`, `strengthened`, `weakened`, `unchanged`, `no_binding`. | enum |
 | **priority** | Ranking score: $\|\Delta_{\text{PAE}}\| \cdot \frac{1}{1+d/k}$. | numeric |
 | **n_samples_wt** | Number of AF3 samples parsed for WT (ensemble mode). | count |
 | **n_samples_mut** | Number of AF3 samples parsed for MUT (ensemble mode). | count |
-| **std_pae_wt** | Standard deviation of chain-pair PAE across WT samples. | $\text{Å}$ |
-| **std_pae_mut** | Standard deviation of chain-pair PAE across MUT samples. | $\text{Å}$ |
+| **std_pae_wt** | Standard deviation of chain-pair PAE across WT samples. | $\text{\AA}$ |
+| **std_pae_mut** | Standard deviation of chain-pair PAE across MUT samples. | $\text{\AA}$ |
 | **n_windows** | Number of windows used (multi-window mode only). | count |
 
 ---
 
-### 3. Sites Table (`sites.tsv`)
+### 3. Sites Table (`{GENE}.sites.tsv`)
 
 Each row represents a single interface residue (RNA or protein) within the AF3 prediction.
 
 | Column | Description | Units |
 |--------|-------------|-------|
-| **pkey** | Variant key (`GENE-mutation`). | — |
+| **pkey** | Variant key (`GENE-mutation`). | -- |
 | **rbp_name** | RBP identifier. | string |
 | **allele** | Allele label (`WT` or `MUT`). | string |
 | **chain** | Chain identifier (e.g., `A` for RNA, `B` for protein). | string |
 | **res_id** | Residue sequence number. | int |
 | **res_name** | Residue name (3-letter code). | string |
-| **plddt** | Per-residue pLDDT confidence score. | 0–100 |
-| **is_contact** | Binary flag: 1 if residue contacts the other chain ($< 8\,\text{Å}$). | 0/1 |
-| **min_contact_distance** | Minimum distance to nearest atom in the other chain. | $\text{Å}$ |
-| **contact_frequency** | Fraction of ensemble samples where this residue is a contact (ensemble mode). | 0–1 |
+| **plddt** | Per-residue pLDDT confidence score. | 0-100 |
+| **is_contact** | Binary flag: 1 if residue contacts the other chain ($< 8\,\text{\AA}$). | 0/1 |
+| **min_contact_distance** | Minimum distance to nearest atom in the other chain. | $\text{\AA}$ |
+| **contact_frequency** | Fraction of ensemble samples where this residue is a contact (ensemble mode). | 0-1 |
 
 ---
 
@@ -169,8 +181,8 @@ $$\Delta_{PAE} = PAE_{mut} - PAE_{wt}$$
 **What is PAE?** Predicted Aligned Error (PAE) is an AlphaFold confidence metric that estimates the positional error (in Angstroms) between two residues after optimal superposition. For inter-chain predictions, PAE quantifies how confidently AF3 predicts the relative positioning of the RNA and protein chains.
 
 **Interpretation:**
-- **Low PAE (< $10\,\text{Å}$)**: High confidence that the two chains interact in the predicted orientation
-- **High PAE (> $20\,\text{Å}$)**: Low confidence; chains may not interact or their relative position is uncertain
+- **Low PAE (< $10\,\text{\AA}$)**: High confidence that the two chains interact in the predicted orientation
+- **High PAE (> $20\,\text{\AA}$)**: Low confidence; chains may not interact or their relative position is uncertain
 
 **Delta interpretation:**
 - **Positive $\Delta$** -> Weaker binding in mutant (PAE increased, meaning higher uncertainty)
@@ -184,7 +196,7 @@ $$\Delta_{PAE} = PAE_{mut} - PAE_{wt}$$
 $$P = |\Delta_{PAE}| \times \frac{1}{1 + d/k}$$
 
 **Variables:**
-- $|\Delta_{PAE}|$ = absolute magnitude of PAE change ($\text{Å}$)
+- $|\Delta_{PAE}|$ = absolute magnitude of PAE change ($\text{\AA}$)
 - $d$ = genomic distance (bp) between the SNV position and the RBP binding site center
 - $k$ = decay constant (default: 50 bp)
 
@@ -203,7 +215,7 @@ This prioritizes RBPs whose binding sites overlap or are proximal to the mutatio
 
 ### Interface Contacts
 
-$$N_{contacts} = \sum_{i \in RNA} \sum_{j \in protein} \mathbf{1}[d_{ij} < 8 \text{ Å}]$$
+$$N_{contacts} = \sum_{i \in RNA} \sum_{j \in protein} \mathbf{1}[d_{ij} < 8 \text{ $\text{\AA}$}]$$
 
 **Variables:**
 - $i$ = index over RNA heavy atoms
@@ -211,7 +223,7 @@ $$N_{contacts} = \sum_{i \in RNA} \sum_{j \in protein} \mathbf{1}[d_{ij} < 8 \te
 - $d_{ij}$ = Euclidean distance between atoms $i$ and $j$
 - $\mathbf{1}[\cdot]$ = indicator function (returns 1 if condition is true, 0 otherwise)
 
-**Interpretation:** Counts atom pairs where an RNA atom is within $8\,\text{Å}$ of a protein atom. Higher contact counts suggest more extensive binding interfaces. The $8\,\text{Å}$ threshold captures van der Waals contacts, hydrogen bonds, and electrostatic interactions.
+**Interpretation:** Counts atom pairs where an RNA atom is within $8\,\text{\AA}$ of a protein atom. Higher contact counts suggest more extensive binding interfaces. The $8\,\text{\AA}$ threshold captures van der Waals contacts, hydrogen bonds, and electrostatic interactions.
 
 ---
 
@@ -220,10 +232,10 @@ $$N_{contacts} = \sum_{i \in RNA} \sum_{j \in protein} \mathbf{1}[d_{ij} < 8 \te
 A binding event is classified as **confident** when ALL of the following conditions are met:
 
 1. **Sufficient contacts**: $N_{contacts} \geq 3$
-   - At least 3 RNA-protein atom pairs within $8\,\text{Å}$
+   - At least 3 RNA-protein atom pairs within $8\,\text{\AA}$
 
-2. **Low inter-chain uncertainty**: $PAE_{min} \leq 10\,\text{Å}$
-   - The minimum PAE between any RNA-protein residue pair is below $10\,\text{Å}$
+2. **Low inter-chain uncertainty**: $PAE_{min} \leq 10\,\text{\AA}$
+   - The minimum PAE between any RNA-protein residue pair is below $10\,\text{\AA}$
 
 3. **Adequate local structure quality**: $pLDDT_{RNA} \geq 50$ OR $pLDDT_{protein} \geq 50$
    - At least one chain at the interface has confident per-residue structure (pLDDT scale: 0-100, where >70 is high confidence)
@@ -246,7 +258,7 @@ This three-part filter excludes predictions where AF3 has low confidence in eith
 | **weakened** | Both bind confidently, $\Delta_{\text{PAE}} > +2.0$ |
 | **unchanged** | Both bind confidently, $\|\Delta_{\text{PAE}}\| \leq 2.0$ |
 | **no_binding** | Neither WT nor MUT has confident binding |
-| **incomplete** | WT or MUT prediction missing — no comparison possible |
+| **incomplete** | WT or MUT prediction missing -- no comparison possible |
 
 ---
 
@@ -263,7 +275,6 @@ python alphafold3_pipeline.py \
     --rbp-sequences rbp_sequences.fasta \
     --model-dir /path/to/af3_weights \
     --output af3_results/ \
-    --prefix alphafold3 \
     --execution-mode local
 ```
 
@@ -321,7 +332,7 @@ AF3 produces multiple samples per seed (typically 4 samples per seed). The pipel
 **Aggregated fields:**
 - **Mean** of chain-pair PAE, interface contacts, pLDDT (RNA and protein)
 - **Standard deviation** (population stdev) of each metric across samples
-- **Contact frequency** — per-residue fraction of samples where that residue appears as an interface contact (reported in the sites table)
+- **Contact frequency** -- per-residue fraction of samples where that residue appears as an interface contact (reported in the sites table)
 
 When only a single sample is available (e.g., top-ranked model only), the pipeline falls back to single-model behavior with no standard deviation fields.
 
@@ -331,16 +342,16 @@ The ensemble columns in `events.tsv` (`n_samples_wt`, `n_samples_mut`, `std_pae_
 
 ## Multi-Window Mode
 
-By default, the mutation is centered in the RNA window. The `--multi-window` flag generates multiple windows where the mutation is placed at different fractional offsets within the window (default: 0.3, 0.5, 0.7). This reduces positional bias — AF3 predictions can be sensitive to where the mutation falls relative to window boundaries.
+By default, the mutation is centered in the RNA window. The `--multi-window` flag generates multiple windows where the mutation is placed at different fractional offsets within the window (default: 0.3, 0.5, 0.7). This reduces positional bias -- AF3 predictions can be sensitive to where the mutation falls relative to window boundaries.
 
 **Behavior:**
 - Each offset produces a distinct WT/MUT window pair
 - Duplicate windows (possible near transcript ends) are deduplicated
 - AF3 is run separately for each window (jobs suffixed `_w0`, `_w1`, etc.)
-- Metrics are aggregated across windows (mean ± std), reported identically to ensemble aggregation
+- Metrics are aggregated across windows (mean $\pm$ std), reported identically to ensemble aggregation
 - The `n_windows` column in `events.tsv` records how many windows were used
 
-**Compute cost:** With 3 offsets and N RBPs, multi-window mode runs 6×N AF3 jobs per mutation (3 windows × 2 alleles × N RBPs). The flag is off by default.
+**Compute cost:** With 3 offsets and N RBPs, multi-window mode runs 6xN AF3 jobs per mutation (3 windows x 2 alleles x N RBPs). The flag is off by default.
 
 ---
 
@@ -358,11 +369,11 @@ By default, the mutation is centered in the RNA window. The `--multi-window` fla
 | Parameter | Default | Description |
 |-----------|---------|-------------|
 | `min_contacts` | 3 | Minimum interface contacts for confident binding |
-| `max_pae_binding` | 10.0 | Maximum PAE for confident binding ($\text{Å}$) |
+| `max_pae_binding` | 10.0 | Maximum PAE for confident binding ($\text{\AA}$) |
 | `min_plddt_interface` | 50.0 | Minimum pLDDT at interface |
-| `delta_pae_significant` | 2.0 | $\Delta$ threshold for strengthened/weakened classification ($\text{Å}$) |
+| `delta_pae_significant` | 2.0 | $\Delta$ threshold for strengthened/weakened classification ($\text{\AA}$) |
 | `delta_contacts_significant` | 2 | Contact change threshold for classification |
-| `contact_threshold` | 8.0 | Distance threshold for interface contacts ($\text{Å}$) |
+| `contact_threshold` | 8.0 | Distance threshold for interface contacts ($\text{\AA}$) |
 
 ---
 
@@ -402,14 +413,14 @@ By default, the mutation is centered in the RNA window. The `--multi-window` fla
 
 ```
 alphafold3/
-├── alphafold3_pipeline.py      # Main entry point
-├── README.md
-└── bin/
-    ├── af3_runner.py           # AF3 execution (local/batch/cloud)
-    ├── af3_parser.py           # Parse mmCIF + JSON outputs
-    ├── rbp_database.py         # POSTAR3 tabix query interface
-    ├── rbp_sequence_mapper.py  # RBP name -> UniProt -> sequence
-    └── binding_metrics.py      # Delta computation and classification
+|-- alphafold3_pipeline.py      # Main entry point
+|-- README.md
+`-- bin/
+    |-- af3_runner.py           # AF3 execution (local/batch/cloud)
+    |-- af3_parser.py           # Parse mmCIF + JSON outputs
+    |-- rbp_database.py         # POSTAR3 tabix query interface
+    |-- rbp_sequence_mapper.py  # RBP name -> UniProt -> sequence
+    `-- binding_metrics.py      # Delta computation and classification
 ```
 
 ## Module Reference
@@ -427,11 +438,11 @@ alphafold3/
 
 ## References
 
-- Abramson J. *et al.* (2024) Accurate structure prediction of biomolecular interactions with AlphaFold 3. **Nature**, 630:493–500.
-- Jumper J. *et al.* (2021) Highly accurate protein structure prediction with AlphaFold. **Nature**, 596:583–589.
-- Shepard D. (1968) A two-dimensional interpolation function for irregularly-spaced data. **Proceedings of the 23rd ACM National Conference**, pp. 517–524.
-- Zhao W. *et al.* (2022) POSTAR3: an updated platform for exploring post-transcriptional regulation coordinated by RNA-binding proteins. **Nucleic Acids Research**, 50:D483–D492.
-- Van Nostrand E.L. *et al.* (2020) A large-scale binding and functional map of human RNA-binding proteins. **Nature**, 583:711–719.
+- Abramson J. *et al.* (2024) Accurate structure prediction of biomolecular interactions with AlphaFold 3. **Nature**, 630:493-500.
+- Jumper J. *et al.* (2021) Highly accurate protein structure prediction with AlphaFold. **Nature**, 596:583-589.
+- Shepard D. (1968) A two-dimensional interpolation function for irregularly-spaced data. **Proceedings of the 23rd ACM National Conference**, pp. 517-524.
+- Zhao W. *et al.* (2022) POSTAR3: an updated platform for exploring post-transcriptional regulation coordinated by RNA-binding proteins. **Nucleic Acids Research**, 50:D483-D492.
+- Van Nostrand E.L. *et al.* (2020) A large-scale binding and functional map of human RNA-binding proteins. **Nature**, 583:711-719.
 
 ---
 

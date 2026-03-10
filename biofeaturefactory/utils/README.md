@@ -186,7 +186,7 @@ python3 msa-generation-pipeline.py \
 
 | Flag | Required | Description |
 |------|----------|-------------|
-| `--query` | Yes | Query FASTA — protein or nucleotide (auto-detected; nucleotide is translated before search) |
+| `--query` | Yes | Query FASTA -- protein or nucleotide (auto-detected; nucleotide is translated before search) |
 | `--database` | Yes | Sequence database (e.g., UniRef90) |
 | `--jackhmmer-binary` | Yes | Path to jackhmmer executable |
 | `--output` | Yes | Output MSA file (A2M format) |
@@ -274,8 +274,8 @@ Central utility library used by all BioFeatureFactory pipelines. Not a standalon
 
 | Function | Purpose |
 |----------|---------|
-| `detect_alphabet(sequence)` | Returns `'nucleotide'` or `'protein'` based on character composition ($\geq 90\%$ IUPAC nucleotide chars → nucleotide) |
-| `prepare_protein_query(query_fasta)` | Returns a protein FASTA path suitable for jackhmmer. Translates nucleotide input automatically; passes protein input through unchanged. Returns `(path, tmp_path_or_None)` — caller deletes tmp if not None. |
+| `detect_alphabet(sequence)` | Returns `'nucleotide'` or `'protein'` based on character composition ($\geq 90\%$ IUPAC nucleotide chars -> nucleotide) |
+| `prepare_protein_query(query_fasta)` | Returns a protein FASTA path suitable for jackhmmer. Translates nucleotide input automatically; passes protein input through unchanged. Returns `(path, tmp_path_or_None)` -- caller deletes tmp if not None. |
 | `stockholm_to_a2m` | Converts Stockholm MSA to A2M format |
 | `filter_msa_by_gaps` | Filters gappy sequences and columns |
 | `compute_neff` | Effective sequence count via clustering |

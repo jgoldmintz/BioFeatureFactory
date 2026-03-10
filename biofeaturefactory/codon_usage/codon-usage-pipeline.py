@@ -213,18 +213,19 @@ def process_mutant_fasta(fasta_path):
     return results
 
 
-def process_directory(fasta_dir, mutations_dir=None, is_mutant=False, validation_log=None):
+def process_directory(fasta_dir, mutations_dir=None, is_mutant=False, validation_log=None, output_dir=None):
     """
-    Process all FASTA files in a directory.
+    Process all FASTA files in a directory, writing per-gene output files.
 
     Args:
         fasta_dir: Directory containing FASTA files
         mutations_dir: Directory containing mutation CSV files (for WT mode)
         is_mutant: If True, mutations are in sequence names; otherwise use CSV files
         validation_log: Optional path to validation log
+        output_dir: Base output directory for per-gene nested output
 
     Returns:
-        list: Combined results from all files
+        list: Combined results from all files (for summary printing)
     """
     results = []
     fasta_extensions = ['*.fasta', '*.fa', '*.fna']
@@ -238,11 +239,11 @@ def process_directory(fasta_dir, mutations_dir=None, is_mutant=False, validation
     for fasta_file in sorted(fasta_files):
         print(f"Processing {fasta_file}...")
 
+        gene = extract_gene_from_filename(str(fasta_file))
+
         if is_mutant:
             file_results = process_mutant_fasta(str(fasta_file))
         else:
-            # Find matching mutations file
-            gene = extract_gene_from_filename(str(fasta_file))
             mutations_file = None
 
             if mutations_dir:
@@ -261,8 +262,14 @@ def process_directory(fasta_dir, mutations_dir=None, is_mutant=False, validation
                 validation_log
             )
 
-        results.extend(file_results)
         print(f"  Processed {len(file_results)} mutations")
+
+        if output_dir and file_results:
+            out_dir = Path(output_dir) / gene / "CodonUsage"
+            out_dir.mkdir(parents=True, exist_ok=True)
+            write_output(file_results, str(out_dir / f"{gene}.codon_usage.tsv"))
+
+        results.extend(file_results)
 
     return results
 
@@ -287,14 +294,11 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  # Process WT FASTA files with mutation CSVs
-  python codon-usage-pipeline.py --fasta-dir /path/to/fastas --mutations-dir /path/to/csvs --output output.tsv
-
-  # Process mutant FASTA files (mutations in sequence names)
-  python codon-usage-pipeline.py --fasta-dir /path/to/mutant_fastas --is-mutant --output output.tsv
-
   # Single file processing
-  python codon-usage-pipeline.py --fasta /path/to/gene.fasta --mutations /path/to/mutations.csv --output output.tsv
+  python codon-usage-pipeline.py --fasta /path/to/gene.fasta --mutations /path/to/mutations.csv --output results/
+
+  # Directory processing
+  python codon-usage-pipeline.py --fasta /path/to/fastas --mutations /path/to/mutations --output results/
 
 Metrics:
   RSCU       - Relative Synonymous Codon Usage (gene-specific)
@@ -309,48 +313,42 @@ Metrics:
     )
 
     # Input options
-    input_group = parser.add_mutually_exclusive_group(required=True)
-    input_group.add_argument('--fasta-dir', help='Directory containing FASTA files')
-    input_group.add_argument('--fasta', help='Single FASTA file')
-
-    parser.add_argument('--mutations-dir', help='Directory containing mutation CSV files (for WT mode)')
-    parser.add_argument('--mutations', help='Single mutations CSV file')
-    parser.add_argument('--is-mutant', action='store_true',
-                        help='Mutations are encoded in sequence names (GENE-MUTATION format)')
+    parser.add_argument('--fasta', required=True, help='FASTA file or directory of FASTA files')
+    parser.add_argument('--mutations', help='Mutations CSV file or directory of CSV files')
     parser.add_argument('--validation-log', help='Validation log for filtering failed mutations')
 
     # Output options
-    parser.add_argument('--output', '-o', required=True, help='Output TSV file path')
+    parser.add_argument('--output', '-o', required=True, help='Output base directory')
 
     args = parser.parse_args()
 
     # Validate arguments
-    if not args.is_mutant:
-        if args.fasta_dir and not args.mutations_dir:
-            parser.error("--mutations-dir required when using --fasta-dir without --is-mutant")
-        if args.fasta and not args.mutations:
-            parser.error("--mutations required when using --fasta without --is-mutant")
+    if not Path(args.fasta).is_dir() and not args.mutations:
+        parser.error("--mutations required when using a single FASTA file")
+    if Path(args.fasta).is_dir() and not args.mutations:
+        parser.error("--mutations required when using a FASTA directory")
 
     # Process files
-    if args.fasta_dir:
+    if Path(args.fasta).is_dir():
         results = process_directory(
-            args.fasta_dir,
-            args.mutations_dir,
-            args.is_mutant,
-            args.validation_log
+            args.fasta,
+            args.mutations,
+            False,
+            args.validation_log,
+            output_dir=args.output,
         )
     else:
-        if args.is_mutant:
-            results = process_mutant_fasta(args.fasta)
-        else:
-            results = process_fasta_with_mutations(
-                args.fasta,
-                args.mutations,
-                args.validation_log
-            )
+        results = process_fasta_with_mutations(
+            args.fasta,
+            args.mutations,
+            args.validation_log
+        )
 
-    # Write output
-    write_output(results, args.output)
+        # Write per-gene output for single-file mode
+        gene = extract_gene_from_filename(args.fasta)
+        out_dir = Path(args.output) / gene / "CodonUsage"
+        out_dir.mkdir(parents=True, exist_ok=True)
+        write_output(results, str(out_dir / f"{gene}.codon_usage.tsv"))
 
     # Summary
     if results:

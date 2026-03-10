@@ -74,7 +74,18 @@ Adjacent codon pairs also show non-random usage patterns:
 
 ## Output Format
 
-### Main Output (`{gene}.codon_usage.tsv`)
+### Output Structure
+
+Output is written to:
+
+```
+{output}/
+  {GENE}/
+    CodonUsage/
+      {GENE}.codon_usage.tsv
+```
+
+### Main Output (`{GENE}.codon_usage.tsv`)
 
 | Column | Description | Example |
 |--------|-------------|---------|
@@ -111,24 +122,17 @@ Adjacent codon pairs also show non-random usage patterns:
 python codon-usage-pipeline.py \
     --fasta /path/to/BRCA1.fasta \
     --mutations /path/to/BRCA1_mutations.csv \
-    --output BRCA1.codon_usage.tsv
+    --output results/
+# Writes: results/BRCA1/CodonUsage/BRCA1.codon_usage.tsv
 ```
 
 ### Directory Processing
 ```bash
 python codon-usage-pipeline.py \
-    --fasta-dir /path/to/fastas/ \
-    --mutations-dir /path/to/mutations/ \
-    --output combined.codon_usage.tsv
-```
-
-### Mutant FASTA Mode
-For FASTA files where mutations are encoded in sequence names:
-```bash
-python codon-usage-pipeline.py \
-    --fasta-dir /path/to/mutant_fastas/ \
-    --is-mutant \
-    --output results.tsv
+    --fasta /path/to/fastas/ \
+    --mutations /path/to/mutations/ \
+    --output results/
+# Writes per gene: results/{GENE}/CodonUsage/{GENE}.codon_usage.tsv
 ```
 
 ---

@@ -300,7 +300,7 @@ process run_spliceai {
 }
 
   process parse_results {
-      publishDir "${params.output_dir ?: '.'}", mode: 'copy'
+      publishDir "${params.output_dir ?: '.'}/${gene_id}/SpliceAI", mode: 'copy'
       stageInMode 'copy'
       scratch true
       tag { gene_id }
@@ -314,7 +314,7 @@ process run_spliceai {
       val validation_log
 
       output:
-      tuple val(gene_id), path("${gene_id}_spliceai_results.tsv")
+      tuple val(gene_id), path("${gene_id}.tsv")
 
       script:
       """
@@ -331,7 +331,7 @@ process run_spliceai {
       echo "[parse_results] chrom.csv lines: \$(wc -l < stage/chrom.csv) || true"
 
       ARGS=( --input stage/in.vcf
-             --output "${gene_id}_spliceai_results.tsv"
+             --output "${gene_id}.tsv"
              --transcript-mapping stage/transcript.csv
              --chromosome-mapping stage/chrom.csv
              --threshold ${splice_threshold} )
@@ -342,6 +342,6 @@ process run_spliceai {
 
       python3 ${projectDir}/spliceai-parser.py "\${ARGS[@]}"
 
-      echo "[parse_results] out.tsv lines: \$(wc -l < "${gene_id}_spliceai_results.tsv") || true"
+      echo "[parse_results] out.tsv lines: \$(wc -l < "${gene_id}.tsv") || true"
       """
   }

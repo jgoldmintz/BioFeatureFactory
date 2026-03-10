@@ -61,7 +61,6 @@ from biofeaturefactory.utils.utility import (
     infer_aamutation_from_nt,
     build_mutant_sequences_for_gene,
     synthesize_gene_fastas,
-    resolve_output_base,
 )
 
 
@@ -2434,8 +2433,6 @@ def run_full_pipeline_mode(args, failure_map, parser):
     if not args.mapping_dir:
         parser.error("For full-pipeline mode: --mapping-dir is REQUIRED (directory containing mutation mapping CSV files)")
 
-    args.output = resolve_output_base(args.output, args.input, "netnglyc")
-
     temp_output_dir = tempfile.mkdtemp(prefix="netnglyc_outputs_")
     temp_sequence_dir = tempfile.mkdtemp(prefix="netnglyc_sequences_")
     wt_temp_holder = None
@@ -2504,15 +2501,20 @@ def run_full_pipeline_mode(args, failure_map, parser):
 
             print("\nBuilding NetNGlyc ensemble outputs...")
             signalp_cache = load_signalp_cache(args.cache_dir)
-            processor.build_netnglyc_ensemble(
-                wt_dirs=[str(wt_outputs_dir)],
-                mut_dirs=[str(mut_outputs_dir)],
-                mapping_lookup=mapping_lookup,
-                threshold=args.threshold,
-                summary_path=args.output,
-                signalp_cache=signalp_cache,
-            )
-            print(f"NetNGlyc ensemble outputs written to {args.output}")
+            for gene_upper in sorted(mapping_lookup.keys()):
+                gene_mapping = {gene_upper: mapping_lookup[gene_upper]}
+                gene_out = Path(args.output) / gene_upper / "NetNglyc"
+                gene_out.mkdir(parents=True, exist_ok=True)
+                gene_summary_path = str(gene_out / f"{gene_upper}.tsv")
+                processor.build_netnglyc_ensemble(
+                    wt_dirs=[str(wt_outputs_dir)],
+                    mut_dirs=[str(mut_outputs_dir)],
+                    mapping_lookup=gene_mapping,
+                    threshold=args.threshold,
+                    summary_path=gene_summary_path,
+                    signalp_cache=signalp_cache,
+                )
+                print(f"NetNGlyc ensemble outputs written for {gene_upper} to {gene_out}")
 
     finally:
         if wt_temp_holder:
@@ -2535,15 +2537,15 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter
     )
     parser.add_argument("input", nargs='?', help="Input FASTA file or directory (required for process/full-pipeline modes)")
-    parser.add_argument("output", nargs='?', help="Output file or directory (required for all modes except --test/--clear-cache)")
+    parser.add_argument("output", nargs='?', help="Output base directory (writes {GENE}/NetNglyc/{GENE}.tsv, .events.tsv, .sites.tsv)")
     parser.add_argument("--workers", type=int, default=4, help="Number of parallel workers (used with --processing-mode parallel, default: 4)")
     parser.add_argument("--cache-dir", help="Custom cache directory for SignalP/NetNGlyc results")
     parser.add_argument("--test", action="store_true",
                         help="Run test with ABCB1 sequence (no other args required)")
     parser.add_argument("--clear-cache", action="store_true",
                         help="Clear all cached results and exit (no other args required)")
-    parser.add_argument("--mode", choices=["process", "parse", "full-pipeline"], default="process",
-                        help="Processing mode: 'process' (run NetNGlyc only), 'parse' (parse existing outputs), 'full-pipeline' (process + parse)")
+    parser.add_argument("--mode", choices=["full-pipeline"], default="full-pipeline",
+                        help="Processing mode (only full-pipeline is supported)")
     parser.add_argument("--mapping-dir",
                         help="Directory containing mutation mapping CSV files (REQUIRED for parsing modes)")
     parser.add_argument("--threshold", type=float, default=0.5,
@@ -2620,87 +2622,7 @@ def main():
         finally:
             shutil.rmtree(test_root, ignore_errors=True)
 
-    # Handle parsing mode
-    if args.mode == "parse":
-        if not args.input or not args.output:
-            parser.error("For parse mode: both input (NetNGlyc output directory) and output (TSV file) are required")
-
-        # Validate parsing requirements
-        if not args.mapping_dir:
-            parser.error("For parse mode: --mapping-dir is REQUIRED (directory containing mutation mapping CSV files)")
-
-        args.output = resolve_output_base(args.output, args.input, "netnglyc")
-
-        mapping_lookup = discover_mapping_files(args.mapping_dir)
-        processor = RobustDockerNetNGlyc(
-            use_signalp=False,
-            cache_dir=args.cache_dir,
-            docker_timeout=args.batch_timeout,
-            verbose=args.verbose,
-            native_bin=args.native_netnglyc_bin,
-        )
-        input_path = Path(args.input)
-        wt_dirs = []
-        mut_dirs = []
-        if (input_path / "wt").exists():
-            wt_dirs.append(str(input_path / "wt"))
-        wt_dirs.append(str(input_path))
-        if (input_path / "mut").exists():
-            mut_dirs.append(str(input_path / "mut"))
-        mut_dirs.append(str(input_path))
-
-        signalp_cache = load_signalp_cache(args.cache_dir)
-        processor.build_netnglyc_ensemble(
-            wt_dirs=wt_dirs,
-            mut_dirs=mut_dirs,
-            mapping_lookup=mapping_lookup,
-            threshold=args.threshold,
-            summary_path=args.output,
-            signalp_cache=signalp_cache,
-        )
-        print(f"Wrote NetNGlyc ensemble summary to {args.output}")
-        return 0
-        
-    elif args.mode == "full-pipeline":
-        return run_full_pipeline_mode(args, failure_map, parser)
-
-    # Normal processing mode - validate required arguments  
-    if not args.input or not args.output:
-        parser.error("For process mode: both input (FASTA file/directory) and output (NetNGlyc output file/directory) are required")
-
-    with RobustDockerNetNGlyc(
-            use_signalp=True,
-            max_workers=args.workers,
-            cache_dir=args.cache_dir,
-            docker_timeout=args.batch_timeout,
-            verbose=args.verbose,
-            native_bin=args.native_netnglyc_bin,
-    ) as processor:
-
-        if os.path.isfile(args.input):
-            # Single file
-            success, output, error = processor.process_single_fasta(
-                args.input, args.output, 0
-            )
-            if success:
-                print(f"Successfully processed {args.input}")
-            else:
-                print(f"Failed: {error}")
-                sys.exit(1)
-        else:
-            # Directory processing with intelligent mode detection
-            results = processor.process_directory(args.input, args.output)
-            print(f"\n=== Processing Summary ===")
-            print(f"Total files: {results['total']}")
-            print(f"Successful: {results['success']}")
-            print(f"Failed: {results['failed']}")
-
-            if results['errors']:
-                print("\nErrors:")
-                for err in results['errors'][:5]:
-                    print(f"  {err['file']}: {err['error']}")
-
-    return 0
+    return run_full_pipeline_mode(args, failure_map, parser)
 
 
 if __name__ == "__main__":

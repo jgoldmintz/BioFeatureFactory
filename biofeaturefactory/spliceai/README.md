@@ -147,6 +147,8 @@ python spliceai-pipeline-controller.py \
 
 ## Output Format
 
+Results are written to `{output_dir}/{GENE}/SpliceAI/{GENE}.tsv`.
+
 ### SpliceAI Results TSV
 Tab-delimited file with one row per variant per isoform block.
 
@@ -160,17 +162,17 @@ Tab-delimited file with one row per variant per isoform block.
 | `alt` | Alternate allele | A/C/G/T |
 | `allele` | Allele designation from SpliceAI (typically matches ref) | A/C/G/T |
 | `block_label` | Isoform block identifier. First four unique score vectors labeled `A`, `B`, `C`, `D`; additional or duplicate score vectors labeled `dup`. Highlights isoform-specific splicing differences while collapsing redundant predictions. | A/B/C/D/dup |
-| `ds_ag` | Delta score for acceptor gain. Probability that the variant creates a new acceptor splice site. | float (0–1) |
-| `ds_al` | Delta score for acceptor loss. Probability that the variant disrupts an existing acceptor splice site. | float (0–1) |
-| `ds_dg` | Delta score for donor gain. Probability that the variant creates a new donor splice site. | float (0–1) |
-| `ds_dl` | Delta score for donor loss. Probability that the variant disrupts an existing donor splice site. | float (0–1) |
+| `ds_ag` | Delta score for acceptor gain. Probability that the variant creates a new acceptor splice site. | float (0-1) |
+| `ds_al` | Delta score for acceptor loss. Probability that the variant disrupts an existing acceptor splice site. | float (0-1) |
+| `ds_dg` | Delta score for donor gain. Probability that the variant creates a new donor splice site. | float (0-1) |
+| `ds_dl` | Delta score for donor loss. Probability that the variant disrupts an existing donor splice site. | float (0-1) |
 | `dp_ag` | Distance to predicted acceptor gain site (negative = upstream, positive = downstream). 0 if no acceptor gain predicted. | integer (nt) |
 | `dp_al` | Distance to predicted acceptor loss site (negative = upstream, positive = downstream). 0 if no acceptor loss predicted. | integer (nt) |
 | `dp_dg` | Distance to predicted donor gain site (negative = upstream, positive = downstream). 0 if no donor gain predicted. | integer (nt) |
 | `dp_dl` | Distance to predicted donor loss site (negative = upstream, positive = downstream). 0 if no donor loss predicted. | integer (nt) |
-| `max_delta_score` | Maximum delta score across all four categories (ds_ag, ds_al, ds_dg, ds_dl). Useful for ranking variant impact. | float (0–1) |
+| `max_delta_score` | Maximum delta score across all four categories (ds_ag, ds_al, ds_dg, ds_dl). Useful for ranking variant impact. | float (0-1) |
 
-**Note on `block_label`**: SpliceAI evaluates variants across transcript isoforms and emits one "transcript block" per isoform in the VCF INFO field. The parser preserves this order, labeling the first four unique score vectors as `A`, `B`, `C`, and `D`. Additional isoforms—or isoforms whose predictions match an earlier block exactly—are labeled `dup`. This highlights isoform-specific splicing differences while collapsing redundant outputs. For example, variant `AR-G1130A` may appear twice: block `A` captures the first AR isoform, whereas block `dup` represents other isoforms with identical scores.
+**Note on `block_label`**: SpliceAI evaluates variants across transcript isoforms and emits one "transcript block" per isoform in the VCF INFO field. The parser preserves this order, labeling the first four unique score vectors as `A`, `B`, `C`, and `D`. Additional isoforms--or isoforms whose predictions match an earlier block exactly--are labeled `dup`. This highlights isoform-specific splicing differences while collapsing redundant outputs. For example, variant `AR-G1130A` may appear twice: block `A` captures the first AR isoform, whereas block `dup` represents other isoforms with identical scores.
 
 ## Advanced Usage
 
@@ -198,7 +200,7 @@ python3 utils/vcf_converter.py \
 ```bash
 python3 spliceai-parser.py \
     --input ABCB1.spliceai.vcf \
-    --output ABCB1_results.tsv \
+    --output ABCB1.tsv \
     --chromosome-mapping chromosome_mapping/combined_ABCB1.csv \
     --transcript-mapping transcript_mapping/combined_ABCB1.csv \
     --threshold 0.1 \
@@ -232,11 +234,12 @@ The tracker is observational only; stop it with `Ctrl+C` when running manually. 
 python3 annot_to_spliceai.py annotation.gtf --chromosome-format ncbi -o annotation_fixed.txt
 ```
 
-#### TensorFlow Crashes (Exit 134)
+#### TensorFlow / NumPy ABI Crash
 ```bash
-# Check TensorFlow version compatibility
-conda list tensorflow
-# SpliceAI works best with TensorFlow 1.x versions
+# Symptom: ImportError: numpy.core.umath failed to import
+# Cause: pip-installed numpy is ABI-incompatible with conda-forge tensorflow/ml_dtypes
+# Fix: downgrade numpy so it matches the conda-forge builds
+pip install "numpy<2"
 # Set --maxforks 1 to run SpliceAI tasks sequentially if crashes persist
 ```
 

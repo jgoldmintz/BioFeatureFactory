@@ -7,7 +7,7 @@
   | Component | Notes |
   |-----------|-------|
   | NetPhos 3.1 + APE | Download from [DTU Health Tech](https://services.healthtech.dtu.dk/services/NetPhos-3.1/) (academic license). Requires `tcsh`. Set path via `--native-ape-path` or `NETPHOS_APE_PATH`/`NETPHOS_HOME` env var. |
-  | Python ≥3.9 | With dependencies in `../utils/`. |
+  | Python $\geq$3.9 | With dependencies in `../utils/`. |
   | Mutation mapping CSVs | `{GENE}`-specific CSVs used for pkey generation (`mutations/combined/aa/` style). |
   | FASTA inputs | WT and/or mutant AA FASTAs, one gene per file. Extensions: `.fasta`, `.fa`, `.fas`, `.fna`. |
 
@@ -27,7 +27,8 @@
   python3 netphos-pipeline.py --mode full-pipeline \
       --mapping-dir mutations/combined/aa/ \
       wt/aaseq/ \
-      results.tsv
+      results/
+  # Writes per gene: results/{GENE}/NetPhos/{GENE}.{tsv,events.tsv,sites.tsv}
 ```
 ```bash
   # Mutant run with validation filtering
@@ -36,14 +37,15 @@
       --log validation.log \
       --mapping-dir mutations/combined/aa/ \
       mut/aaseq/ \
-      mutant_results.tsv
+      results/
+  # Writes per gene: results/{GENE}/NetPhos/{GENE}.{tsv,events.tsv,sites.tsv}
 ```
 ```bash
   # Parse existing NetPhos outputs
   python3 netphos-pipeline.py --mode parse-only \
       --mapping-dir mutations/combined/aa/ \
       netphos_outputs/ \
-      parsed.tsv
+      results/
 ```
 ```bash
   # Run NetPhos only (no parsing)
@@ -60,21 +62,31 @@
 
   ## 5. Processing Controls
 
-  - `--mode {full-pipeline, netphos-only, parse-only}` — processing mode
-  - `--batch-size N` and `--timeout SEC` — tune long FASTA runs. Batch strategy is chosen automatically by sequence count: 1 seq → single run; 2-10 → batch of 10; 11-100 → batch of 25; >100 → batch of 50.
-  - `--threshold FLOAT` — filter by score (default: 0.5). Sites with score below threshold are excluded.
-  - `--yes-only` — sets `--threshold` to 0.0 (disables score filtering entirely); does not filter for YES-answered predictions.
-  - `--no-cache` / `--clear-cache` — manage `~/.netphos_cache`.
-  - `--is-mutant` — toggles mutant vs WT parsing logic (affects amino-acid matching, validation filtering).
-  - `--wt-header HEADER` — FASTA header used to identify the WT sequence (default: `ORF`).
-  - `--keep-intermediates` — retain intermediate files for debugging.
-  - `--verbose` — enable verbose output.
+  - `--mode {full-pipeline, netphos-only, parse-only}` -- processing mode
+  - `--batch-size N` and `--timeout SEC` -- tune long FASTA runs. Batch strategy is chosen automatically by sequence count: 1 seq -> single run; 2-10 -> batch of 10; 11-100 -> batch of 25; >100 -> batch of 50.
+  - `--threshold FLOAT` -- filter by score (default: 0.5). Sites with score below threshold are excluded.
+  - `--yes-only` -- sets `--threshold` to 0.0 (disables score filtering entirely); does not filter for YES-answered predictions.
+  - `--no-cache` / `--clear-cache` -- manage `~/.netphos_cache`.
+  - `--is-mutant` -- toggles mutant vs WT parsing logic (affects amino-acid matching, validation filtering).
+  - `--wt-header HEADER` -- FASTA header used to identify the WT sequence (default: `ORF`).
+  - `--keep-intermediates` -- retain intermediate files for debugging.
+  - `--verbose` -- enable verbose output.
 
   ## 6. Outputs
 
-  Full/parse modes produce three TSV files per run. NetPhos-only mode writes raw `.out` files per FASTA which can be parsed later with `--mode parse-only`.
+  Full/parse modes produce three TSV files per gene. NetPhos-only mode writes raw `.out` files per FASTA which can be parsed later with `--mode parse-only`.
 
-  ### 6.1 Summary TSV (`.tsv`)
+  Output structure:
+  ```
+  {output}/
+    {GENE}/
+      NetPhos/
+        {GENE}.tsv          -- per-mutation summary
+        {GENE}.events.tsv   -- per-site, per-kinase events
+        {GENE}.sites.tsv    -- raw WT and MUT predictions
+  ```
+
+  ### 6.1 Summary TSV (`{GENE}.tsv`)
 
   Per-mutation summary with phosphorylation site changes.
 
@@ -84,16 +96,16 @@
   | `Gene` | Gene symbol | string |
   | `n_sites_wt`, `n_sites_mut` | Count of sites with score $\geq$ `--threshold` | count |
   | `count_gained`, `count_lost`, `count_strengthened`, `count_weakened`, `count_stable` | Classification tallies | count |
-  | `max_abs_delta`, `sum_abs_delta` | Maximum and sum of absolute score changes | probability (0–1) |
+  | `max_abs_delta`, `sum_abs_delta` | Maximum and sum of absolute score changes | probability (0-1) |
   | `n_kinases_affected` | Number of kinases with any event | count |
   | `top_event_type` | Dominant event (`gained`, `lost`, etc.) | categorical |
-  | `top_event_delta` | $\Delta$score for dominant event | probability (0–1) |
+  | `top_event_delta` | $\Delta$score for dominant event | probability (0-1) |
   | `top_event_position` | Amino-acid index of dominant event | residue index |
   | `top_event_kinase` | Kinase for dominant event | string |
   | `top_event_classification_code` | Numeric encoding of dominant event | integer |
   | `qc_flags` | Quality control flags | string |
 
-  ### 6.2 Events TSV (`.events.tsv`)
+  ### 6.2 Events TSV (`{GENE}.events.tsv`)
 
   Per-mutation, per-site, per-kinase events.
 
@@ -104,13 +116,13 @@
   | `position` | 1-based amino-acid position | residue index |
   | `amino_acid_wt`, `amino_acid_mut` | WT and MUT residues | single-letter |
   | `kinase` | Kinase motif classifier | string |
-  | `wt_score`, `mut_score` | NetPhos phosphorylation propensity | probability (0–1) |
-  | `delta` | $\Delta$score ($\text{MUT} - \text{WT}$) | probability (0–1) |
+  | `wt_score`, `mut_score` | NetPhos phosphorylation propensity | probability (0-1) |
+  | `delta` | $\Delta$score ($\text{MUT} - \text{WT}$) | probability (0-1) |
   | `wt_answer`, `mut_answer` | NetPhos YES/NO flag | categorical |
   | `classification` | gained/lost/strengthened/weakened/stable/subthreshold | categorical |
   | `classification_code` | Numeric encoding (gained=2, lost=-2, strengthened=1, weakened=-1, stable=0, subthreshold=-3) | integer |
 
-  ### 6.3 Sites TSV (`.sites.tsv`)
+  ### 6.3 Sites TSV (`{GENE}.sites.tsv`)
 
   Raw WT and MUT predictions for all residues.
 
@@ -123,7 +135,7 @@
   | `position` | 1-based amino-acid position | amino-acid index |
   | `amino_acid` | Residue at position (S/T/Y) | single-letter code |
   | `context` | Flanking peptide window reported by NetPhos | string |
-  | `score` | NetPhos phosphorylation propensity | probability (0–1) |
+  | `score` | NetPhos phosphorylation propensity | probability (0-1) |
   | `kinase` | Kinase motif classifier (e.g., CKII, cdc2, unsp) | string |
   | `answer` | NetPhos YES/NO confidence flag | categorical |
 

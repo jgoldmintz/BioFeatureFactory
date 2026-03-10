@@ -24,7 +24,7 @@ Run GeneSplicer on full genomic context (or configurable context), compare WT vs
 - `-i, --input`: directory of per-gene genomic FASTA files. Preference: sequence named `genomic`; else first record in file.
 - `-m, --mapping-dir`: directory of per-gene mutation CSVs. Mutation column auto-detected: one of `genomic | mutant | mutation | nt_mutation | ntmutant`. Tokens like `G1211T` parsed via `get_mutation_data()`.
 - `-g, --genesplicer-dir`: directory containing the GeneSplicer binary.
-- `-o, --output`: output TSV base path.
+- `-o, --output`: output base directory. Per-gene files written to `{output}/{GENE}/GeneSplicer/`.
 
 ### Optional Arguments
 - `--pipeline {full, window, custom}`: scan mode (default: `full`)
@@ -42,24 +42,32 @@ Run GeneSplicer on full genomic context (or configurable context), compare WT vs
 ---
 
 ### File Set
-- `--splice-summary` -> `<basename>.tsv`
-- `--splice-summary.events.tsv` -> `<basename>.events.tsv`
-- `--splice-summary.sites.tsv` -> `<basename>.sites.tsv`
+
+Per-gene output written to:
+
+```
+{output}/
+  {GENE}/
+    GeneSplicer/
+      {GENE}.tsv          -- summary (one row per SNV)
+      {GENE}.events.tsv   -- per-cluster donor/acceptor events
+      {GENE}.sites.tsv    -- per-allele, per-site audit rows
+```
 
 **Conventions**
-- Coordinates are absolute in `genome`/`extended` scan modes; window‐relative only in `window` mode.
+- Coordinates are absolute in `genome`/`extended` scan modes; window-relative only in `window` mode.
 - Distances are base pairs (bp) from the SNV.
 - Scores are raw GeneSplicer scores (dimensionless).
 - Confidence mapping: `low=0.5`, `med/medium=0.75`, `high=1.0`.
 
 ---
 
-### 1. Summary Table (`--splice-summary`)
+### 1. Summary Table (`{GENE}.tsv`)
 Each row represents a single SNV comparison (`pkey = GENE-mutation`). Global view + optional local triage slice.
 
 | Column                      | Description                                                                                | Units                           |
 |-----------------------------|--------------------------------------------------------------------------------------------|---------------------------------|
-| `pkey`                      | Unique variant key `GENE-mutation`                                                         | —                               |
+| `pkey`                      | Unique variant key `GENE-mutation`                                                         | --                               |
 | `n_sites_wt`                | Count of **visible** WT sites (score $\geq$ `--visibility-threshold`)                      | count                           |
 | `n_sites_mut`               | Count of **visible** MUT sites                                                             | count                           |
 | `n_clusters`                | Number of donor/acceptor clusters evaluated                                                | count                           |
@@ -69,74 +77,74 @@ Each row represents a single SNV comparison (`pkey = GENE-mutation`). Global vie
 | `global_max_abs_deltascore` | Max absolute score change across all clusters                                              | dimensionless                   |
 | `global_sum_weighted_abs_delta` | $\sum \|\Delta\text{score}\| \cdot \exp(-\text{distance}/\texttt{--distance-k})$ across clusters | dimensionless              |
 | `nearest_event_bp_any`      | Minimum distance to SNV among all events                                                   | bp                              |
-| `local_count_gained_high`   | As above, restricted to `distance ≤ --report-radius`                                       | count                           |
+| `local_count_gained_high`   | As above, restricted to `distance $\leq$ --report-radius`                                       | count                           |
 | `local_count_lost_high`     | As above, restricted local                                                                 | count                           |
 | `local_count_shifted`       | As above, restricted local                                                                 | count                           |
 | `local_max_abs_deltascore`  | Max abs $\Delta$score within local radius                                                  | dimensionless                   |
 | `nearest_event_bp_local`    | Nearest event within local radius                                                          | bp                              |
-| `frac_effect_in_radius`     | $(\sum |\Delta|$ in radius$) / (\sum |\Delta|$ global$)$                                   | 0–1                             |
-| `top_event_type`            | Event class of highest‐priority cluster (`gained/lost/shifted/strengthened/weakened/none`) | enum                            |
-| `top_event_deltascore`      | $\Delta$score of the highest‐priority event                                                | dimensionless                   |
+| `frac_effect_in_radius`     | $(\sum |\Delta|$ in radius$) / (\sum |\Delta|$ global$)$                                   | 0-1                             |
+| `top_event_type`            | Event class of highest-priority cluster (`gained/lost/shifted/strengthened/weakened/none`) | enum                            |
+| `top_event_deltascore`      | $\Delta$score of the highest-priority event                                                | dimensionless                   |
 | `top_event_pos`             | Representative position of top event (MUT if present else WT)                              | bp (absolute) or index (window) |
 | `dominant_boundary`         | Boundary with largest $\sum |\Delta|$ (`donor` or `acceptor`)                               | enum                            |
-| `qc_flags`                  | Semicolon‐separated flags: `no_sites;far_event>2kb;low_signal_only`                        | —                               |
+| `qc_flags`                  | Semicolon-separated flags: `no_sites;far_event>2kb;low_signal_only`                        | --                               |
 
 **Interpretation**
 - Local impact: `local_max_abs_deltascore` and local gained/lost counts.
 - Distant cryptic promotion: `global_count_gained_high > 0` with large `nearest_event_bp_any`.
-- Clean negatives: `n_clusters=0` or `global_max_abs_deltascore≈0` and `frac_effect_in_radius≈0`.
+- Clean negatives: `n_clusters=0` or `global_max_abs_deltascore$\approx$0` and `frac_effect_in_radius$\approx$0`.
 
 ---
 
-### 2. Events Table (`--splice-summary.events.tsv`)
+### 2. Events Table (`{GENE}.events.tsv`)
 Each row represents a donor/acceptor **cluster** (merged nearby sites) and compares top WT vs top MUT within that cluster.
 
 | Column                | Description                                                                               | Units/Values                                     |
 |-----------------------|-------------------------------------------------------------------------------------------|--------------------------------------------------|
-| `pkey`                | Variant key `GENE-mutation`                                                               | —                                                |
+| `pkey`                | Variant key `GENE-mutation`                                                               | --                                                |
 | `type`                | Boundary type                                                                             | `donor` / `acceptor`                             |
 | `cluster_id`          | Stable ID within `(pkey, type)` (e.g., `d1`, `a2`)                                        | string                                           |
 | `wt_pos`              | Top WT site position in cluster                                                           | bp (absolute) or index (window)                  |
 | `mut_pos`             | Top MUT site position in cluster                                                          | bp (absolute) or index (window)                  |
-| `dpos`                | Positional shift: `mut_pos − wt_pos`                                                      | bp (or indices)                                  |
+| `dpos`                | Positional shift: `mut_pos - wt_pos`                                                      | bp (or indices)                                  |
 | `wt_score`            | Top WT score                                                                              | dimensionless                                    |
 | `mut_score`           | Top MUT score                                                                             | dimensionless                                    |
-| `dscore`              | Score delta: `mut_score − wt_score`                                                       | dimensionless                                    |
+| `dscore`              | Score delta: `mut_score - wt_score`                                                       | dimensionless                                    |
 | `pct_delta`           | Relative delta: $r_i = \dfrac{\text{dscore}}{\max( \\|\text{WTscore}\\|, \varepsilon)}$   | dimensionless                                    |
 | `distance_to_snv`     | Min distance of (WT or MUT) site in the cluster to the SNV                                | bp                                               |
 | `rank_wt`             | Rank of WT site among all WT sites of this `type` (1=strongest)                           | integer                                          |
 | `rank_mut`            | Rank of MUT site among all MUT sites of this `type`                                       | integer                                          |
 | `conf_wt`             | Confidence weight of WT (`0.5/0.75/1.0`)                                                  | numeric                                          |
 | `conf_mut`            | Confidence weight of MUT (`0.5/0.75/1.0`)                                                 | numeric                                          |
-| `conf_weighted_delta` | `conf_mut·mut_score − conf_wt·wt_score`                                                   | dimensionless                                    |
+| `conf_weighted_delta` | `conf_mut$\cdot$mut_score - conf_wt$\cdot$wt_score`                                                   | dimensionless                                    |
 | `cls`                 | Event class                                                                               | `gained/lost/shifted/strengthened/weakened/none` |
 | `is_high_impact`      | High $\Delta$ or high gained/lost (policy thresholds)                                     | 0/1                                              |
-| `priority`            | Sorting key: $\\|\text{dscore}\\|*\text{e}^{(−distance/\text{"--distance-k"})}$ + bonuses | numeric                                          |
-| `in_radius`           | Inside local triage radius (`distance ≤ --report-radius`)                                 | 0/1                                              |
+| `priority`            | Sorting key: $\\|\text{dscore}\\|*\text{e}^{(-distance/\text{"--distance-k"})}$ + bonuses | numeric                                          |
+| `in_radius`           | Inside local triage radius (`distance $\leq$ --report-radius`)                                 | 0/1                                              |
 
 **Event taxonomy**
 - `gained`: WT absent, MUT visible ($\geq$ visibility threshold).
 - `lost`: MUT absent, WT visible.
-- `shifted`: both visible and `|dpos| ≥ --shift-bp`.
-- `strengthened / weakened`: same/near position with `|dscore| ≥ 1.0`.
+- `shifted`: both visible and `|dpos| $\geq$ --shift-bp`.
+- `strengthened / weakened`: same/near position with `|dscore| $\geq$ 1.0`.
 - `none`: otherwise.
 
 ---
 
-### 3. Sites Table (`--splice-summary.sites.tsv`)
-Per‐allele per‐site audit rows used to build clusters and events.
+### 3. Sites Table (`{GENE}.sites.tsv`)
+Per-allele per-site audit rows used to build clusters and events.
 
 | Column            | Description                                         | Units/Values                    |
 |-------------------|-----------------------------------------------------|---------------------------------|
-| `pkey`            | Variant key `GENE-mutation`                         | —                               |
+| `pkey`            | Variant key `GENE-mutation`                         | --                               |
 | `allele`          | Allele label                                        | `WT` / `MUT`                    |
 | `type`            | Boundary type                                       | `donor` / `acceptor`            |
 | `site_pos`        | Site position (End5 for donors, End3 for acceptors) | bp (absolute) or index (window) |
 | `score`           | GeneSplicer score                                   | dimensionless                   |
 | `confidence`      | Confidence weight (`low/med/high` -> `0.5/0.75/1.0`) | numeric                         |
-| `rank`            | Rank within allele×type (1=strongest)               | integer                         |
-| `distance_to_snv` | `\|site_pos − snv_pos\|`                            | bp                              |
-| `visible_flag`    | 1 if `score ≥ --visibility-threshold` else 0        | 0/1                             |
+| `rank`            | Rank within allelextype (1=strongest)               | integer                         |
+| `distance_to_snv` | `\|site_pos - snv_pos\|`                            | bp                              |
+| `visible_flag`    | 1 if `score $\geq$ --visibility-threshold` else 0        | 0/1                             |
 | `cluster_id`      | Cluster tag that links to `events`                  | string                          |
 | `in_radius`       | Inside local triage radius                          | 0/1                             |
 
@@ -148,10 +156,10 @@ Per‐allele per‐site audit rows used to build clusters and events.
 
 ## Quick heuristics
 - Prioritize SNVs with `global_count_gained_high + global_count_lost_high > 0` or large `global_max_abs_deltascore`.
-- Far‐field cryptic activation: high‐impact `gained` with large `distance_to_snv`.
+- Far-field cryptic activation: high-impact `gained` with large `distance_to_snv`.
 - Local disruption: high local counts or `local_max_abs_deltascore` near the SNV.
 
-Priority = `|dscore| * exp(−distance/k)` with bonuses for high-score gained/lost and large shifts.
+Priority = `|dscore| * exp(-distance/k)` with bonuses for high-score gained/lost and large shifts.
 
 ## Clustering and Pairing
 - Single-linkage clustering by position within `(pkey, type)` using `--cluster-radius` (default 3 bp)
@@ -177,8 +185,9 @@ python genesplicer_ensemble.py \
   -i FASTA/genomic \
   -m mutations/combined \
   -g /opt/genesplicer \
-  -o out/splice_summary.tsv \
+  -o out/ \
   --pipeline full --report-radius 150
+# Writes per gene: out/{GENE}/GeneSplicer/{GENE}.{tsv,events.tsv,sites.tsv}
 ```
 
 Window mode (speed), local radius 150. _**Use with caution**_: results may not be biologically accurate.
@@ -190,7 +199,7 @@ python genesplicer_ensemble.py \
   -i FASTA/genomic \
   -m mutations/combined \
   -g /opt/genesplicer \
-  -o out/splice_summary.win.tsv \
+  -o out/ \
   --pipeline window \
   --window 151 \
   --report-radius 150
@@ -322,7 +331,7 @@ Higher $S$ demands larger positional moves for `shifted`; lower $S$ captures mic
 
 ### Visibility V (`--visibility-threshold`) and high cutoff H (`--high-cutoff`)
 $V$ prunes low-signal sites; raising it reduces false positives but may miss weak true sites.  
-$H$ gates “high-confidence” semantics in counts and `priority` bonuses.
+$H$ gates "high-confidence" semantics in counts and `priority` bonuses.
 
 ---
 
@@ -340,13 +349,13 @@ If you use this pipeline, please cite:
   Explains precision and reliability weighting, forming the rationale for confidence-weighted deltas.
 - Cressie, N. (1993, rev. 2015). *Statistics for Spatial Data.* Revised edition. Hoboken, NJ: John Wiley & Sons. https://doi.org/10.1002/9781119115151  
   Provides the mathematical framework for exponential distance weighting and spatial decay kernels.
-- Jaganathan, K., Kyriazopoulou Panagiotopoulou, S., McRae, J. F., Darbandi, S. F., Knowles, D., Li, Y. I., Kosmicki, J. A., Arbelaez, J., Cui, W., Schwartz, G. B., Chow, E. D., Kanterakis, E., Gao, H., Kia, A., Batzoglou, S., Sanders, S. J., & Farh, K. K.-H. (2019). *Predicting Splicing from Primary Sequence with Deep Learning.* *Cell*, 176(3), 535–548.e24. https://doi.org/10.1016/j.cell.2018.12.015  
-  Demonstrates long-range splice-context modeling supporting the pipeline’s distance-aware design.
+- Jaganathan, K., Kyriazopoulou Panagiotopoulou, S., McRae, J. F., Darbandi, S. F., Knowles, D., Li, Y. I., Kosmicki, J. A., Arbelaez, J., Cui, W., Schwartz, G. B., Chow, E. D., Kanterakis, E., Gao, H., Kia, A., Batzoglou, S., Sanders, S. J., & Farh, K. K.-H. (2019). *Predicting Splicing from Primary Sequence with Deep Learning.* *Cell*, 176(3), 535-548.e24. https://doi.org/10.1016/j.cell.2018.12.015  
+  Demonstrates long-range splice-context modeling supporting the pipeline's distance-aware design.
 - Keeney, R. L., & Raiffa, H. (1993). *Decisions with Multiple Objectives: Preferences and Value Tradeoffs.* New York, NY: John Wiley & Sons. https://doi.org/10.1002/9780470611876.ch15  
-  Forms the theoretical basis for constructing the weighted-utility “priority” metric.
-- Pertea, M., Lin, X., & Salzberg, S. L. (2001). *GeneSplicer: A New Computational Method for Splice Site Prediction.* *Nucleic Acids Research*, 29(5), 1185–1190. https://doi.org/10.1093/nar/29.5.1185  
+  Forms the theoretical basis for constructing the weighted-utility "priority" metric.
+- Pertea, M., Lin, X., & Salzberg, S. L. (2001). *GeneSplicer: A New Computational Method for Splice Site Prediction.* *Nucleic Acids Research*, 29(5), 1185-1190. https://doi.org/10.1093/nar/29.5.1185  
   Describes the core algorithm underlying splice-site scoring in this pipeline.
-- Tobler, W. R. (1970). *A Computer Movie Simulating Urban Growth in the Detroit Region.* *Economic Geography*, 46(Suppl.), 234–240. https://doi.org/10.2307/143141  
+- Tobler, W. R. (1970). *A Computer Movie Simulating Urban Growth in the Detroit Region.* *Economic Geography*, 46(Suppl.), 234-240. https://doi.org/10.2307/143141  
   Introduces the distance-decay principle, later generalized as a modeling concept for spatial dependency.
 
 

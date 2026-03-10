@@ -20,8 +20,9 @@ Unified MirandA pipeline (WT + MUT in one run) with comparative outputs.
 
 Key changes
 - WT: run MirandA once per gene -> {GENE}-wt-miranda.out (no per-mutation duplication).
-- MUT: per-gene parallel execution; logs every 100 processed with true done/total seeded from disk+cache.
+- MUT: per-gene parallel execution; logs every 100 processed with true done/total seeded from disk.
 - Parser: joins WT and MUT by (pkey, mirna_id, locus_id); WT rows are materialized per mutation from the single per-gene WT output.
+- Intermediate .out files are deleted after parsing to reclaim disk space.
 - Redundancy reduction: leverage utility.load_mapping, extract_mutation_from_sequence_name, extract_gene_from_filename, get_mutation_data, update_str, load_wt_sequences, load_validation_failures, should_skip_mutation, validate_mapping_content.
 """
 
@@ -67,7 +68,7 @@ REPORT_RADIUS = 40
 DISTANCE_K = 25.0
 MAX_PARALLEL_CAP = 16
 GENE_PROGRESS_STEP = 100
-PROGRESS_SAVE_EVERY = 100  # persist cache/progress every N completions
+PROGRESS_SAVE_EVERY = 100  # persist progress every N completions
 
 # -------------------------------------------------------------------------
 # UTILS
@@ -97,13 +98,6 @@ def _existing_mut_outputs(outdir: str, gene_upper: str) -> set[str]:
         pass
     return existing
 
-def _cache_mut_done_ids(cache: "PipelineCache", gene_upper: str) -> set[str]:
-    """Return seq_ids marked done in cache for this gene."""
-    return {
-        sid for sid in getattr(cache, "_mut", set())
-        if sid.startswith(f"{gene_upper}-") and sid.endswith("-mut")
-    }
-
 def _write_gene_progress(outdir: str, gene: str, processed: int, total: int, completed_ids: Iterable[str]):
     p = os.path.join(outdir, f"{gene}.mut.progress.json")
     data = {
@@ -123,10 +117,13 @@ def _write_gene_progress(outdir: str, gene: str, processed: int, total: int, com
 def load_transcript_mappings(mapping_dir: str, map_type: str = "transcript") -> Dict[str, pd.DataFrame]:
     path = Path(mapping_dir)
     if not path.exists():
-        raise FileNotFoundError(f"Mapping directory not found: {mapping_dir}")
+        raise FileNotFoundError(f"Mapping path not found: {mapping_dir}")
 
     out: Dict[str, pd.DataFrame] = {}
-    files = sorted(f for f in path.iterdir() if f.is_file() and f.suffix.lower() in (".csv", ".tsv", ".txt"))
+    if path.is_file():
+        files = [path] if path.suffix.lower() in (".csv", ".tsv", ".txt") else []
+    else:
+        files = sorted(f for f in path.rglob("*.csv") if f.is_file() and f.suffix.lower() in (".csv", ".tsv", ".txt"))
     for f in files:
         try:
             validate_mapping_content(str(f))
@@ -153,76 +150,35 @@ def load_transcript_mappings(mapping_dir: str, map_type: str = "transcript") -> 
     return out
 
 # -------------------------------------------------------------------------
-# CACHE
-# -------------------------------------------------------------------------
-class PipelineCache:
-    """JSON-backed cache that tracks completed WT and MUT runs."""
-    def __init__(self, cache_path: str):
-        self.path = Path(cache_path)
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        self._wt: set[str] = set()
-        self._mut: set[str] = set()
-        if self.path.exists():
-            try:
-                data = json.loads(self.path.read_text())
-                self._wt = set(data.get("wt", []))
-                self._mut = set(data.get("mut", []))
-            except json.JSONDecodeError:
-                self._wt = set()
-                self._mut = set()
-
-    def clear(self):
-        self._wt.clear()
-        self._mut.clear()
-        if self.path.exists():
-            try:
-                self.path.unlink()
-            except OSError:
-                pass
-
-    def is_wt_done(self, gene: str) -> bool:
-        return gene in self._wt
-
-    def is_mut_done(self, seq_id: str) -> bool:
-        return seq_id in self._mut
-
-    def mark_wt_done(self, gene: str, save: bool = True):
-        if gene not in self._wt:
-            self._wt.add(gene)
-            if save:
-                self.save()
-
-    def mark_mut_done(self, seq_id: str, save: bool = True):
-        if seq_id not in self._mut:
-            self._mut.add(seq_id)
-            if save:
-                self.save()
-
-    def save(self):
-        tmp_path = self.path.with_suffix(".tmp")
-        data = {
-            "wt": sorted(self._wt),
-            "mut": sorted(self._mut),
-        }
-        tmp_path.write_text(json.dumps(data, indent=2))
-        tmp_path.replace(self.path)
-
-# -------------------------------------------------------------------------
 # MIRANDA EXECUTION
 # -------------------------------------------------------------------------
 def _run_single_miranda_task(args: Tuple[str, str, str, str, str]) -> Tuple[str, str]:
     """
     args = (seq_id, seq_string, miranda_dir, outdir, mirna_db_abs)
+    miranda_dir may be empty string/None to use miranda from PATH.
     """
+    import shutil as _shutil
+    import tempfile as _tempfile
     from subprocess import run, TimeoutExpired
     seq_id, seq_str, miranda_dir, outdir, mirna_db_abs = args
 
-    # Worker prechecks (surgical)
-    if not os.path.isdir(miranda_dir):
-        return (seq_id, "error:miranda_dir_missing")
-    bin_path = os.path.join(miranda_dir, "miranda")
-    if not (os.path.isfile(bin_path) and os.access(bin_path, os.X_OK)):
-        return (seq_id, "error:miranda_binary_not_exec")
+    # Resolve binary and working directory
+    if miranda_dir:
+        if not os.path.isdir(miranda_dir):
+            return (seq_id, "error:miranda_dir_missing")
+        bin_path = os.path.join(miranda_dir, "miranda")
+        if not (os.path.isfile(bin_path) and os.access(bin_path, os.X_OK)):
+            return (seq_id, "error:miranda_binary_not_exec")
+        cmd_binary = "./miranda"
+        cwd = miranda_dir
+        tmp_base = miranda_dir
+    else:
+        if not _shutil.which("miranda"):
+            return (seq_id, "error:miranda_not_on_PATH")
+        cmd_binary = "miranda"
+        cwd = None
+        tmp_base = _tempfile.gettempdir()
+
     if not os.path.isfile(mirna_db_abs):
         return (seq_id, "error:mirna_db_missing")
 
@@ -231,14 +187,15 @@ def _run_single_miranda_task(args: Tuple[str, str, str, str, str]) -> Tuple[str,
     if os.path.exists(out_file) and os.path.getsize(out_file) > 0:
         return (seq_id, "already")
 
-    # Safe temp file under miranda_dir
-    tmp_file = os.path.join(miranda_dir, f"tmp_{os.getpid()}_{hash(seq_id) & 0xFFFFF}.fasta")
+    tmp_file = os.path.join(tmp_base, f"tmp_{os.getpid()}_{hash(seq_id) & 0xFFFFF}.fasta")
     try:
         with open(tmp_file, "w") as f:
             f.write(f">{seq_id}\n{seq_str}")
 
-        cmd = ["./miranda", mirna_db_abs, os.path.basename(tmp_file)]
-        result = run(cmd, cwd=miranda_dir, capture_output=True, text=True, timeout=1200)
+        # When using cwd, miranda expects basename; when on PATH, use absolute path
+        fasta_arg = os.path.basename(tmp_file) if miranda_dir else tmp_file
+        cmd = [cmd_binary, mirna_db_abs, fasta_arg]
+        result = run(cmd, cwd=cwd, capture_output=True, text=True, timeout=1200)
 
         # Always write stdout for inspection
         try:
@@ -247,7 +204,10 @@ def _run_single_miranda_task(args: Tuple[str, str, str, str, str]) -> Tuple[str,
         except Exception as e:
             return (seq_id, f"error:write_out:{e}")
 
-        if result.returncode == 0 and result.stdout:
+        # Miranda (v1.9) crashes in its exit cleanup handler (SIGBUS) on macOS
+        # but produces fully valid scan output before that. Treat any run
+        # where stdout was produced as successful.
+        if result.stdout:
             status = "ok"
         else:
             status = f"rc={result.returncode}"
@@ -265,13 +225,14 @@ def _run_single_miranda_task(args: Tuple[str, str, str, str, str]) -> Tuple[str,
     return (seq_id, status)
 
 def run_wt_phase(wt_sequences: Dict[str, str],
-                 cache: PipelineCache,
                  outdir: str,
                  miranda_dir: str,
                  mirna_db: str):
     """
     One WT file per gene: {GENE}-wt-miranda.out
+    miranda_dir may be empty string/None to use miranda from PATH.
     """
+    import tempfile as _tempfile
     os.makedirs(outdir, exist_ok=True)
     print("[WT] Starting WT MirandA phase...")
 
@@ -283,12 +244,21 @@ def run_wt_phase(wt_sequences: Dict[str, str],
 
     db_abs = os.path.abspath(mirna_db)
 
+    if miranda_dir:
+        cmd_binary = "./miranda"
+        cwd = miranda_dir
+        tmp_base = miranda_dir
+    else:
+        cmd_binary = "miranda"
+        cwd = None
+        tmp_base = _tempfile.gettempdir()
+
     for idx, gene in enumerate(genes, 1):
         gene_upper = gene.upper()
         out_file = os.path.join(outdir, f"{gene_upper}-wt-miranda.out")
 
-        if cache.is_wt_done(gene_upper) and os.path.exists(out_file) and os.path.getsize(out_file) > 0:
-            print(f"[WT] [{idx}/{total_genes}] {gene_upper}: cached, skip")
+        if os.path.exists(out_file) and os.path.getsize(out_file) > 0:
+            print(f"[WT] [{idx}/{total_genes}] {gene_upper}: exists on disk, skip")
             continue
 
         print(f"[WT] [{idx}/{total_genes}] Running WT MirandA: {gene_upper}")
@@ -298,12 +268,13 @@ def run_wt_phase(wt_sequences: Dict[str, str],
             print(f"[WT]   Missing WT sequence for {gene_upper}, skip")
             continue
 
-        wt_tmp_file = os.path.join(miranda_dir, f"tmp_{gene_upper}_WT.fasta")
+        wt_tmp_file = os.path.join(tmp_base, f"tmp_{gene_upper}_WT.fasta")
         with open(wt_tmp_file, "w") as f:
             f.write(f">transcript\n{wt_seq}")
 
-        cmd = ["./miranda", db_abs, os.path.basename(wt_tmp_file)]
-        result = run(cmd, cwd=miranda_dir, capture_output=True, text=True, timeout=3000)
+        fasta_arg = os.path.basename(wt_tmp_file) if miranda_dir else wt_tmp_file
+        cmd = [cmd_binary, db_abs, fasta_arg]
+        result = run(cmd, cwd=cwd, capture_output=True, text=True, timeout=3000)
         miranda_output = result.stdout
 
         try:
@@ -315,7 +286,6 @@ def run_wt_phase(wt_sequences: Dict[str, str],
             f.write(miranda_output)
 
         print(f"[WT]   Wrote {out_file} (len={len(miranda_output)})")
-        cache.mark_wt_done(gene_upper)
 
     print("[WT] Done.")
 
@@ -326,10 +296,9 @@ def _per_gene_mut_tasks(gene_upper: str,
                         miranda_dir: str,
                         mirna_db: str,
                         failure_map: Optional[Dict],
-                        already_on_disk: set,
-                        already_in_cache: set) -> List[Tuple[str, str, str, str, str]]:
+                        already_on_disk: set) -> List[Tuple[str, str, str, str, str]]:
     """
-    Build per-gene list of MirandA tasks for MUT allele, skipping disk+cache.
+    Build per-gene list of MirandA tasks for MUT allele, skipping disk.
     """
     tasks: List[Tuple[str, str, str, str, str]] = []
     db_abs = os.path.abspath(mirna_db)
@@ -344,7 +313,7 @@ def _per_gene_mut_tasks(gene_upper: str,
             continue
 
         seq_id = f"{gene_upper}-{mutant_id}-mut"
-        if seq_id in already_on_disk or seq_id in already_in_cache:
+        if seq_id in already_on_disk:
             continue
 
         if failure_map and should_skip_mutation(gene_upper, mutant_id, failure_map):
@@ -371,7 +340,6 @@ def _per_gene_mut_tasks(gene_upper: str,
 
 def run_mut_phase(wt_sequences: Dict[str, str],
                   mapping_dict: Dict[str, pd.DataFrame],
-                  cache: PipelineCache,
                   outdir: str,
                   miranda_dir: str,
                   mirna_db: str,
@@ -412,8 +380,7 @@ def run_mut_phase(wt_sequences: Dict[str, str],
         all_mut_ids = [str(m).strip() for m in mapping_df["mutant"].dropna().astype(str)]
         total_all = len(all_mut_ids)
         already_on_disk = _existing_mut_outputs(outdir, gene_upper)
-        already_in_cache = _cache_mut_done_ids(cache, gene_upper)
-        done_prior = len(already_on_disk | already_in_cache)
+        done_prior = len(already_on_disk)
 
         tasks = _per_gene_mut_tasks(
             gene_upper=gene_upper,
@@ -424,7 +391,6 @@ def run_mut_phase(wt_sequences: Dict[str, str],
             mirna_db=mirna_db,
             failure_map=failure_map,
             already_on_disk=already_on_disk,
-            already_in_cache=already_in_cache,
         )
         remaining = len(tasks)
 
@@ -443,31 +409,25 @@ def run_mut_phase(wt_sequences: Dict[str, str],
                 if status not in ("ok", "already"):
                     print(f"[MUT]   {seq_id}: {status}")
                 else:
-                    cache.mark_mut_done(seq_id, save=False)
                     completed_ids.append(seq_id)
                 processed += 1
                 if processed % GENE_PROGRESS_STEP == 0 or processed == total_all:
                     print(f"[MUT] [{idx}/{total_genes}] {gene_upper}: Processed mutations - [{processed}/{total_all}]")
                 if processed % PROGRESS_SAVE_EVERY == 0 or processed == total_all:
-                    cache.save()
                     _write_gene_progress(outdir, gene_upper, processed, total_all, completed_ids)
         else:
-            with concurrent.futures.ProcessPoolExecutor(max_workers=max_workers) as ex:
+            with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as ex:
                 # map with chunksize=1 for steady progress feedback
-                for seq_id, status in ex.map(_run_single_miranda_task, tasks, chunksize=1):
+                for seq_id, status in ex.map(_run_single_miranda_task, tasks):
                     if status not in ("ok", "already"):
                         print(f"[MUT]   {seq_id}: {status}")
                     else:
-                        cache.mark_mut_done(seq_id, save=False)
                         completed_ids.append(seq_id)
                     processed += 1
                     if processed % GENE_PROGRESS_STEP == 0 or processed == total_all:
                         print(f"[MUT] [{idx}/{total_genes}] {gene_upper}: Processed mutations - [{processed}/{total_all}]")
                     if processed % PROGRESS_SAVE_EVERY == 0 or processed == total_all:
-                        cache.save()
                         _write_gene_progress(outdir, gene_upper, processed, total_all, completed_ids)
-
-        cache.save()
 
     print("[MUT] Done.")
 
@@ -477,9 +437,12 @@ def run_mut_phase(wt_sequences: Dict[str, str],
 def parse_miranda_text(miranda_text: str) -> List[Dict]:
     """
     Parse MirandA stdout -> site rows.
+
+    miRNA ID is taken from the '>>' summary line (parts[0][2:] strips '>>'),
+    NOT from the 'Query: 3'..5'' alignment line which contains the alignment
+    sequence (not the ID) and produces a spurious trailing ' 5' artifact.
     """
     sites: List[Dict] = []
-    current_mirna = None
     query_seq = ""
     ref_seq = ""
 
@@ -492,13 +455,13 @@ def parse_miranda_text(miranda_text: str) -> List[Dict]:
             continue
 
         if "Query:" in line:
+            # Alignment display line — extract sequence for query_seq only.
             seg = line.split("Query:", 1)[1].strip()
             if "'" in seg:
                 parts = seg.split("'")
                 token = parts[1].strip() if len(parts) >= 2 else seg.split()[0]
             else:
                 token = seg.split()[0]
-            current_mirna = token
             query_seq = token.replace("5", "").replace("3", "").replace(" ", "")
             continue
 
@@ -515,7 +478,12 @@ def parse_miranda_text(miranda_text: str) -> List[Dict]:
         if line.startswith(">>"):
             norm = re.sub(r"\s+", "\t", line)
             parts = norm.split("\t")
-            if len(parts) < 10 or current_mirna is None:
+            if len(parts) < 10:
+                continue
+
+            # miRNA ID is the first field with '>>' stripped.
+            mirna_id = parts[0][2:] if parts[0].startswith(">>") else parts[0]
+            if not mirna_id:
                 continue
 
             def f(i):
@@ -533,7 +501,9 @@ def parse_miranda_text(miranda_text: str) -> List[Dict]:
             strand     = parts[6] if len(parts) > 6 else ""
             len1       = i_(7)
             len2       = i_(8)
-            pos_field  = parts[9] if len(parts) > 9 else ""
+            # re.sub converted spaces inside the positional field to tabs,
+            # so rejoin parts[9:] to recover all space-separated positions.
+            pos_field  = " ".join(parts[9:])
             pos_tokens = [p for p in pos_field.strip().split() if p.isdigit()]
             if not pos_tokens:
                 continue
@@ -541,7 +511,7 @@ def parse_miranda_text(miranda_text: str) -> List[Dict]:
             for p in pos_tokens:
                 site_pos = int(p)
                 sites.append({
-                    "mirna_id": current_mirna,
+                    "mirna_id": mirna_id,
                     "site_pos": site_pos,
                     "tot_score": tot_score,
                     "tot_energy": tot_energy,
@@ -552,7 +522,7 @@ def parse_miranda_text(miranda_text: str) -> List[Dict]:
                     "len_target": len2,
                     "query_seq": query_seq,
                     "ref_seq": ref_seq,
-                    "parser_confidence": 1.0 if (current_mirna and tot_score is not None) else 0.5,
+                    "parser_confidence": 1.0 if (mirna_id and tot_score is not None) else 0.5,
                 })
     return sites
 
@@ -585,6 +555,7 @@ def build_sites_table_from_outputs(outdir: str,
     """
     Build sites by joining single per-gene WT output with each mutation-specific MUT output.
     WT rows are materialized per pkey (allele='WT'); MUT rows parsed from files (allele='MUT').
+    Intermediate .out files are deleted after parsing to reclaim disk space.
     """
     print("[PARSE] Building sites table from MirandA outputs...")
     records: List[Dict] = []
@@ -674,6 +645,13 @@ def build_sites_table_from_outputs(outdir: str,
             # MUT rows
             mut_text = mf.read_text(encoding="utf-8", errors="ignore")
             mut_hits = parse_miranda_text(mut_text)
+
+            # Delete MUT .out file after parsing
+            try:
+                mf.unlink(missing_ok=True)
+            except Exception:
+                pass
+
             if not mut_hits:
                 miss_hits += 1
                 continue
@@ -699,6 +677,12 @@ def build_sites_table_from_outputs(outdir: str,
                     "parser_confidence": h["parser_confidence"],
                     "run_meta": f"{gene}-mut",
                 })
+
+        # Delete WT .out file after all MUT files for this gene are parsed
+        try:
+            wt_file.unlink(missing_ok=True)
+        except Exception:
+            pass
 
         if gi % 25 == 0:
             print(f"[PARSE]   Progress: {gi}/{len(genes)} genes processed")
@@ -1022,15 +1006,15 @@ def build_summary(events_df: pd.DataFrame, sites_df: pd.DataFrame) -> pd.DataFra
 def main():
     parser = argparse.ArgumentParser(description="Unified MirandA pipeline (WT+MUT) with comparative outputs")
     # IO
-    parser.add_argument("-i", "--input", required=True, help="input directory of the WT fasta files (full path)")
+    parser.add_argument("-i", "--input", required=True, help="WT FASTA file, or directory of FASTA files")
     parser.add_argument("-o", "--output", required=True, help="output directory of miranda")
     # MirandA
-    parser.add_argument("-m", "--miranda_dir", required=True, help="path to directory containing the miranda executable")
+    parser.add_argument("-m", "--miranda_dir", default=None,
+                        help="path to directory containing the miranda executable; "
+                             "omit to use miranda from PATH (e.g. conda install -c bioconda miranda)")
     parser.add_argument("-d", "--mirna_db", required=True, help="path to mirna database")
-    # Mapping / cache
-    parser.add_argument("--mapping-dir", required=True, help="directory containing transcript mapping CSV/TSV files")
-    parser.add_argument("--cache-file", help="path to cache JSON file (default: MIRANDA_CACHE.json in output dir)")
-    parser.add_argument("--clear-cache", action="store_true", help="ignore any existing cache and start fresh")
+    # Mapping
+    parser.add_argument("--mapping-dir", required=True, help="transcript mapping CSV/TSV file, or directory of CSV/TSV files")
     # Performance
     parser.add_argument("--no-parallel", action='store_true', help="disable parallel processing")
     parser.add_argument("--max-workers", type=int, help="maximum number of parallel workers")
@@ -1038,6 +1022,16 @@ def main():
     # WT header
     parser.add_argument("--wt-header", default="transcript", help="Preferred WT FASTA header")
     args = parser.parse_args()
+
+    # Validate miranda availability
+    if args.miranda_dir:
+        bin_path = os.path.join(args.miranda_dir, "miranda")
+        if not (os.path.isfile(bin_path) and os.access(bin_path, os.X_OK)):
+            parser.error(f"miranda executable not found or not executable at {bin_path}")
+    else:
+        import shutil
+        if not shutil.which("miranda"):
+            parser.error("miranda not found on PATH; install via: conda install -c bioconda miranda")
 
     failure_map = load_validation_failures(args.log) if args.log else {}
 
@@ -1050,15 +1044,10 @@ def main():
         raise ValueError(f"No WT sequences found in {args.input}")
 
     os.makedirs(args.output, exist_ok=True)
-    cache_path = args.cache_file or os.path.join(args.output, "MIRANDA_CACHE.json")
-    cache = PipelineCache(cache_path)
-    if args.clear_cache:
-        cache.clear()
 
     # 1) WT
     run_wt_phase(
         wt_sequences=wt_sequences,
-        cache=cache,
         outdir=args.output,
         miranda_dir=args.miranda_dir,
         mirna_db=args.mirna_db,
@@ -1068,7 +1057,6 @@ def main():
     run_mut_phase(
         wt_sequences=wt_sequences,
         mapping_dict=mapping_dict,
-        cache=cache,
         outdir=args.output,
         miranda_dir=args.miranda_dir,
         mirna_db=args.mirna_db,
@@ -1083,7 +1071,6 @@ def main():
     sites_df = assign_loci(sites_df)
     sites_df = assign_segments(sites_df)
 
-    sites_path = os.path.join(args.output, "miranda_summary.sites.tsv")
     sites_cols = [
         "pkey", "allele", "mirna_id", "site_pos",
         "tot_score", "tot_energy", "max_score", "max_energy",
@@ -1092,18 +1079,8 @@ def main():
         "locus_id", "segment_id",
         "parser_confidence", "run_meta"
     ]
-    if sites_df is None or sites_df.empty:
-        pd.DataFrame(columns=sites_cols).to_csv(sites_path, sep="\t", index=False)
-        print("[PARSE] Sites table built with 0 rows")
-    else:
-        for c in sites_cols:
-            if c not in sites_df.columns:
-                sites_df[c] = None
-        sites_df[sites_cols].to_csv(sites_path, sep="\t", index=False)
-        print(f"[OUT] Wrote sites: {sites_path}")
 
     events_df = build_events(sites_df)
-    events_path = os.path.join(args.output, "miranda_summary.events.tsv")
     events_cols = [
         "pkey","mirna_id","locus_id","segment_id",
         "wt_pos","mut_pos","dpos",
@@ -1114,18 +1091,8 @@ def main():
         "conf_wt","conf_mut","conf_weighted_delta",
         "cls","is_high_impact","priority","in_radius"
     ]
-    if events_df is None or events_df.empty:
-        pd.DataFrame(columns=events_cols).to_csv(events_path, sep="\t", index=False)
-        print("[PARSE] No sites to build events")
-    else:
-        for c in events_cols:
-            if c not in events_df.columns:
-                events_df[c] = None
-        events_df[events_cols].to_csv(events_path, sep="\t", index=False)
-        print(f"[OUT] Wrote events: {events_path}")
 
     summary_df = build_summary(events_df, sites_df)
-    summary_path = os.path.join(args.output, "miranda_summary.tsv")
     summary_cols = [
         "pkey", "n_hits_wt", "n_hits_mut", "n_mirna", "n_loci", "n_segments",
         "n_competitive_segments", "n_new_competitors",
@@ -1137,15 +1104,44 @@ def main():
         "max_segment_abs_delta_best", "frac_effect_in_competitive_segments",
         "top_event_mirna", "top_event_class", "top_event_delta_score", "top_event_pos", "qc_flags"
     ]
-    if summary_df is None or summary_df.empty:
-        pd.DataFrame(columns=summary_cols).to_csv(summary_path, sep="\t", index=False)
-        print("[PARSE] No events; writing empty summary")
-    else:
+
+    # Write per-gene output files
+    gene_names = list(wt_sequences.keys())
+    for gene_upper in gene_names:
+        out_dir = Path(args.output) / gene_upper / "Miranda"
+        out_dir.mkdir(parents=True, exist_ok=True)
+        summary_path = str(out_dir / f"{gene_upper}.tsv")
+        events_path  = str(out_dir / f"{gene_upper}.events.tsv")
+        sites_path   = str(out_dir / f"{gene_upper}.sites.tsv")
+
+        gene_prefix = f"{gene_upper}-"
+
+        g_sites = (sites_df[sites_df['pkey'].str.startswith(gene_prefix)]
+                   if sites_df is not None and not sites_df.empty
+                   else pd.DataFrame(columns=sites_cols))
+        g_events = (events_df[events_df['pkey'].str.startswith(gene_prefix)]
+                    if events_df is not None and not events_df.empty
+                    else pd.DataFrame(columns=events_cols))
+        g_summary = (summary_df[summary_df['pkey'].str.startswith(gene_prefix)]
+                     if summary_df is not None and not summary_df.empty
+                     else pd.DataFrame(columns=summary_cols))
+
+        for c in sites_cols:
+            if c not in g_sites.columns:
+                g_sites[c] = None
+        g_sites[sites_cols].to_csv(sites_path, sep="\t", index=False)
+
+        for c in events_cols:
+            if c not in g_events.columns:
+                g_events[c] = None
+        g_events[events_cols].to_csv(events_path, sep="\t", index=False)
+
         for c in summary_cols:
-            if c not in summary_df.columns:
-                summary_df[c] = None
-        summary_df[summary_cols].to_csv(summary_path, sep="\t", index=False)
-        print(f"[OUT] Wrote summary: {summary_path}")
+            if c not in g_summary.columns:
+                g_summary[c] = None
+        g_summary[summary_cols].to_csv(summary_path, sep="\t", index=False)
+
+        print(f"[OUT] Wrote {gene_upper}: {summary_path}")
 
     print("\n[DONE] Unified MirandA pipeline completed.")
 

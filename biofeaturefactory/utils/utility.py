@@ -814,63 +814,6 @@ def save_reference_cache(cache_data, cache_dir="./reference_cache"):
         print(f"Warning: Could not save reference cache: {e}", file=sys.stderr)
 
 
-def download_reference_genome(build, cache_dir="./reference_cache"):
-    """Download and decompress a reference genome FASTA for the requested build."""
-    cache_path = Path(cache_dir)
-    cache_path.mkdir(exist_ok=True)
-    urls = {
-        "GRCh38": "https://ftp.ncbi.nlm.nih.gov/refseq/H_sapiens/annotation/GRCh38_latest/refseq_identifiers/GRCh38_latest_genomic.fna.gz",
-        "GRCh37": "https://ftp.ncbi.nlm.nih.gov/refseq/H_sapiens/annotation/GRCh37_latest/refseq_identifiers/GRCh37_latest_genomic.fna.gz",
-    }
-    if build not in urls:
-        print(f"Error: Unknown reference build: {build}", file=sys.stderr)
-        return None
-
-    url = urls[build]
-    output_file = cache_path / f"{build}_reference.fna.gz"
-    uncompressed_file = cache_path / f"{build}_reference.fna"
-
-    print(f"Downloading {build} reference genome...")
-
-    if shutil.which("aria2c"):
-        cmd = [
-            "aria2c",
-            "--max-connection-per-server=8",
-            "--split=8",
-            "--min-split-size=1M",
-            "--continue=true",
-            "--dir",
-            str(cache_path),
-            "--out",
-            output_file.name,
-            url,
-        ]
-    elif shutil.which("wget"):
-        cmd = ["wget", "-O", str(output_file), url]
-    elif shutil.which("curl"):
-        cmd = ["curl", "-L", "-o", str(output_file), url]
-    else:
-        print("Error: No download tool available (aria2c, wget, or curl required)", file=sys.stderr)
-        return None
-
-    try:
-        result = subprocess.run(cmd, capture_output=True, text=True)
-        if result.returncode != 0:
-            print(f"Error downloading reference: {result.stderr}", file=sys.stderr)
-            return None
-
-        print(f"Decompressing {build} reference genome...")
-        result = subprocess.run(["gunzip", str(output_file)], capture_output=True, text=True)
-        if result.returncode != 0:
-            print(f"Error decompressing reference: {result.stderr}", file=sys.stderr)
-            return None
-
-        print(f"Successfully downloaded {build} reference genome")
-        return str(uncompressed_file)
-    except Exception as e:
-        print(f"Error downloading reference genome: {e}", file=sys.stderr)
-        return None
-
 def load_mapping(mapping_file: str, mapType: str ='transcript') -> Dict[str, str]:
     """Load a two-column mapping CSV (mutant->mapping) using the specified column name."""
 
@@ -1406,7 +1349,7 @@ def discover_mapping_files(mapping_dir):
         return mapping_files
 
     # Scan for all CSV files
-    for csv_file in Path(mapping_dir).glob("*.csv"):
+    for csv_file in Path(mapping_dir).rglob("*.csv"):
         try:
             # Extract gene name from filename
             gene_name = extract_gene_from_filename(csv_file.stem)
@@ -1442,7 +1385,7 @@ def discover_fasta_files(fasta_dir):
     fasta_extensions = ['*.fasta', '*.fa', '*.fas', '*.fna', '*.faa']
 
     for extension in fasta_extensions:
-        for fasta_file in Path(fasta_dir).glob(extension):
+        for fasta_file in Path(fasta_dir).rglob(extension):
             try:
                 # Extract gene name from filename
                 gene_name = extract_gene_from_filename(fasta_file.stem)
@@ -1530,13 +1473,17 @@ def validate_fasta_content(file_path):
 def load_wt_sequences(input_dir: str, wt_header: str = "transcript") -> Dict[str, str]:
     """
     Load WT sequences (configured by wt_header) into memory keyed by gene symbol.
+    Accepts a single FASTA file or a directory of FASTA files.
     """
     input_path = Path(input_dir)
     if not input_path.exists():
-        raise FileNotFoundError(f"WT fasta directory not found: {input_dir}")
+        raise FileNotFoundError(f"WT fasta path not found: {input_dir}")
 
     sequences: Dict[str, str] = {}
-    fasta_files = sorted([f for f in input_path.iterdir() if f.is_file() and f.suffix.lower() in (".fa", ".fasta", ".fna")])
+    if input_path.is_file():
+        fasta_files = [input_path] if input_path.suffix.lower() in (".fa", ".fasta", ".fna") else []
+    else:
+        fasta_files = sorted([f for f in input_path.iterdir() if f.is_file() and f.suffix.lower() in (".fa", ".fasta", ".fna")])
     print(f"[WT] Scanning {len(fasta_files)} WT FASTA files")
     for fasta_file in fasta_files:
         data = read_fasta(str(fasta_file))
@@ -1563,26 +1510,26 @@ def load_wt_sequences(input_dir: str, wt_header: str = "transcript") -> Dict[str
 
 
 def resolve_output_base(output_arg, input_arg, tool_name):
-    """Resolve the output base path when the user supplies a directory or '.'.
+    """Resolve the output base path as a nested per-gene/per-tool directory.
 
-    If *output_arg* points to an existing directory (including '.'), the
-    output base is constructed inside that directory using the gene name
-    extracted from *input_arg* and the *tool_name* as a suffix.
+    Always treats *output_arg* as a base directory and constructs:
+        {output_arg}/{gene}/{tool_name}/{gene}
+
+    The nested directory is created automatically.
 
     Args:
-        output_arg: The raw output argument from argparse.
+        output_arg: The raw output argument from argparse (always a directory).
         input_arg:  The raw input argument (FASTA path / directory).
-        tool_name:  Short tool identifier appended to the gene name
-                    (e.g. 'netphos', 'netnglyc').
+        tool_name:  Tool subdirectory name (e.g. 'NetPhos', 'NetMHC').
 
     Returns:
         str: A resolved output base path suitable for appending '.tsv' etc.
     """
     out = Path(output_arg)
-    if out.is_dir():
-        gene = extract_gene_from_filename(Path(input_arg).stem) or Path(input_arg).stem
-        return str(out / f"{gene}_{tool_name}")
-    return output_arg
+    gene = extract_gene_from_filename(Path(input_arg).stem) or Path(input_arg).stem
+    nested = out / gene / tool_name
+    nested.mkdir(parents=True, exist_ok=True)
+    return str(nested / gene)
 
 
 # =============================================================================
@@ -1641,13 +1588,27 @@ def infer_aamutation_from_nt(mutant_id: str, nt_sequence: str):
 
 def build_mutant_sequences_for_gene(
     gene_name: str,
-    nt_sequence: str,
+    nt_sequence,
     aa_sequence: str,
     mapping_file,
     log_path,
     failure_map,
+    input_type: str = 'nt',
 ):
-    """Return a dict of {header: sequence} for all mutants of a given gene."""
+    """
+    Return a dict of {header: sequence} for all mutants of a given gene.
+
+    Handles both CSV format (with headers) and single-column format.
+
+    Args:
+        gene_name: Gene identifier
+        nt_sequence: Wild-type nucleotide sequence (None if input_type='aa')
+        aa_sequence: Wild-type amino acid sequence
+        mapping_file: Path to mutation file (single-column or CSV)
+        log_path: Optional validation log path
+        failure_map: Optional map of failed mutations to skip
+        input_type: 'nt' for nucleotide mutations (e.g., A1002T), 'aa' for amino acid mutations (e.g., M334V)
+    """
     if not mapping_file or not os.path.exists(mapping_file):
         return {}
 
@@ -1665,17 +1626,22 @@ def build_mutant_sequences_for_gene(
     mutant_sequences = {}
     try:
         with open(mapping_file, 'r') as handle:
-            reader = csv.DictReader(handle)
-            mutant_keys = ['mutant', 'mutation', 'nt_mutation', 'ntmutant']
-            aa_keys = ['aamutant', 'aa_mutation', 'amino_acid_mutation', 'protein_mutation']
+            lines = handle.readlines()
 
-            for row in reader:
-                mutant_id = ""
-                for key in mutant_keys:
-                    if key in row and row[key]:
-                        mutant_id = row[key].strip()
-                        break
-                if not mutant_id:
+        # Detect format: single-column or CSV
+        is_single_column = True
+        if lines and ',' in lines[0]:
+            first_line_lower = lines[0].lower()
+            if any(keyword in first_line_lower for keyword in ['mutant', 'mutation', 'aamutant']):
+                is_single_column = False
+
+        mutant_keys = ['mutant', 'mutation', 'nt_mutation', 'ntmutant']
+        aa_keys = ['aamutant', 'aa_mutation', 'amino_acid_mutation', 'protein_mutation']
+
+        if is_single_column:
+            for line in lines:
+                mutant_id = line.strip()
+                if not mutant_id or mutant_id.lower() == 'mutant':
                     continue
 
                 mutant_clean = mutant_id.replace(" ", "")
@@ -1684,23 +1650,21 @@ def build_mutant_sequences_for_gene(
                 if should_skip_mutation(gene_name, mutant_clean, failure_map):
                     continue
 
-                aa_string = ""
-                for key in aa_keys:
-                    if key in row and row[key]:
-                        aa_string = row[key].strip()
-                        break
-
                 pos = None
                 wt_aa = mut_aa = None
-                if aa_string:
-                    pos, nts = get_mutation_data_bioAccurate(aa_string)
-                    if pos is not None and nts:
-                        wt_aa, mut_aa = nts
-                if pos is None or not wt_aa or not mut_aa:
+
+                if input_type == 'aa':
+                    aa_info = get_mutation_data_bioAccurate(mutant_clean)
+                    if aa_info[0] is not None and aa_info[1]:
+                        pos = aa_info[0]
+                        wt_aa, mut_aa = aa_info[1]
+                else:
                     inferred = infer_aamutation_from_nt(mutant_clean, nt_sequence)
-                    if inferred is None:
-                        continue
-                    pos, wt_aa, mut_aa = inferred
+                    if inferred is not None:
+                        pos, wt_aa, mut_aa = inferred
+
+                if pos is None or not wt_aa or not mut_aa:
+                    continue
 
                 idx = int(pos) - 1
                 if idx < 0 or idx >= len(aa_sequence):
@@ -1710,6 +1674,62 @@ def build_mutant_sequences_for_gene(
 
                 header = f"{gene_name}-{mutant_clean}"
                 mutant_sequences[header] = update_str(aa_sequence, mut_aa, idx)
+
+        else:
+            with open(mapping_file, 'r') as handle:
+                reader = csv.DictReader(handle)
+
+                for row in reader:
+                    mutant_id = ""
+                    for key in mutant_keys:
+                        if key in row and row[key]:
+                            mutant_id = row[key].strip()
+                            break
+                    if not mutant_id:
+                        continue
+
+                    mutant_clean = mutant_id.replace(" ", "")
+                    if allowed_mutations and mutant_clean.upper() not in allowed_mutations:
+                        continue
+                    if should_skip_mutation(gene_name, mutant_clean, failure_map):
+                        continue
+
+                    aa_string = ""
+                    for key in aa_keys:
+                        if key in row and row[key]:
+                            aa_string = row[key].strip()
+                            break
+
+                    pos = None
+                    wt_aa = mut_aa = None
+                    if aa_string:
+                        pos, nts = get_mutation_data_bioAccurate(aa_string)
+                        if pos is not None and nts:
+                            wt_aa, mut_aa = nts
+
+                    if pos is None or not wt_aa or not mut_aa:
+                        if input_type == 'aa':
+                            aa_info = get_mutation_data_bioAccurate(mutant_clean)
+                            if aa_info[0] is not None and aa_info[1]:
+                                pos = aa_info[0]
+                                wt_aa, mut_aa = aa_info[1]
+                        else:
+                            inferred = infer_aamutation_from_nt(mutant_clean, nt_sequence)
+                            if inferred is not None:
+                                pos, wt_aa, mut_aa = inferred
+
+                    if pos is None or not wt_aa or not mut_aa:
+                        continue
+
+                    idx = int(pos) - 1
+                    if idx < 0 or idx >= len(aa_sequence):
+                        continue
+                    if wt_aa and aa_sequence[idx].upper() != wt_aa.upper():
+                        continue
+
+                    header = f"{gene_name}-{mutant_clean}"
+                    mutant_sequences[header] = update_str(aa_sequence, mut_aa, idx)
+
     except Exception as exc:
         print(f"Warning: Failed to synthesize mutants for {gene_name} ({mapping_file}): {exc}")
         return {}
@@ -2271,7 +2291,7 @@ def stockholm_to_a2m(msa, focus_seq_id, rf_annotation=None):
     return a2m_msa
 
 
-def filter_msa_by_gaps(msa, max_seq_gaps=0.4, max_col_gaps=0.6, a2m_format=False):
+def filter_msa_by_gaps(msa, max_seq_gaps=0.4, max_col_gaps=0.6, a2m_format=False, focus_id=None):
     """
     Filter MSA by removing gappy sequences and columns.
 
@@ -2283,6 +2303,8 @@ def filter_msa_by_gaps(msa, max_seq_gaps=0.4, max_col_gaps=0.6, a2m_format=False
             columns only (uppercase + '-'). Insert columns ('.' and lowercase)
             are structural in A2M and excluded from gap accounting. Column
             filtering also operates on match-state columns only.
+        focus_id: When provided, columns where the focus sequence has a residue
+            (non-gap match state) are always retained regardless of gap fraction.
 
     Returns:
         dict: Filtered MSA
@@ -2307,11 +2329,16 @@ def filter_msa_by_gaps(msa, max_seq_gaps=0.4, max_col_gaps=0.6, a2m_format=False
         if not filtered_seqs:
             return {}
 
-        # Remove match-state columns with too many gaps
+        focus_seq = filtered_seqs.get(focus_id) if focus_id else None
+
+        # Remove match-state columns with too many gaps; always retain focus residue columns
         seq_list = list(filtered_seqs.values())
         n_seqs = len(seq_list)
         cols_to_keep = []
         for i in match_cols:
+            if focus_seq is not None and focus_seq[i] != '-':
+                cols_to_keep.append(i)
+                continue
             col = [s[i] for s in seq_list]
             gap_frac = sum(1 for c in col if c == '-') / n_seqs
             if gap_frac <= max_col_gaps:

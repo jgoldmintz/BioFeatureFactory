@@ -26,7 +26,7 @@ Both reference and alternate sequences are folded, sampled, and compared at mult
 4. **Variant Comparison**  
    - Ensemble and MFE energies compared between reference and alternate windows.  
    - **$\Delta\Delta G$ metrics** quantify energetic shifts.  
-   - **Jensen–Shannon divergence (JSD)** captures overall structural rearrangements.  
+   - **Jensen-Shannon divergence (JSD)** captures overall structural rearrangements.  
    - **Per-position $\Delta u$** measures the change in accessibility at every base in the window.
 
 5. **Parallel Execution**  
@@ -37,33 +37,45 @@ Both reference and alternate sequences are folded, sampled, and compared at mult
 
 ## Output Tables
 
-### 1. Summary Table (`--output`)
-Each row represents a single SNV-centered comparison (`pkey` = gene + mutation).  
+### Output Structure
+
+Output is written per gene to:
+
+```
+{output}/
+  {GENE}/
+    RNAfold/
+      {GENE}.rnafold.tsv           -- per-mutation summary
+      {GENE}.rnafold.positions.tsv -- per-position delta_u table
+```
+
+### 1. Summary Table (`{GENE}.rnafold.tsv`)
+Each row represents a single SNV-centered comparison (`pkey` = gene + mutation).
 
 | Column | Description                                                                                                                                         | Units |
 |--------|-----------------------------------------------------------------------------------------------------------------------------------------------------|-------|
-| `pkey` | Unique variant identifier in the form `GENE-mutation`                                                                                               | — |
+| `pkey` | Unique variant identifier in the form `GENE-mutation`                                                                                               | -- |
 | `transcript_pos` | Transcript coordinate of the mutation (1-based)                                                                                                     | nt |
-| `ddg_mfe_kcalmol` | Difference in minimum free energy (Alt – Ref). Indicates change in local thermodynamic stability of the MFE structure.                              | kcal/mol |
-| `ddg_ensemble_kcalmol` | Difference in ensemble free energy (Alt – Ref). Reflects ensemble-averaged equilibrium stability over all structures.                      | kcal/mol |
+| `ddg_mfe_kcalmol` | Difference in minimum free energy (Alt - Ref). Indicates change in local thermodynamic stability of the MFE structure.                              | kcal/mol |
+| `ddg_ensemble_kcalmol` | Difference in ensemble free energy (Alt - Ref). Reflects ensemble-averaged equilibrium stability over all structures.                      | kcal/mol |
 | `d_meanE_kcalmol` | Difference in mean sampled energy from the Boltzmann ensemble. Represents average energetic shift across sampled conformations.                     | kcal/mol |
 | `ref_sdE_kcalmol`, `alt_sdE_kcalmol` | Standard deviations of sampled energies for reference and alternate. Higher SD = more structural diversity (less rigidity).                         | kcal/mol |
-| `jsd_unpaired_bits` | Jensen–Shannon divergence between per-base unpaired probability distributions. Quantifies structural dissimilarity (0 = identical, >0 = divergent). | bits |
-| `delta_central` | Change in unpaired probability ($\Delta u$) at the SNV-centered position (midpoint of the window). Useful for pinpointing direct local effects.             | unitless (0–1) |
+| `jsd_unpaired_bits` | Jensen-Shannon divergence between per-base unpaired probability distributions. Quantifies structural dissimilarity (0 = identical, >0 = divergent). | bits |
+| `delta_central` | Change in unpaired probability ($\Delta u$) at the SNV-centered position (midpoint of the window). Useful for pinpointing direct local effects.             | unitless (0-1) |
 
 ---
 
-### 2. Per-Position Table (`--positions-out`)
-Each row represents a single nucleotide position within the analyzed window.  
+### 2. Per-Position Table (`{GENE}.rnafold.positions.tsv`)
+Each row represents a single nucleotide position within the analyzed window.
 
 | Column | Description                                                                                                                              | Values |
 |--------|------------------------------------------------------------------------------------------------------------------------------------------|---------|
-| `pkey` | Variant key corresponding to the parent SNV                                                                                              | — |
+| `pkey` | Variant key corresponding to the parent SNV                                                                                              | -- |
 | `transcript_pos` | Transcript coordinate of the variant (matches summary table)                                                                             | nt |
 | `pos` | Position index within the window (1 = start, window_length = end). Position 76 corresponds to the SNV.                                   | integer |
-| `delta_u` | Per-position change in unpaired probability (Alt – Ref). Positive values indicate increased accessibility in the alternate structure.    | float |
+| `delta_u` | Per-position change in unpaired probability (Alt - Ref). Positive values indicate increased accessibility in the alternate structure.    | float |
 | `change_flag` | 1 if $|\Delta u| \geq \tau$ ($\tau = 0.05$ default) else 0. Marks positions with deterministic meaningful shifts.      | 0/1 |
-| `direction` | Sign of $\Delta u$: 1 = increased unpaired probability, –1 = decreased, 0 = unchanged. Indicates direction of accessibility change. | –1/0/1 |
+| `direction` | Sign of $\Delta u$: 1 = increased unpaired probability, -1 = decreased, 0 = unchanged. Indicates direction of accessibility change. | -1/0/1 |
 | `mfe_change_flag` | 1 if base-pairing status differs between Ref/Alt MFE structures (paired <-> unpaired).                                                     | 0/1 |
 | `mfe_change_dir` | Encodes the type of base-pairing change: 0 = unpaired->paired, 1 = paired->unpaired. Indicates structural opening or closing at that base. | 0/1 |
 
@@ -78,20 +90,20 @@ Each row represents a single nucleotide position within the analyzed window.
 
 - **JSD_unpaired_bits**  
   - Measures how much the overall accessibility landscape changes.  
-  - Values < 0.02 indicate near-identical folds; 0.05–0.1 indicate local rearrangements; >0.1 suggests significant structural change.
+  - Values < 0.02 indicate near-identical folds; 0.05-0.1 indicate local rearrangements; >0.1 suggests significant structural change.
 
 - **$\Delta u$ (Per-base accessibility shift)**
-  - Indicates how much each nucleotide’s unpaired probability changes.
+  - Indicates how much each nucleotide's unpaired probability changes.
   - Large $\Delta u$ around the variant may signify disruption of local base pairing.
   - Nonlocal $\Delta u$ patterns (far from the SNV) suggest propagated conformational effects.
 
 - **change_flag and direction**  
   - Provide a thresholded binary signal for modeling or visualization.  
-  - Useful for identifying structurally “sensitive” regions across variants.
+  - Useful for identifying structurally "sensitive" regions across variants.
 
 - **mfe_change_flag and mfe_change_dir**  
-  - Capture discrete MFE pairing state transitions, complementing $\Delta u$’s continuous probabilities.
-  - Allow classification of “opening” vs “closing” effects in the predicted secondary structure.
+  - Capture discrete MFE pairing state transitions, complementing $\Delta u$'s continuous probabilities.
+  - Allow classification of "opening" vs "closing" effects in the predicted secondary structure.
 
 ---
 ## JSD Function Reference
@@ -105,7 +117,7 @@ The `jsd_unpaired` function in this pipeline measures the **difference between r
   - $q_i =$ unpaired probability in the alternate sequence  
   - $m_i = (p_i + q_i)/2$
 
-The function computes the Jensen–Shannon divergence (JSD) using $log_2$:
+The function computes the Jensen-Shannon divergence (JSD) using $log_2$:
 
  $JSD(P \parallel Q) = \frac{1}{L} \sum_{i=1}^{L} \left[ H(m_i) - \frac{1}{2}(H(p_i) + H(q_i)) \right]$
 
@@ -124,8 +136,8 @@ where, $H(x) = -x\log_2(x) - (1-x)\log_2(1-x)$ is the Bernoulli entropy for the 
 
 **Interpretation:**
 - Low JSD (< 0.02): Nearly identical ensembles.  
-- Moderate JSD (0.05–0.10): Localized folding rearrangements.  
-- High JSD (> 0.10): Significant global restructuring of the window’s folding ensemble.
+- Moderate JSD (0.05-0.10): Localized folding rearrangements.  
+- High JSD (> 0.10): Significant global restructuring of the window's folding ensemble.
 
 **Implementation source:**
 - Derived directly from *Elements of Information Theory* (Cover & Thomas, 2006).  
@@ -135,7 +147,7 @@ where, $H(x) = -x\log_2(x) - (1-x)\log_2(1-x)$ is the Bernoulli entropy for the 
 ---
 ## $\Delta u$ and $\tau$
 
-The symbol $u$ denotes the *unpaired probability* of a nucleotide — the marginal probability that position $i$ remains unpaired across all Boltzmann-weighted secondary structures:
+The symbol $u$ denotes the *unpaired probability* of a nucleotide -- the marginal probability that position $i$ remains unpaired across all Boltzmann-weighted secondary structures:
 
 $u_i = 1 - \sum_{j \neq i} p_{ij}$
 
@@ -149,17 +161,17 @@ $\Delta u_i = u_i^{(\text{alt})} - u_i^{(\text{ref})}$
 - **Negative $\Delta u$** -> base becomes more paired (region closes).
 - $\Delta u \approx 0$ -> no local structural change.
 
-The parameter **$τ$ (tau)** is a *magnitude threshold* applied to $|\Delta u|$ to define significant changes.  
+The parameter **$$\tau$$ (tau)** is a *magnitude threshold* applied to $|\Delta u|$ to define significant changes.  
 By default, $\tau = 0.05$ ($\geq 5\%$ change in unpaired probability).  
 This threshold filters out small fluctuations due to ensemble sampling noise, allowing `change_flag` and `direction` to represent discrete, biologically meaningful **structural perturbations**.
 
 
 ---
 ## Notes
-- Default temperature is 37 °C. All energies are in kcal/mol.  
+- Default temperature is 37 $^\circ$C. All energies are in kcal/mol.  
 - Boltzmann sampling is stochastic; minor variation across runs is expected.  
 - `OMP_NUM_THREADS=1` prevents oversubscription during multiprocessing.
-- All genes write to shared summary and per-position output files for streamlined aggregation.
+- Each gene writes to its own nested output directory: `{output}/{GENE}/RNAfold/`.
 
 ---
 

@@ -136,21 +136,20 @@ def _confidence_to_weight(conf: str) -> float:
 def load_mapping_dir(mapping_dir: str):
     """
     Load all mapping files in mapping_dir into a dict: {gene_name: DataFrame}
-    Expected columns include at least: 'mutant' and 'genomic' as in your example.
+    Accepts a single CSV file or a directory of CSV files.
+    Expected columns include at least: 'mutant' and 'genomic'.
     """
-    mapping_dir = Path(mapping_dir)
-    if not mapping_dir.exists():
-        raise FileNotFoundError(f"Mapping dir not found: {mapping_dir}")
+    mapping_path = Path(mapping_dir)
+    if not mapping_path.exists():
+        raise FileNotFoundError(f"Mapping path not found: {mapping_path}")
     maps = {}
-    for f in mapping_dir.iterdir():
-        if not f.is_file():
-            continue
-        if f.suffix not in (".tsv", ".csv", ".txt"):
+    files = [mapping_path] if mapping_path.is_file() else mapping_path.rglob("*.csv")
+    for f in files:
+        if not f.is_file() or f.suffix not in (".tsv", ".csv", ".txt"):
             continue
         df = pd.read_csv(f, sep="\t" if f.suffix == ".tsv" else ",")
         gene = extract_gene_from_filename(str(f))
         if not gene:
-            # fall back to stem
             gene = f.stem
         maps[gene] = df
     return maps
@@ -735,10 +734,10 @@ def _process_gene(fasta_path: Path,
 
 def main():
     parser = argparse.ArgumentParser(description="GeneSplicer WT<->ALT ensemble delta caller")
-    parser.add_argument("-i", "--input", required=True, help="Directory of genomic FASTA files")
-    parser.add_argument("-m", "--mapping-dir", required=True, help="Directory of genomic mutation/mapping files")
+    parser.add_argument("-i", "--input", required=True, help="Directory of genomic FASTA files, or a single FASTA file")
+    parser.add_argument("-m", "--mapping-dir", required=True, help="Genomic mutation mapping CSV file, or directory of CSV files")
     parser.add_argument("-g", "--genesplicer-dir", required=True, help="Directory containing GeneSplicer binary")
-    parser.add_argument("-o", "--output", required=True, help="Output summary TSV basename (e.g. genesplicer.summary.tsv)")
+    parser.add_argument("-o", "--output", required=True, help="Output base directory (writes {GENE}/GeneSplicer/{GENE}.tsv, .events.tsv, .sites.tsv)")
     parser.add_argument("--pipeline", choices=["full", "window", "custom"], default="full",
                         help="Pipeline mode. 'full' = run on whole genomic sequence once and mutate in-memory.")
     parser.add_argument("--window", type=int, default=DEFAULT_WINDOW, help="Window/reporting size (default 151)")
@@ -757,7 +756,7 @@ def main():
     parser.add_argument("--log", help="Validation log file/dir to skip failed mutations")
     args = parser.parse_args()
 
-    input_dir = Path(args.input)
+    input_path = Path(args.input)
     mapping_dir = args.mapping_dir
     genesplicer_dir = args.genesplicer_dir
     output_base = args.output
@@ -778,9 +777,12 @@ def main():
     mappings = load_mapping_dir(mapping_dir)
 
     # discover FASTA files
-    fasta_paths = [p for p in input_dir.iterdir() if p.is_file() and p.suffix in (".fa", ".fasta", ".fna")]
+    if input_path.is_file():
+        fasta_paths = [input_path]
+    else:
+        fasta_paths = [p for p in input_path.iterdir() if p.is_file() and p.suffix in (".fa", ".fasta", ".fna")]
     if not fasta_paths:
-        print(f"No FASTA files found in {input_dir}", file=sys.stderr)
+        print(f"No FASTA files found in {args.input}", file=sys.stderr)
         sys.exit(1)
 
     # policy bundle
@@ -801,6 +803,9 @@ def main():
     all_events = []
     all_sites = []
     all_pkeys = []
+    events_by_gene = {}
+    sites_by_gene = {}
+    pkeys_by_gene = {}
 
     total_genes = len(fasta_paths)
     genes_completed = 0
@@ -849,6 +854,9 @@ def main():
             total_skipped_runtime += gene_stats.get("skipped_runtime", 0)
 
             gene_name = gene_stats.get("gene") or fut_meta.get(fut, "unknown")
+            events_by_gene[gene_name] = gene_events
+            sites_by_gene[gene_name] = gene_sites
+            pkeys_by_gene[gene_name] = gene_pkeys
             skips = []
             if gene_stats.get("skipped_validation", 0):
                 skips.append(f"validation={gene_stats['skipped_validation']}")
@@ -965,18 +973,45 @@ def main():
         )
     summary_df = pd.DataFrame(summary_rows)
 
-    # write outputs
-    summary_path = Path(output_base)
-    events_path = summary_path.with_suffix(".events.tsv")
-    sites_path = summary_path.with_suffix(".sites.tsv")
+    # write per-gene outputs
+    for gname in events_by_gene:
+        g_events = events_by_gene[gname]
+        g_sites = sites_by_gene[gname]
+        g_pkeys = pkeys_by_gene[gname]
 
-    summary_df.to_csv(summary_path, sep="\t", index=False)
-    events_df.to_csv(events_path, sep="\t", index=False)
-    sites_df.to_csv(sites_path, sep="\t", index=False)
+        g_events_df = pd.concat(g_events, ignore_index=True) if g_events else pd.DataFrame(columns=events_required)
+        g_sites_df = pd.concat(g_sites, ignore_index=True) if g_sites else pd.DataFrame(columns=sites_required)
+        for c in events_required:
+            if c not in g_events_df.columns:
+                g_events_df[c] = pd.NA
+        for c in sites_required:
+            if c not in g_sites_df.columns:
+                g_sites_df[c] = pd.NA
 
-    print(f"wrote summary to {summary_path}")
-    print(f"wrote events to  {events_path}")
-    print(f"wrote sites to   {sites_path}")
+        if not g_events_df.empty:
+            g_events_df["priority"] = g_events_df.apply(_calc_priority, axis=1)
+            g_events_df["is_high_impact"] = g_events_df.apply(_is_hi, axis=1)
+
+        g_summary_rows = []
+        for pkey in g_pkeys:
+            g_summary_rows.append(
+                _summarize_variant(
+                    events_df=g_events_df,
+                    sites_df=g_sites_df,
+                    pkey=pkey,
+                    report_radius=report_radius,
+                    policy=policy,
+                )
+            )
+        g_summary_df = pd.DataFrame(g_summary_rows)
+
+        gene_out_dir = Path(output_base) / gname / "GeneSplicer"
+        gene_out_dir.mkdir(parents=True, exist_ok=True)
+        g_summary_df.to_csv(str(gene_out_dir / f"{gname}.tsv"), sep="\t", index=False)
+        g_events_df.to_csv(str(gene_out_dir / f"{gname}.events.tsv"), sep="\t", index=False)
+        g_sites_df.to_csv(str(gene_out_dir / f"{gname}.sites.tsv"), sep="\t", index=False)
+        print(f"wrote {gname} outputs to {gene_out_dir}")
+
     print(
         "Run summary: "
         f"{genes_completed}/{total_genes} genes processed, "

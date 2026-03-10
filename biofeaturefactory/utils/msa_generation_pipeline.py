@@ -27,309 +27,19 @@ Output format: A2M (compatible with PLMC and EVmutation)
 import argparse
 import json
 import os
-import re
-import subprocess
 import sys
-import tempfile
-from collections import defaultdict
 from pathlib import Path
 
 import numpy as np
 from Bio import SeqIO
 from Bio.Seq import Seq
-from Bio.SeqRecord import SeqRecord
 
-from utility import prepare_protein_query, extract_gene_from_filename
-
-
-def run_jackhmmer(query_fasta, database, output_sto, jackhmmer_binary,
-                  iterations=5, evalue_inclusion=1e-3, threads=4):
-    """
-    Run jackhmmer iterative search.
-
-    Args:
-        query_fasta: Path to query protein sequence (FASTA)
-        database: Path to UniRef90 or similar database
-        output_sto: Path for Stockholm output
-        jackhmmer_binary: Path to jackhmmer executable
-        iterations: Number of search iterations
-        evalue_inclusion: E-value threshold for inclusion
-        threads: Number of CPU threads
-
-    Returns:
-        Path to Stockholm output file
-    """
-    cmd = [
-        jackhmmer_binary,
-        '-N', str(iterations),
-        '--incE', str(evalue_inclusion),
-        '-A', output_sto,
-        '--cpu', str(threads),
-        '--noali',  # Don't output alignment to stdout
-        query_fasta,
-        database
-    ]
-
-    print(f"Running jackhmmer with {iterations} iterations...")
-    print(f"Command: {' '.join(cmd)}")
-
-    result = subprocess.run(cmd, capture_output=True, text=True)
-
-    if result.returncode != 0:
-        print(f"jackhmmer stderr: {result.stderr}", file=sys.stderr)
-        raise RuntimeError(f"jackhmmer failed with exit code {result.returncode}")
-
-    print(f"jackhmmer complete. Output: {output_sto}")
-    return Path(output_sto)
-
-
-def parse_stockholm(stockholm_file):
-    """
-    Parse Stockholm format MSA file.
-
-    Args:
-        stockholm_file: Path to Stockholm file
-
-    Returns:
-        tuple: (dict {seq_id: sequence}, rf_annotation str or None)
-            rf_annotation is the concatenated #=GC RF string where 'x' marks
-            match columns and '.' marks insert columns. None if absent.
-    """
-    current_seqs = defaultdict(str)
-    rf_parts = []
-
-    with open(stockholm_file, 'r') as f:
-        for line in f:
-            line = line.rstrip()
-
-            # Capture RF column annotation before skipping other # lines
-            if line.startswith('#=GC RF'):
-                parts = line.split()
-                if len(parts) >= 3:
-                    rf_parts.append(parts[2])
-                continue
-
-            # Skip remaining comments and empty lines
-            if line.startswith('#') or line.startswith('//') or not line:
-                continue
-
-            # Parse sequence lines
-            parts = line.split()
-            if len(parts) >= 2:
-                seq_id = parts[0]
-                seq = parts[1]
-                current_seqs[seq_id] += seq
-
-    rf_annotation = ''.join(rf_parts) if rf_parts else None
-    return dict(current_seqs), rf_annotation
-
-
-def stockholm_to_a2m(msa, focus_seq_id, rf_annotation=None):
-    """
-    Convert Stockholm MSA to A2M format.
-
-    A2M format:
-    - Uppercase: match states (aligned to query)
-    - Lowercase: insertions relative to query
-    - '-': deletions (gaps in sequence, not in query)
-    - '.': gaps in query (insertions in other sequences)
-
-    Args:
-        msa: dict {seq_id: sequence}
-        focus_seq_id: ID of the focus/query sequence
-        rf_annotation: #=GC RF string from parse_stockholm where 'x' = match
-            column and '.' = insert column. When provided, this is used as the
-            authoritative match/insert column definition. Falls back to focus
-            sequence non-gap positions when None.
-
-    Returns:
-        dict: {seq_id: a2m_sequence}
-    """
-    if focus_seq_id not in msa:
-        # Try partial match
-        for seq_id in msa:
-            if focus_seq_id in seq_id or seq_id in focus_seq_id:
-                focus_seq_id = seq_id
-                break
-        else:
-            raise ValueError(f"Focus sequence '{focus_seq_id}' not found in MSA")
-
-    # Identify match columns using RF annotation when available
-    if rf_annotation is not None:
-        match_columns = {i for i, c in enumerate(rf_annotation) if c == 'x'}
-    else:
-        focus_seq = msa[focus_seq_id]
-        match_columns = {i for i, c in enumerate(focus_seq) if c not in '-.'}
-
-    a2m_msa = {}
-    for seq_id, seq in msa.items():
-        a2m_seq = []
-        for i, c in enumerate(seq):
-            if i in match_columns:
-                # Match column: uppercase or deletion marker
-                if c in '-.':
-                    a2m_seq.append('-')
-                else:
-                    a2m_seq.append(c.upper())
-            else:
-                # Insert column: lowercase or gap marker
-                if c in '-.':
-                    a2m_seq.append('.')
-                else:
-                    a2m_seq.append(c.lower())
-
-        a2m_msa[seq_id] = ''.join(a2m_seq)
-
-    return a2m_msa
-
-
-def filter_msa_by_gaps(msa, max_seq_gaps=0.4, max_col_gaps=0.6, a2m_format=False, focus_id=None):
-    """
-    Filter MSA by removing gappy sequences and columns.
-
-    Args:
-        msa: dict {seq_id: sequence}
-        max_seq_gaps: Maximum fraction of gaps allowed per sequence
-        max_col_gaps: Maximum fraction of gaps allowed per column
-        a2m_format: When True, gap fractions are computed over match-state
-            columns only (uppercase + '-'). Insert columns ('.' and lowercase)
-            are structural in A2M and excluded from gap accounting. Column
-            filtering also operates on match-state columns only.
-        focus_id: When provided, columns where the focus sequence has a residue
-            (non-gap match state) are always retained regardless of gap fraction.
-
-    Returns:
-        dict: Filtered MSA
-    """
-    if not msa:
-        return {}
-
-    if a2m_format:
-        sample = next(iter(msa.values()))
-        match_cols = [i for i, c in enumerate(sample) if c == '-' or c.isupper()]
-
-        filtered_seqs = {}
-        for seq_id, seq in msa.items():
-            match_states = [seq[i] for i in match_cols]
-            gap_count = sum(1 for c in match_states if c == '-')
-            gap_frac = gap_count / len(match_states) if match_states else 1.0
-            if gap_frac <= max_seq_gaps:
-                filtered_seqs[seq_id] = seq
-
-        if not filtered_seqs:
-            print("Warning: All sequences filtered out by gap threshold", file=sys.stderr)
-            return {}
-
-        focus_seq = filtered_seqs.get(focus_id) if focus_id else None
-
-        seq_list = list(filtered_seqs.values())
-        n_seqs = len(seq_list)
-        cols_to_keep = []
-        for i in match_cols:
-            if focus_seq is not None and focus_seq[i] != '-':
-                cols_to_keep.append(i)
-                continue
-            col = [s[i] for s in seq_list]
-            gap_frac = sum(1 for c in col if c == '-') / n_seqs
-            if gap_frac <= max_col_gaps:
-                cols_to_keep.append(i)
-
-        final_msa = {}
-        for seq_id, seq in filtered_seqs.items():
-            final_msa[seq_id] = ''.join(seq[i] for i in cols_to_keep)
-
-        return final_msa
-
-    # Stockholm / non-A2M path
-    filtered_seqs = {}
-    for seq_id, seq in msa.items():
-        gap_count = seq.count('-') + seq.count('.') + seq.count('!')
-        gap_frac = gap_count / len(seq) if len(seq) > 0 else 1.0
-        if gap_frac <= max_seq_gaps:
-            filtered_seqs[seq_id] = seq
-
-    if not filtered_seqs:
-        print("Warning: All sequences filtered out by gap threshold", file=sys.stderr)
-        return {}
-
-    seq_list = list(filtered_seqs.values())
-    seq_len = len(seq_list[0])
-    n_seqs = len(seq_list)
-
-    cols_to_keep = []
-    for i in range(seq_len):
-        col = [s[i] for s in seq_list]
-        gap_count = sum(1 for c in col if c in '-.')
-        gap_frac = gap_count / n_seqs
-        if gap_frac <= max_col_gaps:
-            cols_to_keep.append(i)
-
-    final_msa = {}
-    for seq_id, seq in filtered_seqs.items():
-        new_seq = ''.join(seq[i] for i in cols_to_keep)
-        final_msa[seq_id] = new_seq
-
-    return final_msa
-
-
-def compute_sequence_weights(msa, identity_threshold=0.8):
-    """
-    Compute sequence weights based on clustering at identity threshold.
-
-    Args:
-        msa: dict {seq_id: sequence}
-        identity_threshold: Clustering threshold (0.8 = 80% identity)
-
-    Returns:
-        dict: {seq_id: weight}
-    """
-    seq_ids = list(msa.keys())
-    n_seqs = len(seq_ids)
-
-    if n_seqs == 0:
-        return {}
-
-    # Convert to numpy array for efficient comparison
-    seqs = [msa[sid] for sid in seq_ids]
-    seq_len = len(seqs[0])
-
-    # Compute pairwise identities and count neighbors
-    neighbor_counts = np.ones(n_seqs)  # Each sequence counts itself
-
-    for i in range(n_seqs):
-        for j in range(i + 1, n_seqs):
-            # Compute identity
-            matches = sum(1 for a, b in zip(seqs[i], seqs[j])
-                         if a == b and a not in '-.')
-            aligned = sum(1 for a, b in zip(seqs[i], seqs[j])
-                         if a not in '-.' and b not in '-.')
-
-            if aligned > 0:
-                identity = matches / aligned
-                if identity >= identity_threshold:
-                    neighbor_counts[i] += 1
-                    neighbor_counts[j] += 1
-
-    # Weight = 1 / number of neighbors
-    weights = {seq_ids[i]: 1.0 / neighbor_counts[i] for i in range(n_seqs)}
-    return weights
-
-
-def compute_neff(msa, identity_threshold=0.8):
-    """
-    Compute effective number of sequences (N_eff).
-
-    N_eff = sum of sequence weights, where weight = 1/n_neighbors
-
-    Args:
-        msa: dict {seq_id: sequence}
-        identity_threshold: Clustering threshold
-
-    Returns:
-        float: N_eff value
-    """
-    weights = compute_sequence_weights(msa, identity_threshold)
-    return sum(weights.values())
+from utility import (
+    prepare_protein_query, extract_gene_from_filename,
+    run_jackhmmer, parse_stockholm, stockholm_to_a2m,
+    filter_msa_by_gaps, compute_sequence_weights, compute_neff,
+    write_a2m,
+)
 
 
 def get_query_length(query_fasta):
@@ -344,27 +54,7 @@ def get_focus_id(query_fasta):
     return record.id
 
 
-def write_a2m(msa, output_path, focus_seq_id=None):
-    """
-    Write MSA to A2M format file.
-
-    Args:
-        msa: dict {seq_id: sequence}
-        output_path: Output file path
-        focus_seq_id: If provided, write focus sequence first
-    """
-    with open(output_path, 'w') as f:
-        # Write focus sequence first if specified
-        if focus_seq_id and focus_seq_id in msa:
-            f.write(f">{focus_seq_id}\n{msa[focus_seq_id]}\n")
-
-        # Write remaining sequences
-        for seq_id, seq in msa.items():
-            if seq_id != focus_seq_id:
-                f.write(f">{seq_id}\n{seq}\n")
-
-
-def generate_msa(query_fasta, database, output_path, jackhmmer_binary,
+def generate_msa(query_fasta, database, output_dir, jackhmmer_binary,
                  iterations=5, evalue_inclusion=1e-3, bitscore_threshold=0.5,
                  min_neff_ratio=10, max_seq_gaps=0.4, max_col_gaps=0.6,
                  identity_threshold=0.8, threads=4, keep_intermediate=False):
@@ -374,7 +64,7 @@ def generate_msa(query_fasta, database, output_path, jackhmmer_binary,
     Args:
         query_fasta: Path to query protein sequence
         database: Path to sequence database
-        output_path: Path for output A2M file
+        output_dir: Output base directory (writes {GENE}/MSA/{GENE}.msa.a2m and .stats.json)
         jackhmmer_binary: Path to jackhmmer executable
         iterations: Number of jackhmmer iterations
         evalue_inclusion: E-value for sequence inclusion
@@ -400,10 +90,12 @@ def generate_msa(query_fasta, database, output_path, jackhmmer_binary,
         print(f"Query: {focus_id}, Length: {query_length}")
         print(f"Target N_eff: >={min_neff:.0f} (ratio {min_neff_ratio}xL)")
 
-        # Create temporary file for Stockholm output
-        output_dir = Path(output_path).parent
-        output_dir.mkdir(parents=True, exist_ok=True)
-        sto_path = str(output_path).replace('.a2m', '.sto')
+        # Resolve nested output path
+        gene = extract_gene_from_filename(query_fasta) or Path(query_fasta).stem
+        nested_dir = Path(output_dir) / gene / "MSA"
+        nested_dir.mkdir(parents=True, exist_ok=True)
+        output_path = nested_dir / f"{gene}.msa.a2m"
+        sto_path = str(nested_dir / f"{gene}.msa.sto")
 
         # Run jackhmmer
         run_jackhmmer(
@@ -504,7 +196,7 @@ def generate_msa(query_fasta, database, output_path, jackhmmer_binary,
     }
 
     # Write stats JSON
-    stats_path = str(output_path).replace('.a2m', '.stats.json')
+    stats_path = str(output_path).replace('.msa.a2m', '.msa.stats.json')
     with open(stats_path, 'w') as f:
         json.dump(stats, f, indent=2)
     print(f"Statistics written to {stats_path}")
@@ -523,7 +215,9 @@ Examples:
     --query protein.fasta \\
     --database /path/to/uniref90.fasta \\
     --jackhmmer-binary jackhmmer \\
-    --output protein.msa.a2m
+    --output results/
+  # Writes: results/GENE/MSA/GENE.msa.a2m
+  #         results/GENE/MSA/GENE.msa.stats.json
 
   # With custom parameters
   python msa-generation-pipeline.py \\
@@ -533,7 +227,7 @@ Examples:
     --iterations 5 \\
     --min-neff-ratio 10 \\
     --threads 8 \\
-    --output protein.msa.a2m
+    --output results/
 
 Quality thresholds:
   N_eff >= 10L (L = protein length) is recommended for EVmutation.
@@ -549,7 +243,7 @@ Quality thresholds:
     parser.add_argument('--jackhmmer-binary', '-j', required=True,
                         help='Path to jackhmmer executable')
     parser.add_argument('--output', '-o', required=True,
-                        help='Output MSA file (A2M format)')
+                        help='Output base directory (writes {GENE}/MSA/{GENE}.msa.a2m and .stats.json)')
 
     # Optional parameters
     parser.add_argument('--iterations', '-N', type=int, default=5,
@@ -583,7 +277,7 @@ Quality thresholds:
     stats = generate_msa(
         query_fasta=args.query,
         database=args.database,
-        output_path=args.output,
+        output_dir=args.output,
         jackhmmer_binary=args.jackhmmer_binary,
         iterations=args.iterations,
         evalue_inclusion=args.evalue_inclusion,
@@ -608,7 +302,7 @@ Quality thresholds:
     print(f"Coverage: {stats['coverage']:.1%}")
     print(f"Mean identity: {stats['mean_identity']:.1%}")
     print(f"Quality check: {'PASS' if stats['quality_pass'] else 'WARN (low N_eff)'}")
-    print(f"Output: {args.output}")
+    print(f"Output dir: {args.output}")
 
 
 if __name__ == "__main__":

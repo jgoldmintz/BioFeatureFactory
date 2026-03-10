@@ -29,6 +29,7 @@ import argparse
 import csv
 import os
 import re
+import shutil
 import sys
 from pathlib import Path
 import pysam
@@ -690,9 +691,8 @@ def main(argv=None):
             )
 
             # Write FASTA with ORF / transcript / genomic
-            gene_dir = output / gene
-            fasta_path = gene_dir / f"{gene}.fasta"
-            mapping_dir = gene_dir / "mapping"
+            fasta_path = output / "fastas" / f"{gene}.fasta"
+            fasta_path.parent.mkdir(parents=True, exist_ok=True)
 
             write_fasta(
                 fasta_path,
@@ -708,20 +708,29 @@ def main(argv=None):
             tx_rows, chrom_rows, gdna_rows, aa_rows = map_orf_mutations_to_transcript_and_genome(muts, tx_map)
 
             if do_chrom:
-                write_mapping_csv(mapping_dir / f"chr_mapping_{gene}.csv", "chromosome", chrom_rows)
-                print(f"  Chromosome mapping: {mapping_dir / f'chr_mapping_{gene}.csv'}  ({len(chrom_rows)} rows)")
+                chrom_csv = output / "mappings" / "chromosome" / f"chr_mapping_{gene}.csv"
+                write_mapping_csv(chrom_csv, "chromosome", chrom_rows)
+                print(f"  Chromosome mapping: {chrom_csv}  ({len(chrom_rows)} rows)")
 
             if do_genomic:
-                write_mapping_csv(mapping_dir / f"genomic_mapping_{gene}.csv", "genomic", gdna_rows)
-                print(f"  Genomic mapping: {mapping_dir / f'genomic_mapping_{gene}.csv'}  ({len(gdna_rows)} rows)")
+                gdna_csv = output / "mappings" / "gDNA" / f"genomic_mapping_{gene}.csv"
+                write_mapping_csv(gdna_csv, "genomic", gdna_rows)
+                print(f"  Genomic mapping: {gdna_csv}  ({len(gdna_rows)} rows)")
 
             if do_transcript:
-                write_mapping_csv(mapping_dir / f"transcript_mapping_{gene}.csv", "transcript", tx_rows)
-                print(f"  Transcript mapping: {mapping_dir / f'transcript_mapping_{gene}.csv'}  ({len(tx_rows)} rows)")
+                tx_csv = output / "mappings" / "transcript" / f"transcript_mapping_{gene}.csv"
+                write_mapping_csv(tx_csv, "transcript", tx_rows)
+                print(f"  Transcript mapping: {tx_csv}  ({len(tx_rows)} rows)")
 
             if do_aa:
-                write_mapping_csv(mapping_dir / f"{gene}_nt_to_aa_mapping.csv", "aamutant", aa_rows)
-                print(f"  Amino-acid mapping: {mapping_dir / f'{gene}_nt_to_aa_mapping.csv'}  ({len(aa_rows)} rows)")
+                aa_csv = output / "mappings" / "aa" / f"{gene}_aa_mapping.csv"
+                write_mapping_csv(aa_csv, "aamutant", aa_rows)
+                print(f"  Amino-acid mapping: {aa_csv}  ({len(aa_rows)} rows)")
+
+            mut_dest = output / "mappings" / "mutations" / f"{gene}_mutations.csv"
+            mut_dest.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(f, mut_dest)
+            print(f"  Mutations copy: {mut_dest}")
             len_issues = tx_map.get("validation_length_issues") or []
             mismatches = tx_map.get("validation_mismatches") or []
             total_mut = len(muts)

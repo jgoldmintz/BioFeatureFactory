@@ -54,7 +54,6 @@ from biofeaturefactory.utils.utility import (
     extract_mutation_from_sequence_name,
     extract_gene_from_filename,
     read_fasta,
-    resolve_output_base,
 )
 
 
@@ -749,8 +748,6 @@ def run_full_pipeline_mode(args, executor_fn, ape_bin):
         print("ERROR: --mapping-dir is required for full-pipeline mode")
         return 1
 
-    args.output = resolve_output_base(args.output, args.input, "netphos")
-
     wt_header = getattr(args, 'wt_header', 'ORF')
     verbose = getattr(args, 'verbose', False)
     keep = getattr(args, 'keep_intermediates', False)
@@ -813,12 +810,28 @@ def run_full_pipeline_mode(args, executor_fn, ape_bin):
         wt_preds_by_gene, mut_preds_by_mutation, mapping_lookup,
         threshold=args.threshold, delta_threshold=0.05)
 
-    # Strip .tsv from output if user included it, since write_ensemble_outputs adds it
-    output_base = args.output
-    if output_base.endswith('.tsv'):
-        output_base = output_base[:-4]
+    genes_in_results = set()
+    for row in summary:
+        genes_in_results.add(row.get('Gene', ''))
+    for row in events:
+        genes_in_results.add(row.get('Gene', ''))
+    for row in sites:
+        genes_in_results.add(row.get('Gene', ''))
+    genes_in_results.discard('')
 
-    write_ensemble_outputs(output_base, summary, events, sites)
+    for gene in genes_in_results:
+        gene_summary = [r for r in summary if r.get('Gene') == gene]
+        gene_events = [r for r in events if r.get('Gene') == gene]
+        gene_sites = [r for r in sites if r.get('Gene') == gene]
+        gene_out = Path(args.output) / gene / "NetPhos"
+        gene_out.mkdir(parents=True, exist_ok=True)
+        output_base = str(gene_out / gene)
+        write_ensemble_outputs(output_base, gene_summary, gene_events, gene_sites)
+
+    if not genes_in_results:
+        gene_out = Path(args.output) / "NetPhos"
+        gene_out.mkdir(parents=True, exist_ok=True)
+        write_ensemble_outputs(str(gene_out / "output"), summary, events, sites)
 
     # Cleanup
     if not keep:
@@ -934,9 +947,9 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     parser.add_argument('input', nargs='?',
-                        help='Input: WT FASTA file/directory (full-pipeline), FASTA file/directory (netphos-only), or NetPhos output directory (parse-only)')
+                        help='Input: WT FASTA file/directory')
     parser.add_argument('output', nargs='?',
-                        help='Output base path (produces .tsv, .events.tsv, .sites.tsv)')
+                        help='Output base directory (writes {GENE}/NetPhos/{GENE}.tsv, .events.tsv, .sites.tsv)')
     parser.add_argument('--threshold', type=float, default=0.5,
                         help='Phosphorylation score threshold (default: 0.5)')
     parser.add_argument('--yes-only', action='store_true',
@@ -953,8 +966,8 @@ def main():
                         help='Verbose output')
 
     # Mode selection
-    parser.add_argument('--mode', choices=['full-pipeline', 'netphos-only', 'parse-only'], default='full-pipeline',
-                        help='Processing mode (default: full-pipeline)')
+    parser.add_argument('--mode', choices=['full-pipeline'], default='full-pipeline',
+                        help='Processing mode (only full-pipeline is supported)')
     parser.add_argument('--batch-size', type=int,
                         help='Batch size for large FASTA files')
     parser.add_argument('--timeout', type=int, default=300,
@@ -998,27 +1011,18 @@ def main():
     executor_fn = None
     ape_bin = None
 
-    if args.mode in ['full-pipeline', 'netphos-only']:
-        native_ape = resolve_native_ape_path(getattr(args, 'native_ape_path', None))
-        if not native_ape:
-            parser.error(
-                "Native APE binary not found. Provide --native-ape-path, or set "
-                "NETPHOS_APE_PATH / NETPHOS_HOME environment variable."
-            )
-        executor_fn = _run_native_netphos
-        ape_bin = native_ape
-        if args.verbose:
-            print(f"Execution mode: native APE ({native_ape})")
+    native_ape = resolve_native_ape_path(getattr(args, 'native_ape_path', None))
+    if not native_ape:
+        parser.error(
+            "Native APE binary not found. Provide --native-ape-path, or set "
+            "NETPHOS_APE_PATH / NETPHOS_HOME environment variable."
+        )
+    executor_fn = _run_native_netphos
+    ape_bin = native_ape
+    if args.verbose:
+        print(f"Execution mode: native APE ({native_ape})")
 
-    # Dispatch to mode runner
-    if args.mode == 'full-pipeline':
-        return run_full_pipeline_mode(args, executor_fn, ape_bin)
-    elif args.mode == 'netphos-only':
-        return run_netphos_only_mode(args, executor_fn, ape_bin)
-    elif args.mode == 'parse-only':
-        return run_parse_mode(args)
-
-    return 0
+    return run_full_pipeline_mode(args, executor_fn, ape_bin)
 
 
 if __name__ == '__main__':

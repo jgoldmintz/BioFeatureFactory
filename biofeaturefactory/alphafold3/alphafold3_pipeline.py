@@ -697,37 +697,26 @@ class AlphaFold3Pipeline:
             'qc_flags': f'FAILED:{error[:50]}'
         })
 
-    def write_outputs(self, prefix: str = "alphafold3"):
-        """Write output TSV files."""
-        # Summary
-        summary_path = self.output_dir / f"{prefix}.summary.tsv"
-        if self.summary_rows:
-            fieldnames = list(self.summary_rows[0].keys())
-            with open(summary_path, 'w', newline='') as f:
+    def _write_rows(self, rows, path):
+        """Write a list of row dicts to a TSV file."""
+        if rows:
+            fieldnames = list(rows[0].keys())
+            with open(path, 'w', newline='') as f:
                 writer = csv.DictWriter(f, fieldnames=fieldnames, delimiter='\t')
                 writer.writeheader()
-                writer.writerows(self.summary_rows)
-            print(f"Wrote {len(self.summary_rows)} rows to {summary_path}", file=sys.stderr)
+                writer.writerows(rows)
+            print(f"Wrote {len(rows)} rows to {path}", file=sys.stderr)
 
-        # Events
-        events_path = self.output_dir / f"{prefix}.events.tsv"
-        if self.events_rows:
-            fieldnames = list(self.events_rows[0].keys())
-            with open(events_path, 'w', newline='') as f:
-                writer = csv.DictWriter(f, fieldnames=fieldnames, delimiter='\t')
-                writer.writeheader()
-                writer.writerows(self.events_rows)
-            print(f"Wrote {len(self.events_rows)} rows to {events_path}", file=sys.stderr)
-
-        # Sites
-        sites_path = self.output_dir / f"{prefix}.sites.tsv"
-        if self.sites_rows:
-            fieldnames = list(self.sites_rows[0].keys())
-            with open(sites_path, 'w', newline='') as f:
-                writer = csv.DictWriter(f, fieldnames=fieldnames, delimiter='\t')
-                writer.writeheader()
-                writer.writerows(self.sites_rows)
-            print(f"Wrote {len(self.sites_rows)} rows to {sites_path}", file=sys.stderr)
+    def flush_gene(self, gene_name: str):
+        """Write accumulated rows for one gene to nested per-gene/tool paths and clear them."""
+        out_dir = self.output_dir / gene_name / "AlphaFold3"
+        out_dir.mkdir(parents=True, exist_ok=True)
+        self._write_rows(self.summary_rows, out_dir / f"{gene_name}.tsv")
+        self._write_rows(self.events_rows,  out_dir / f"{gene_name}.events.tsv")
+        self._write_rows(self.sites_rows,   out_dir / f"{gene_name}.sites.tsv")
+        self.summary_rows.clear()
+        self.events_rows.clear()
+        self.sites_rows.clear()
 
 
 def main():
@@ -764,9 +753,7 @@ def main():
 
     # Output
     parser.add_argument('--output', '-o', required=True,
-                       help='Output directory')
-    parser.add_argument('--prefix', default='alphafold3',
-                       help='Output file prefix')
+                       help='Output base directory')
 
     # Execution
     parser.add_argument('--execution-mode', default='local',
@@ -891,6 +878,7 @@ def main():
                 strand=args.strand,
                 chrom_mapping=chrom_mapping
             )
+            pipeline.flush_gene(gene_name)
 
     else:
         # --- Single file mode ---
@@ -910,6 +898,7 @@ def main():
                     chrom_mapping = load_mapping(str(map_candidates[0]), mapType="chromosome")
 
         mut_path = str(mutations_input) if mutations_input else None
+        gene_name = extract_gene_from_filename(str(fasta_input))
 
         pipeline.process_gene(
             fasta_path=str(fasta_input),
@@ -919,9 +908,8 @@ def main():
             strand=args.strand,
             chrom_mapping=chrom_mapping
         )
+        pipeline.flush_gene(gene_name)
 
-    # Write outputs
-    pipeline.write_outputs(args.prefix)
     pipeline.af3_runner.shutdown()
 
 

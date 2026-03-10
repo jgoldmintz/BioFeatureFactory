@@ -39,9 +39,6 @@ import tempfile
 from pathlib import Path
 import sys
 from typing import Optional, Dict, List, Tuple
-from Bio.Seq import Seq
-import re
-
 # Import utility functions
 from biofeaturefactory.utils.utility import (
     read_fasta,
@@ -52,6 +49,9 @@ from biofeaturefactory.utils.utility import (
     get_mutant_aa,
     update_str,
     extract_gene_from_filename,
+    discover_fasta_files,
+    translate_orf_sequence,
+    build_mutant_sequences_for_gene,
 )
 
 # Import for NSP3 prediction
@@ -162,30 +162,6 @@ def extract_residue_predictions(predictions_batch, seq_idx, pos_idx, residue):
     }
 
 
-def discover_fasta_files(fasta_dir):
-    """
-    Discover nucleotide FASTA files for each gene.
-
-    Args:
-        fasta_dir: Directory containing FASTA files
-
-    Returns:
-        dict: {gene_name: file_path}
-    """
-    if not fasta_dir or not Path(fasta_dir).exists():
-        return {}
-
-    fasta_files = {}
-    fasta_path = Path(fasta_dir)
-
-    for ext in ['*.fasta', '*.fa', '*.fna', '*.faa']:
-        for fasta_file in fasta_path.glob(ext):
-            gene_name = extract_gene_from_filename(fasta_file.stem)
-            fasta_files[gene_name] = str(fasta_file)
-
-    return fasta_files
-
-
 def discover_mutation_files(mutation_path_str):
     """
     Discover mutation files for each gene.
@@ -223,17 +199,6 @@ def discover_mutation_files(mutation_path_str):
         mutation_files[gene_name] = str(csv_file)
 
     return mutation_files
-
-
-def translate_orf_sequence(nt_sequence: str) -> str:
-    """Translate a nucleotide ORF into an amino acid sequence, trimming trailing stops."""
-    if not nt_sequence:
-        return ""
-    cleaned = nt_sequence.strip().upper().replace("U", "T")
-    if not cleaned:
-        return ""
-    aa_seq = str(Seq(cleaned).translate(to_stop=False))
-    return aa_seq.rstrip('*').strip()
 
 
 def run_nsp3_prediction(fasta_file, model_path, config_path, batch_size=100, verbose=False, max_seq_length=1500):
@@ -664,172 +629,6 @@ def write_local_tsv(local_rows, output_file):
     print(f"Wrote {len(local_rows)} local change entries to {output_file}")
 
 
-def build_mutant_sequences_for_gene(
-        gene_name: str,
-        nt_sequence: Optional[str],
-        aa_sequence: str,
-        mutation_file: Optional[str],
-        log_path: Optional[str],
-        failure_map: Optional[dict],
-        input_type: str = 'nt',
-):
-    """
-    Build mutant amino acid sequences from mutations.
-
-    Handles both CSV format (with headers) and single-column format:
-    - Single column: mutant\n{wt}{pos}{mut}\n{wt}{pos}{mut}...
-    - CSV format: mutant,aamutant (with optional headers)
-
-    Args:
-        gene_name: Gene identifier
-        nt_sequence: Wild-type nucleotide sequence (None if input_type='aa')
-        aa_sequence: Wild-type amino acid sequence
-        mutation_file: Path to mutation file (single-column or CSV)
-        log_path: Optional validation log path
-        failure_map: Optional map of failed mutations to skip
-        input_type: 'nt' for nucleotide mutations (e.g., A1002T), 'aa' for amino acid mutations (e.g., M334V)
-
-    Returns:
-        dict: {mutation_id: mutant_aa_sequence}
-    """
-    if not mutation_file or not os.path.exists(mutation_file):
-        return {}
-
-    allowed_mutations = None
-    if log_path:
-        try:
-            allowed_mutations = {
-                entry.split(',')[0].strip().upper()
-                for entry in trim_muts(mutation_file, log=log_path, gene_name=gene_name)
-                if entry
-            }
-        except Exception:
-            allowed_mutations = None
-
-    mutant_sequences = {}
-    try:
-        with open(mutation_file, 'r') as handle:
-            lines = handle.readlines()
-
-        # Detect format: single-column or CSV
-        is_single_column = True
-        if lines and ',' in lines[0]:
-            # Check if first line looks like CSV header
-            first_line_lower = lines[0].lower()
-            if any(keyword in first_line_lower for keyword in ['mutant', 'mutation', 'aamutant']):
-                is_single_column = False
-
-        if is_single_column:
-            # Single-column format: each line is a mutation
-            for line in lines:
-                mutant_id = line.strip()
-                if not mutant_id or mutant_id.lower() == 'mutant':  # Skip empty lines and header if present
-                    continue
-
-                mutant_clean = mutant_id.replace(" ", "")
-                if allowed_mutations and mutant_clean.upper() not in allowed_mutations:
-                    continue
-                if should_skip_mutation(gene_name, mutant_clean, failure_map):
-                    continue
-
-                pos = None
-                wt_aa = mut_aa = None
-
-                if input_type == 'aa':
-                    # Parse AA mutation directly (e.g., M334V)
-                    aa_info = get_mutation_data_bioAccurate(mutant_clean)
-                    if aa_info[0] is not None and aa_info[1]:
-                        pos = aa_info[0]
-                        wt_aa, mut_aa = aa_info[1]
-                else:
-                    # Infer AA mutation from NT mutation
-                    nt_info = get_mutation_data_bioAccurate(mutant_clean)
-                    if nt_info[0] is not None:
-                        aa_info = get_mutant_aa(nt_info, nt_sequence)
-                        if aa_info:
-                            (pos, (wt_aa, mut_aa)), _ = aa_info
-
-                if pos is None or not wt_aa or not mut_aa:
-                    continue
-
-                idx = int(pos) - 1
-                if idx < 0 or idx >= len(aa_sequence):
-                    continue
-                if wt_aa and aa_sequence[idx].upper() != wt_aa.upper():
-                    continue
-
-                header = f"{gene_name}-{mutant_clean}"
-                mutant_sequences[header] = update_str(aa_sequence, mut_aa, idx)
-
-        else:
-            # CSV format with headers
-            with open(mutation_file, 'r') as handle:
-                reader = csv.DictReader(handle)
-                mutant_keys = ['mutant', 'mutation', 'nt_mutation', 'ntmutant']
-                aa_keys = ['aamutant', 'aa_mutation', 'amino_acid_mutation', 'protein_mutation']
-
-                for row in reader:
-                    mutant_id = ""
-                    for key in mutant_keys:
-                        if key in row and row[key]:
-                            mutant_id = row[key].strip()
-                            break
-                    if not mutant_id:
-                        continue
-
-                    mutant_clean = mutant_id.replace(" ", "")
-                    if allowed_mutations and mutant_clean.upper() not in allowed_mutations:
-                        continue
-                    if should_skip_mutation(gene_name, mutant_clean, failure_map):
-                        continue
-
-                    aa_string = ""
-                    for key in aa_keys:
-                        if key in row and row[key]:
-                            aa_string = row[key].strip()
-                            break
-
-                    pos = None
-                    wt_aa = mut_aa = None
-                    if aa_string:
-                        pos, nts = get_mutation_data_bioAccurate(aa_string)
-                        if pos is not None and nts:
-                            wt_aa, mut_aa = nts
-
-                    if pos is None or not wt_aa or not mut_aa:
-                        if input_type == 'aa':
-                            # For AA input, treat mutant_id as AA mutation directly
-                            aa_info = get_mutation_data_bioAccurate(mutant_clean)
-                            if aa_info[0] is not None and aa_info[1]:
-                                pos = aa_info[0]
-                                wt_aa, mut_aa = aa_info[1]
-                        else:
-                            # Try to infer from nucleotide mutation
-                            nt_info = get_mutation_data_bioAccurate(mutant_clean)
-                            if nt_info[0] is not None and nt_sequence:
-                                aa_info = get_mutant_aa(nt_info, nt_sequence)
-                                if aa_info:
-                                    (pos, (wt_aa, mut_aa)), _ = aa_info
-
-                    if pos is None or not wt_aa or not mut_aa:
-                        continue
-
-                    idx = int(pos) - 1
-                    if idx < 0 or idx >= len(aa_sequence):
-                        continue
-                    if wt_aa and aa_sequence[idx].upper() != wt_aa.upper():
-                        continue
-
-                    header = f"{gene_name}-{mutant_clean}"
-                    mutant_sequences[header] = update_str(aa_sequence, mut_aa, idx)
-
-    except Exception as exc:
-        print(f"Warning: Failed to synthesize mutants for {gene_name} ({mutation_file}): {exc}")
-        return {}
-
-    return mutant_sequences
-
-
 def main():
     import argparse
 
@@ -841,7 +640,7 @@ def main():
     parser.add_argument('input', nargs='?',
                         help='Input: WT FASTA file or directory of FASTA files (nucleotide or amino acid)')
     parser.add_argument('output', nargs='?',
-                        help='Output path: base filename (e.g., "results" -> results.summary.tsv) or directory (uses "nsp3_output" as base name)')
+                        help='Output base directory')
 
     # Input type
     parser.add_argument('--input-type', choices=['nt', 'aa'], default='nt',
@@ -1190,35 +989,16 @@ def main():
                 os.unlink(combined_fasta.name)
 
     # Write output TSVs
-    output_path = Path(args.output)
-
-    # Handle directory vs file base name
-    if output_path.is_dir() or str(args.output) == '.':
-        # Extract gene name from input path using utility function
-        base_name = extract_gene_from_filename(args.input)
-
-        # Fallback to nsp3_out if extraction fails (empty or looks like a path component)
-        if not base_name or base_name in ('orf', 'fasta', 'sequences', 'input', 'data'):
-            base_name = 'nsp3_out'
-
-        output_path = output_path / base_name
-
-        # Avoid overwriting: increment suffix if files exist
-        candidate = output_path
-        n = 1
-        while (candidate.with_suffix('.summary.tsv').exists() or
-               candidate.with_suffix('.residues.tsv').exists() or
-               candidate.with_suffix('.local.tsv').exists()):
-            candidate = output_path.parent / f"{base_name}_{n}"
-            n += 1
-        output_path = candidate
-
-    # Ensure parent directory exists
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-
-    summary_path = output_path.with_suffix('.summary.tsv')
-    residues_path = output_path.with_suffix('.residues.tsv')
-    local_path = output_path.with_suffix('.local.tsv')
+    input_path = Path(args.input)
+    if input_path.is_file():
+        gene = extract_gene_from_filename(args.input) or input_path.stem
+    else:
+        gene = input_path.stem
+    out_dir = Path(args.output) / gene / "NetSurfP3"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    summary_path  = out_dir / f"{gene}.netsurfp3.summary.tsv"
+    residues_path = out_dir / f"{gene}.netsurfp3.residues.tsv"
+    local_path    = out_dir / f"{gene}.netsurfp3.local.tsv"
 
     write_summary_tsv(summary_rows, str(summary_path))
     write_residues_tsv(residues_rows, str(residues_path))

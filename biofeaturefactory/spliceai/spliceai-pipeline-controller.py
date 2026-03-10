@@ -112,22 +112,22 @@ def build_nextflow_cmd(args: argparse.Namespace) -> List[str]:
         if enabled:
             cmd.append(f"--{name}")
 
-    add_param("mutations_path", args.mutations_path)
+    add_param("mutations_path", normalize(args.mutations_path))
     if args.input_vcf_path:
         if args.input_vcf_path.is_file():
-            add_param("input_vcf_file", args.input_vcf_path)
+            add_param("input_vcf_file", normalize(args.input_vcf_path))
         else:
-            add_param("input_vcf_dir", args.input_vcf_path)
+            add_param("input_vcf_dir", normalize(args.input_vcf_path))
 
     add_flag("skip_vcf_generation", args.skip_vcf_generation)
-    add_param("reference_genome", args.reference_genome)
-    add_param("annotation_file", args.annotation_file)
-    add_param("transcript_mapping_path", args.transcript_mapping_path)
-    add_param("chromosome_mapping_path", args.chromosome_mapping_path)
-    add_param("genomic_mapping_path", args.genomic_mapping_path)
-    add_param("output_dir", args.output_dir)
-    add_param("vcf_output_dir", args.vcf_output_dir)
-    add_param("validation_log", args.validation_log)
+    add_param("reference_genome", normalize(args.reference_genome))
+    add_param("annotation_file", normalize(args.annotation_file))
+    add_param("transcript_mapping_path", normalize(args.transcript_mapping_path))
+    add_param("chromosome_mapping_path", normalize(args.chromosome_mapping_path))
+    add_param("genomic_mapping_path", normalize(args.genomic_mapping_path))
+    add_param("output_dir", normalize(args.output_dir))
+    add_param("vcf_output_dir", normalize(args.vcf_output_dir))
+    add_param("validation_log", normalize(args.validation_log))
     add_param("chromosome_format", args.chromosome_format)
     add_param("splice_threshold", args.splice_threshold)
     add_param("retry_jitter", args.retry_jitter)
