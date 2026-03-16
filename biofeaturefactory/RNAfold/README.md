@@ -104,7 +104,7 @@ Each row represents a single nucleotide position within the analyzed window.
 | `transcript_pos` | Transcript coordinate of the variant (matches summary table)                                                                             | nt |
 | `pos` | Position index within the window (1 = start, window_length = end). Position 76 corresponds to the SNV.                                   | integer |
 | `delta_u` | Per-position change in unpaired probability (Alt - Ref). Positive values indicate increased accessibility in the alternate structure.    | float |
-| `change_flag` | 1 if $|\Delta u| \geq \tau$ ($\tau = 0.05$ default) else 0. Marks positions with deterministic meaningful shifts.      | 0/1 |
+| `change_flag` | 1 if $\lvert\Delta u\rvert \geq \tau$ ($\tau = 0.05$ default) else 0. Marks positions with meaningful shifts. | 0/1 |
 | `direction` | Sign of $\Delta u$: 1 = increased unpaired probability, -1 = decreased, 0 = unchanged. Indicates direction of accessibility change. | -1/0/1 |
 | `mfe_change_flag` | 1 if base-pairing status differs between Ref/Alt MFE structures (paired <-> unpaired).                                                     | 0/1 |
 | `mfe_change_dir` | Encodes the type of base-pairing change: 0 = unpaired->paired, 1 = paired->unpaired. Indicates structural opening or closing at that base. | 0/1 |
@@ -191,14 +191,14 @@ $\Delta u_i = u_i^{(\text{alt})} - u_i^{(\text{ref})}$
 - **Negative $\Delta u$** -> base becomes more paired (region closes).
 - $\Delta u \approx 0$ -> no local structural change.
 
-The parameter **$$\tau$$ (tau)** is a *magnitude threshold* applied to $|\Delta u|$ to define significant changes.  
+The parameter **$\tau$ (tau)** is a *magnitude threshold* applied to $\lvert\Delta u\rvert$ to define significant changes.  
 By default, $\tau = 0.05$ ($\geq 5\%$ change in unpaired probability).  
 This threshold filters out small fluctuations due to ensemble sampling noise, allowing `change_flag` and `direction` to represent discrete, biologically meaningful **structural perturbations**.
 
 
 ---
 ## Notes
-- Default temperature is 37 $^\circ$C. All energies are in kcal/mol.  
+- Default temperature is 37 °C. All energies are in kcal/mol.  
 - Boltzmann sampling is stochastic; minor variation across runs is expected.  
 - `OMP_NUM_THREADS=1` prevents oversubscription during multiprocessing.
 - Each gene writes to its own nested output directory: `{output}/{GENE}/RNAfold/`.

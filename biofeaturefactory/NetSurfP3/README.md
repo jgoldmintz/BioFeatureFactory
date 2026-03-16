@@ -110,7 +110,7 @@ Per-mutation summary with structural changes:
 | `ss8_change` | 1 if 8-state secondary structure changed, else 0 | 0/1 |
 | `burial_classification` | Buried/Intermediate/Exposed change (-2 to +2) | integer |
 | `disorder_classification` | Ordered/Disordered change (-2 to +2) | integer |
-| `local_structural_impact` | Sum of $|\Delta|$ within $\pm$5 residues | various |
+| `local_structural_impact` | Sum of $\lvert\Delta\rvert$ within $\pm$5 residues | various |
 | `global_mean_delta_rsa` | Average RSA change across all residues | 0-1 |
 | `global_ss_changes` | Count of secondary structure changes | count |
 | `qc_flags` | Quality control flags | string |

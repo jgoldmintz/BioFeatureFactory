@@ -193,7 +193,6 @@ NetMHC uses percentile rank to classify binders:
 ### MHC-Specific Options
 - `--alleles ALLELE [ALLELE ...]`: HLA alleles to predict
 - `--netmhc-tool {netMHCpan, netMHC, netMHCII}`: Which NetMHC tool to use
-- `--peptide-lengths LENGTH [LENGTH ...]`: Peptide lengths (e.g., 8 9 10 11)
 - `--threshold FLOAT`: Rank threshold for strong binders (default: 0.5)
 
 ### Execution Backend
@@ -205,9 +204,7 @@ NetMHC uses percentile rank to classify binders:
 - `--batch-size N`: Split sequences longer than N amino acids into batches (default: 100). Use 0 to disable batching.
 - `--timeout SEC`: Command timeout (default: 600)
 
-### Cache and Output
-- `--cache-dir DIR`: Custom cache directory
-- `--no-cache`: Disable caching
+### Output
 - `--keep-intermediates`: Keep temp files for debugging
 - `--verbose`: Enable verbose output
 
@@ -256,7 +253,7 @@ python netmhc_pipeline.py input/ results/ --batch-size 0
 |---------|------------|
 | `NetMHC not found` | Install NetMHCpan and ensure binary is executable. Use `--native-netmhc-path` or set `NETMHCPAN_PATH`/`NETMHC_PATH`. |
 | `No mapping file found` | Verify `--mapping-dir` contains `{GENE}*.csv` files |
-| `Peptide too short/long` | Check `--peptide-lengths` matches your alleles (8-11 for Class I, 13-21 for Class II) |
+| `Peptide too short/long` | Verify input sequences are long enough for the selected NetMHC tool |
 | `Invalid allele name` | Use NetMHCpan format: `HLA-A*02:01` (not `HLA-A0201`) |
 | Binary not executing | Ensure executable permissions are set on the NetMHC binary |
 
@@ -288,8 +285,7 @@ python netmhc_pipeline.py input/ results/ --batch-size 0
 
 1. **Default alleles**: When `--alleles` not specified, uses HLA-A*02:01 only. For population coverage, specify multiple alleles explicitly.
 2. **Parallel processing**: Batches processed sequentially; could parallelize across genes/batches for large datasets.
-3. **`--peptide-lengths`**: Flag is accepted but not passed to the NetMHC binary -- has no effect.
-4. **`--netmhc-tool`**: Selects the binary path but does not adjust command-line flags per tool.
+3. **`--netmhc-tool`**: Selects the binary path but does not adjust command-line flags per tool.
 
 ---
 

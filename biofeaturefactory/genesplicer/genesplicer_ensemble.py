@@ -748,8 +748,6 @@ def main():
                         help="Directory containing GeneSplicer binary; "
                              "omit to use genesplicer from PATH (e.g. after conda install)")
     parser.add_argument("-o", "--output", required=True, help="Output base directory (writes {GENE}/GeneSplicer/{GENE}.tsv, .events.tsv, .sites.tsv)")
-    parser.add_argument("--pipeline", choices=["full", "window", "custom"], default="full",
-                        help="Pipeline mode. 'full' = run on whole genomic sequence once and mutate in-memory.")
     parser.add_argument("--window", type=int, default=DEFAULT_WINDOW, help="Window/reporting size (default 151)")
     parser.add_argument("--report-radius", type=int, default=DEFAULT_REPORT_RADIUS,
                         help="Radius (bp) to count as local; default = --window")
@@ -778,7 +776,6 @@ def main():
     mapping_dir = args.mapping_dir
     genesplicer_dir = args.genesplicer_dir
     output_base = args.output
-    pipeline = args.pipeline
     window = args.window
     report_radius = args.report_radius
     distance_k = args.distance_k
@@ -845,7 +842,7 @@ def main():
                 fasta_path,
                 gene_map_df,
                 genesplicer_dir,
-                pipeline,
+                "full",
                 window,
                 report_radius,
                 visibility_threshold,

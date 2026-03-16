@@ -270,7 +270,7 @@ For citation details, see [CITING.md](CITING.md) and [CITATION.cff](CITATION.cff
 - **NetNGlyc** — Gupta R, et al. *Prediction of N-glycosylation sites in human proteins.* DTU Health Tech. 2004.
 - **NetPhos** — Blom N, et al. *Sequence and structure-based prediction of eukaryotic protein phosphorylation sites.* J Mol Biol. 1999;294(5):1351-1362.
 - **NetMHC** — Reynisson B, et al. *NetMHCpan-4.1 and NetMHCIIpan-4.0.* Nucleic Acids Res. 2020;48(W1):W449-W454.
-- **NetSurfP3** — Klausen MS, et al. *NetSurfP-2.0: Improved prediction of protein structural features.* Proteins. 2019;87(6):520-527.
+- **NetSurfP3** — Hoie MH, et al. *NetSurfP-3.0: accurate and fast prediction of protein structural features by protein language models and deep learning.* Nucleic Acids Res. 2022;50(W1):W510-W515.
 - **GeneSplicer** — Pertea M, et al. *GeneSplicer: a new computational method for splice site prediction.* Nucleic Acids Res. 2001;29(5):1185-1190.
 - **SpliceAI** — Jaganathan K, et al. *Predicting Splicing from Primary Sequence with Deep Learning.* Cell. 2019;176(3):535-548.
 - **RNAfold** — Lorenz R, et al. *ViennaRNA Package 2.0.* Algorithms Mol Biol. 2011;6(1):26.

@@ -87,31 +87,31 @@ Output is written to:
 
 ### Main Output (`{GENE}.codon_usage.tsv`)
 
-| Column | Description | Example |
-|--------|-------------|---------|
-| `pkey` | Unique identifier (`GENE-mutation`) | `BRCA1-C123T` |
-| `Gene` | Gene symbol | `BRCA1` |
-| `codon_number` | Codon position in ORF (1-based) | `41` |
-| `codon` | Mutated codon sequence | `CTG` |
-| `position_in_codon` | Position of SNV within codon (1-3) | `3` |
-| `RSCU` | Relative synonymous codon usage | `1.32` |
-| `W` | Relative adaptiveness (gene-specific) | `0.87` |
-| `CAI_W` | CAI reference W (human highly expressed) | `0.45` |
-| `tAI` | tRNA adaptation weight for codon | `0.344` |
-| `CAI_gene` | CAI for entire gene | `0.72` |
-| `tAI_gene` | tAI for entire gene | `0.58` |
-| `bicodon_3prime` | 3' bicodon (this codon + next) | `CTGGAA` |
-| `RSCPU_3prime` | RSCPU for 3' bicodon | `0.95` |
-| `CPS_3prime` | Codon pair score for 3' bicodon | `-0.12` |
-| `noln_CPS_3prime` | Non-log CPS for 3' bicodon | `0.89` |
-| `W_CP_3prime` | Relative adaptiveness for 3' pair | `0.76` |
-| `bicodon_5prime` | 5' bicodon (previous codon + this) | `AAACTG` |
-| `RSCPU_5prime` | RSCPU for 5' bicodon | `1.12` |
-| `CPS_5prime` | Codon pair score for 5' bicodon | `0.08` |
-| `noln_CPS_5prime` | Non-log CPS for 5' bicodon | `1.08` |
-| `W_CP_5prime` | Relative adaptiveness for 5' pair | `0.82` |
-| `bicodon_context` | Position context | `middle_codon_both_directions` |
-| `qc_flags` | Quality flags | `PASS` |
+| Column | Description |
+|--------|-------------|
+| `pkey` | Unique identifier (`GENE-mutation`) |
+| `Gene` | Gene symbol |
+| `codon_number` | Codon position in ORF (1-based) |
+| `codon` | Mutated codon sequence |
+| `position_in_codon` | Position of SNV within codon (1-3) |
+| `RSCU` | Relative synonymous codon usage |
+| `W` | Relative adaptiveness (gene-specific) |
+| `CAI_W` | CAI reference W (human highly expressed) |
+| `tAI` | tRNA adaptation weight for codon |
+| `CAI_gene` | CAI for entire gene |
+| `tAI_gene` | tAI for entire gene |
+| `bicodon_3prime` | 3' bicodon (this codon + next) |
+| `RSCPU_3prime` | RSCPU for 3' bicodon |
+| `CPS_3prime` | Codon pair score for 3' bicodon |
+| `noln_CPS_3prime` | Non-log CPS for 3' bicodon |
+| `W_CP_3prime` | Relative adaptiveness for 3' pair |
+| `bicodon_5prime` | 5' bicodon (previous codon + this) |
+| `RSCPU_5prime` | RSCPU for 5' bicodon |
+| `CPS_5prime` | Codon pair score for 5' bicodon |
+| `noln_CPS_5prime` | Non-log CPS for 5' bicodon |
+| `W_CP_5prime` | Relative adaptiveness for 5' pair |
+| `bicodon_context` | Position context |
+| `qc_flags` | Quality flags |
 
 ---
 

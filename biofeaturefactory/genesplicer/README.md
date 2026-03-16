@@ -9,7 +9,7 @@ Run GeneSplicer on full genomic context (or configurable context), compare WT vs
 
 
 ## Capabilities
-- Full-context scan (`--pipeline full`) with absolute genomic positions
+- Full-context scan with absolute genomic positions
 - Optional local marking with `--report-radius`
 - Proximity clustering, WT<->ALT pairing, event calling, priority scoring
 - Deterministic, append-safe summary; auditable detail tables
@@ -75,18 +75,18 @@ Each row represents a single SNV comparison (`pkey = GENE-mutation`). Global vie
 | `global_count_lost_high`    | Lost clusters where max(wt,mut) $\geq$ `--high-cutoff`                                     | count                           |
 | `global_count_shifted`      | Clusters with positional shift (`dpos` $\geq$ `--shift-bp`)                                | count                           |
 | `global_max_abs_deltascore` | Max absolute score change across all clusters                                              | dimensionless                   |
-| `global_sum_weighted_abs_delta` | $\sum \|\Delta\text{score}\| \cdot \exp(-\text{distance}/\texttt{--distance-k})$ across clusters | dimensionless              |
+| `global_sum_weighted_abs_delta` | $\sum \lvert\Delta\text{score}\rvert \cdot \exp(-\text{distance}/\texttt{--distance-k})$ across clusters | dimensionless              |
 | `nearest_event_bp_any`      | Minimum distance to SNV among all events                                                   | bp                              |
 | `local_count_gained_high`   | As above, restricted to `distance $\leq$ --report-radius`                                       | count                           |
 | `local_count_lost_high`     | As above, restricted local                                                                 | count                           |
 | `local_count_shifted`       | As above, restricted local                                                                 | count                           |
 | `local_max_abs_deltascore`  | Max abs $\Delta$score within local radius                                                  | dimensionless                   |
 | `nearest_event_bp_local`    | Nearest event within local radius                                                          | bp                              |
-| `frac_effect_in_radius`     | $(\sum |\Delta|$ in radius$) / (\sum |\Delta|$ global$)$                                   | 0-1                             |
+| `frac_effect_in_radius`     | ($\sum \lvert\Delta\rvert$ in radius) / ($\sum \lvert\Delta\rvert$ global)                  | 0-1                             |
 | `top_event_type`            | Event class of highest-priority cluster (`gained/lost/shifted/strengthened/weakened/none`) | enum                            |
 | `top_event_deltascore`      | $\Delta$score of the highest-priority event                                                | dimensionless                   |
 | `top_event_pos`             | Representative position of top event (MUT if present else WT)                              | bp (absolute) or index (window) |
-| `dominant_boundary`         | Boundary with largest $\sum |\Delta|$ (`donor` or `acceptor`)                               | enum                            |
+| `dominant_boundary`         | Boundary with largest $\sum \lvert\Delta\rvert$ (`donor` or `acceptor`)                     | enum                            |
 | `qc_flags`                  | Semicolon-separated flags: `no_sites;far_event>2kb;low_signal_only`                        | --                               |
 
 **Interpretation**
@@ -110,7 +110,7 @@ Each row represents a donor/acceptor **cluster** (merged nearby sites) and compa
 | `wt_score`            | Top WT score                                                                              | dimensionless                                    |
 | `mut_score`           | Top MUT score                                                                             | dimensionless                                    |
 | `dscore`              | Score delta: `mut_score - wt_score`                                                       | dimensionless                                    |
-| `pct_delta`           | Relative delta: $r_i = \dfrac{\text{dscore}}{\max( \\|\text{WTscore}\\|, \varepsilon)}$   | dimensionless                                    |
+| `pct_delta`           | Relative delta: $r_i = \dfrac{\text{dscore}}{\max(\lvert\text{WTscore}\rvert, \varepsilon)}$ | dimensionless                                    |
 | `distance_to_snv`     | Min distance of (WT or MUT) site in the cluster to the SNV                                | bp                                               |
 | `rank_wt`             | Rank of WT site among all WT sites of this `type` (1=strongest)                           | integer                                          |
 | `rank_mut`            | Rank of MUT site among all MUT sites of this `type`                                       | integer                                          |
@@ -119,7 +119,7 @@ Each row represents a donor/acceptor **cluster** (merged nearby sites) and compa
 | `conf_weighted_delta` | `conf_mut$\cdot$mut_score - conf_wt$\cdot$wt_score`                                                   | dimensionless                                    |
 | `cls`                 | Event class                                                                               | `gained/lost/shifted/strengthened/weakened/none` |
 | `is_high_impact`      | High $\Delta$ or high gained/lost (policy thresholds)                                     | 0/1                                              |
-| `priority`            | Sorting key: $\\|\text{dscore}\\|*\text{e}^{(-distance/\text{"--distance-k"})}$ + bonuses | numeric                                          |
+| `priority`            | Sorting key: $\lvert\text{dscore}\rvert \cdot e^{(-distance/\text{distance-k})}$ + bonuses | numeric                                          |
 | `in_radius`           | Inside local triage radius (`distance $\leq$ --report-radius`)                                 | 0/1                                              |
 
 **Event taxonomy**

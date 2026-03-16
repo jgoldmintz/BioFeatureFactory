@@ -2531,8 +2531,6 @@ def main():
                         help="Directory containing mutation mapping CSV files (REQUIRED for parsing modes)")
     parser.add_argument("--threshold", type=float, default=0.5,
                         help="Minimum glycosylation potential threshold for predictions (default: 0.5)")
-    parser.add_argument("--batch-size", type=int, default=100,
-                        help="Number of sequences per batch for batch processing mode (default: 100)")
     parser.add_argument("--batch-timeout", type=int, default=5000,
                         help="Timeout in seconds for NetNGlyc execution (default: 5000s)")
     parser.add_argument("--keep-intermediates", action="store_true",

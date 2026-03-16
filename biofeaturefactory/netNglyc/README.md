@@ -65,7 +65,6 @@ This flow:
 |--------|-------------|
 | `--test` | Run test with ABCB1 sequence. |
 | `--workers N` | Number of parallel workers. |
-| `--batch-size N` | Sequences per batch (default: 100). |
 | `--batch-timeout SEC` | Timeout in seconds per batch (default: 5000). |
 | `--mapping-dir DIR` | Mutation mapping CSV directory (required for full pipeline). |
 | `--log FILE` | Validation log to skip failed mutations. |

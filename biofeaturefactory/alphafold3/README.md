@@ -122,10 +122,10 @@ Each row represents a single mutation with aggregated RBP binding analysis.
 | **global_count_lost** | Number of RBPs with lost binding ($S_{\text{wt}} \geq \tau$, $S_{\text{mut}} < \tau$). | count |
 | **global_count_strengthened** | RBPs with strengthened binding (both bind, MUT has lower PAE). | count |
 | **global_count_weakened** | RBPs with weakened binding (both bind, MUT has higher PAE). | count |
-| **global_max_abs_delta_pae** | Maximum $\|\Delta_{\text{PAE}}\|$ across all RBPs. | $\text{\AA}$ |
+| **global_max_abs_delta_pae** | Maximum $\lvert\Delta_{\text{PAE}}\rvert$ across all RBPs. | Å |
 | **top_event_rbp** | RBP with highest priority score. | string |
 | **top_event_class** | Event classification: `gained`, `lost`, `strengthened`, `weakened`, `none`. | enum |
-| **top_event_delta_pae** | $\Delta_{\text{PAE}}$ for top-ranked RBP. | $\text{\AA}$ |
+| **top_event_delta_pae** | $\Delta_{\text{PAE}}$ for top-ranked RBP. | Å |
 | **qc_flags** | Semicolon-separated quality flags. | -- |
 
 ---
@@ -138,18 +138,18 @@ Each row represents a single RBP binding comparison for one mutation.
 |--------|-------------|-------|
 | **pkey** | Variant key (`GENE-mutation`). | -- |
 | **rbp_name** | RBP gene symbol (e.g., HNRNPA1, SRSF1). | string |
-| **wt_chain_pair_pae_min** | Minimum PAE between RNA-protein chains (WT). | $\text{\AA}$ |
-| **mut_chain_pair_pae_min** | Minimum PAE between RNA-protein chains (MUT). | $\text{\AA}$ |
-| **delta_chain_pair_pae_min** | $\Delta_{PAE} = PAE_{mut} - PAE_{wt}$ | $\text{\AA}$ |
-| **wt_interface_contacts** | Number of cross-chain contacts $< 8\,\text{\AA}$ (WT). | count |
-| **mut_interface_contacts** | Number of cross-chain contacts $< 8\,\text{\AA}$ (MUT). | count |
+| **wt_chain_pair_pae_min** | Minimum PAE between RNA-protein chains (WT). | Å |
+| **mut_chain_pair_pae_min** | Minimum PAE between RNA-protein chains (MUT). | Å |
+| **delta_chain_pair_pae_min** | $\Delta_{PAE} = PAE_{mut} - PAE_{wt}$ | Å |
+| **wt_interface_contacts** | Number of cross-chain contacts $< 8 Å$ (WT). | count |
+| **mut_interface_contacts** | Number of cross-chain contacts $< 8 Å$ (MUT). | count |
 | **delta_interface_contacts** | Change in interface contacts. | count |
 | **cls** | Event classification: `gained`, `lost`, `strengthened`, `weakened`, `unchanged`, `no_binding`. | enum |
-| **priority** | Ranking score: $\|\Delta_{\text{PAE}}\| \cdot \frac{1}{1+d/k}$. | numeric |
+| **priority** | Ranking score: $\lvert\Delta_{\text{PAE}}\rvert \cdot \frac{1}{1+d/k}$. | numeric |
 | **n_samples_wt** | Number of AF3 samples parsed for WT (ensemble mode). | count |
 | **n_samples_mut** | Number of AF3 samples parsed for MUT (ensemble mode). | count |
-| **std_pae_wt** | Standard deviation of chain-pair PAE across WT samples. | $\text{\AA}$ |
-| **std_pae_mut** | Standard deviation of chain-pair PAE across MUT samples. | $\text{\AA}$ |
+| **std_pae_wt** | Standard deviation of chain-pair PAE across WT samples. | Å |
+| **std_pae_mut** | Standard deviation of chain-pair PAE across MUT samples. | Å |
 | **n_windows** | Number of windows used (multi-window mode only). | count |
 
 ---
@@ -167,8 +167,8 @@ Each row represents a single interface residue (RNA or protein) within the AF3 p
 | **res_id** | Residue sequence number. | int |
 | **res_name** | Residue name (3-letter code). | string |
 | **plddt** | Per-residue pLDDT confidence score. | 0-100 |
-| **is_contact** | Binary flag: 1 if residue contacts the other chain ($< 8\,\text{\AA}$). | 0/1 |
-| **min_contact_distance** | Minimum distance to nearest atom in the other chain. | $\text{\AA}$ |
+| **is_contact** | Binary flag: 1 if residue contacts the other chain ($< 8 Å$). | 0/1 |
+| **min_contact_distance** | Minimum distance to nearest atom in the other chain. | Å |
 | **contact_frequency** | Fraction of ensemble samples where this residue is a contact (ensemble mode). | 0-1 |
 
 ---
@@ -182,8 +182,8 @@ $$\Delta_{PAE} = PAE_{mut} - PAE_{wt}$$
 **What is PAE?** Predicted Aligned Error (PAE) is an AlphaFold confidence metric that estimates the positional error (in Angstroms) between two residues after optimal superposition. For inter-chain predictions, PAE quantifies how confidently AF3 predicts the relative positioning of the RNA and protein chains.
 
 **Interpretation:**
-- **Low PAE (< $10\,\text{\AA}$)**: High confidence that the two chains interact in the predicted orientation
-- **High PAE (> $20\,\text{\AA}$)**: Low confidence; chains may not interact or their relative position is uncertain
+- **Low PAE (< $10 Å$)**: High confidence that the two chains interact in the predicted orientation
+- **High PAE (> $20 Å$)**: Low confidence; chains may not interact or their relative position is uncertain
 
 **Delta interpretation:**
 - **Positive $\Delta$** -> Weaker binding in mutant (PAE increased, meaning higher uncertainty)
@@ -197,7 +197,7 @@ $$\Delta_{PAE} = PAE_{mut} - PAE_{wt}$$
 $$P = |\Delta_{PAE}| \times \frac{1}{1 + d/k}$$
 
 **Variables:**
-- $|\Delta_{PAE}|$ = absolute magnitude of PAE change ($\text{\AA}$)
+- $|\Delta_{PAE}|$ = absolute magnitude of PAE change (Å)
 - $d$ = genomic distance (bp) between the SNV position and the RBP binding site center
 - $k$ = decay constant (default: 50 bp)
 
@@ -216,7 +216,7 @@ This prioritizes RBPs whose binding sites overlap or are proximal to the mutatio
 
 ### Interface Contacts
 
-$$N_{contacts} = \sum_{i \in RNA} \sum_{j \in protein} \mathbf{1}[d_{ij} < 8 \text{ $\text{\AA}$}]$$
+$$N_{contacts} = \sum_{i \in RNA} \sum_{j \in protein} \mathbf{1}[d_{ij} < 8 \text{ Å}]$$
 
 **Variables:**
 - $i$ = index over RNA heavy atoms
@@ -224,7 +224,7 @@ $$N_{contacts} = \sum_{i \in RNA} \sum_{j \in protein} \mathbf{1}[d_{ij} < 8 \te
 - $d_{ij}$ = Euclidean distance between atoms $i$ and $j$
 - $\mathbf{1}[\cdot]$ = indicator function (returns 1 if condition is true, 0 otherwise)
 
-**Interpretation:** Counts atom pairs where an RNA atom is within $8\,\text{\AA}$ of a protein atom. Higher contact counts suggest more extensive binding interfaces. The $8\,\text{\AA}$ threshold captures van der Waals contacts, hydrogen bonds, and electrostatic interactions.
+**Interpretation:** Counts atom pairs where an RNA atom is within $8 Å$ of a protein atom. Higher contact counts suggest more extensive binding interfaces. The $8 Å$ threshold captures van der Waals contacts, hydrogen bonds, and electrostatic interactions.
 
 ---
 
@@ -233,10 +233,10 @@ $$N_{contacts} = \sum_{i \in RNA} \sum_{j \in protein} \mathbf{1}[d_{ij} < 8 \te
 A binding event is classified as **confident** when ALL of the following conditions are met:
 
 1. **Sufficient contacts**: $N_{contacts} \geq 3$
-   - At least 3 RNA-protein atom pairs within $8\,\text{\AA}$
+   - At least 3 RNA-protein atom pairs within $8 Å$
 
-2. **Low inter-chain uncertainty**: $PAE_{min} \leq 10\,\text{\AA}$
-   - The minimum PAE between any RNA-protein residue pair is below $10\,\text{\AA}$
+2. **Low inter-chain uncertainty**: $PAE_{min} \leq 10 Å$
+   - The minimum PAE between any RNA-protein residue pair is below $10 Å$
 
 3. **Adequate local structure quality**: $pLDDT_{RNA} \geq 50$ OR $pLDDT_{protein} \geq 50$
    - At least one chain at the interface has confident per-residue structure (pLDDT scale: 0-100, where >70 is high confidence)
@@ -257,7 +257,7 @@ This three-part filter excludes predictions where AF3 has low confidence in eith
 | **lost** | WT has confident binding, MUT has none |
 | **strengthened** | Both bind confidently, $\Delta_{\text{PAE}} < -2.0$ |
 | **weakened** | Both bind confidently, $\Delta_{\text{PAE}} > +2.0$ |
-| **unchanged** | Both bind confidently, $\|\Delta_{\text{PAE}}\| \leq 2.0$ |
+| **unchanged** | Both bind confidently, $\lvert\Delta_{\text{PAE}}\rvert \leq 2.0$ |
 | **no_binding** | Neither WT nor MUT has confident binding |
 | **incomplete** | WT or MUT prediction missing -- no comparison possible |
 
@@ -370,11 +370,11 @@ By default, the mutation is centered in the RNA window. The `--multi-window` fla
 | Parameter | Default | Description |
 |-----------|---------|-------------|
 | `min_contacts` | 3 | Minimum interface contacts for confident binding |
-| `max_pae_binding` | 10.0 | Maximum PAE for confident binding ($\text{\AA}$) |
+| `max_pae_binding` | 10.0 | Maximum PAE for confident binding (Å) |
 | `min_plddt_interface` | 50.0 | Minimum pLDDT at interface |
-| `delta_pae_significant` | 2.0 | $\Delta$ threshold for strengthened/weakened classification ($\text{\AA}$) |
+| `delta_pae_significant` | 2.0 | $\Delta$ threshold for strengthened/weakened classification (Å) |
 | `delta_contacts_significant` | 2 | Contact change threshold for classification |
-| `contact_threshold` | 8.0 | Distance threshold for interface contacts ($\text{\AA}$) |
+| `contact_threshold` | 8.0 | Distance threshold for interface contacts (Å) |
 
 ---
 

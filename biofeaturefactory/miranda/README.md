@@ -85,16 +85,16 @@ Output is written per gene to:
 | **global_count_gained_high** | Number of newly gained high-scoring sites ($S_{\text{mut}} \geq$ cutoff). | count |
 | **global_count_lost_high** | Number of lost high-scoring sites ($S_{\text{wt}} \geq$ cutoff, $S_{\text{mut}} <$ cutoff). | count |
 | **global_count_shifted** | Number of binding sites that shifted position by $\geq$ threshold bp in MUT. | count |
-| **global_max_abs_delta_score** | Maximum absolute change in total binding score ($\max |\Delta_{score}|$). | dimensionless |
-| **global_sum_weighted_abs_delta** | Weighted sum of absolute score changes across loci ($\sum |\Delta| e^{-d/k}$). | dimensionless |
+| **global_max_abs_delta_score** | Maximum absolute change in total binding score ($\max \lvert\Delta_{score}\rvert$). | dimensionless |
+| **global_sum_weighted_abs_delta** | Weighted sum of absolute score changes across loci ($\sum \lvert\Delta\rvert e^{-d/k}$). | dimensionless |
 | **nearest_event_bp_any** | Minimum distance between SNV and any binding event. | bp |
 | **local_count_gained_high** | Number of high-scoring gained events within local radius ($d \leq r$). | count |
 | **local_count_lost_high** | Number of high-scoring lost events within radius. | count |
 | **local_count_shifted** | Count of binding sites whose position shifted by $\geq$ threshold bp. | count |
-| **local_max_abs_delta_score** | Maximum $|\Delta_{score}|$ for events within the local radius. | dimensionless |
+| **local_max_abs_delta_score** | Maximum $\lvert\Delta_{score}\rvert$ for events within the local radius. | dimensionless |
 | **nearest_event_bp_local** | Nearest event distance within the local window. | bp |
 | **frac_effect_in_radius** | Fraction of global perturbation localized near SNV ($f_{local}$). | ratio (0-1) |
-| **max_segment_abs_delta_best** | Maximum $|\Delta_{score}|$ among the strongest segment per mutation. | dimensionless |
+| **max_segment_abs_delta_best** | Maximum $\lvert\Delta_{score}\rvert$ among the strongest segment per mutation. | dimensionless |
 | **frac_effect_in_competitive_segments** | Fraction of total $\Delta_{score}$ in segments containing multiple miRNAs. | ratio (0-1) |
 | **top_event_mirna** | miRNA with the highest $\Delta_{score}$ or priority value. | string |
 | **top_event_class** | Event category (`gained`, `lost`, `shifted`, `strengthened`, `weakened`, `none`). | enum |
@@ -130,7 +130,7 @@ Output is written per gene to:
 | **conf_weighted_delta** | Confidence-weighted $\Delta_{score}$ ($C_{mut}S_{mut} - C_{wt}S_{wt}$). | dimensionless |
 | **cls** | Event class: `gained`, `lost`, `shifted`, `strengthened`, `weakened`, `none`. | enum |
 | **is_high_impact** | Binary flag: 1 if event exceeds high-impact threshold. | 0/1 |
-| **priority** | Weighted $\Delta_{score}$ with distance decay: $|\Delta| e^{-d/k} + bonus_{class}$. | numeric |
+| **priority** | Weighted $\Delta_{score}$ with distance decay: $\lvert\Delta\rvert e^{-d/k} + bonus_{class}$. | numeric |
 | **in_radius** | Indicates whether event lies within local analysis radius ($d \leq r$). | 0/1 |
 
 ---

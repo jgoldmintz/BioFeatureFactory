@@ -678,9 +678,6 @@ def main():
     parser.add_argument('--netmhc-tool', choices=['netMHCpan', 'netMHC', 'netMHCII'],
                        default='netMHCpan',
                        help='Which NetMHC tool to use (default: netMHCpan)')
-    parser.add_argument('--peptide-lengths', nargs='+', type=int,
-                       help='Peptide lengths to predict (e.g., 8 9 10 11). Default depends on tool.')
-
     # Execution backend
     parser.add_argument('--native-netmhc-path',
                        help='Path to native NetMHC executable')
@@ -697,11 +694,6 @@ def main():
     parser.add_argument('--timeout', type=int, default=600,
                        help='Command timeout in seconds (default: 600)')
 
-    # Cache and output options
-    parser.add_argument('--cache-dir',
-                       help='Custom cache directory for NetMHC results')
-    parser.add_argument('--no-cache', action='store_true',
-                       help='Disable result caching')
     parser.add_argument('--keep-intermediates', action='store_true',
                        help='Keep intermediate files for debugging')
     parser.add_argument('--verbose', action='store_true',
