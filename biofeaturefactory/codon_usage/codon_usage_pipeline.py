@@ -33,6 +33,7 @@ from biofeaturefactory.utils.utility import (
     compute_tai,
     get_codon_tai,
     get_codon_cai_w,
+    write_tsv,
 )
 
 
@@ -280,11 +281,7 @@ def write_output(results, output_path):
         print("No results to write")
         return
 
-    with open(output_path, 'w', newline='') as f:
-        writer = csv.DictWriter(f, fieldnames=FIELDNAMES, delimiter='\t', extrasaction='ignore')
-        writer.writeheader()
-        writer.writerows(results)
-
+    write_tsv(results, output_path, FIELDNAMES, extrasaction='ignore')
     print(f"Wrote {len(results)} rows to {output_path}")
 
 
@@ -295,10 +292,10 @@ def main():
         epilog="""
 Examples:
   # Single file processing
-  python codon-usage-pipeline.py --fasta /path/to/gene.fasta --mutations /path/to/mutations.csv --output results/
+  python codon_usage_pipeline.py --fasta /path/to/gene.fasta --mutations /path/to/mutations.csv --output results/
 
   # Directory processing
-  python codon-usage-pipeline.py --fasta /path/to/fastas --mutations /path/to/mutations --output results/
+  python codon_usage_pipeline.py --fasta /path/to/fastas --mutations /path/to/mutations --output results/
 
 Metrics:
   RSCU       - Relative Synonymous Codon Usage (gene-specific)

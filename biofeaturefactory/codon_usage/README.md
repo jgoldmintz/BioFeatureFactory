@@ -119,7 +119,7 @@ Output is written to:
 
 ### Single File Processing
 ```bash
-python codon-usage-pipeline.py \
+python codon_usage_pipeline.py \
     --fasta /path/to/BRCA1.fasta \
     --mutations /path/to/BRCA1_mutations.csv \
     --output results/
@@ -128,12 +128,21 @@ python codon-usage-pipeline.py \
 
 ### Directory Processing
 ```bash
-python codon-usage-pipeline.py \
+python codon_usage_pipeline.py \
     --fasta /path/to/fastas/ \
     --mutations /path/to/mutations/ \
     --output results/
 # Writes per gene: results/{GENE}/CodonUsage/{GENE}.codon_usage.tsv
 ```
+
+### Arguments
+
+| Argument | Required | Description |
+|----------|----------|-------------|
+| `--fasta` | Yes | FASTA file or directory of FASTA files |
+| `--mutations` | No | Mutations CSV file or directory of CSV files |
+| `--validation-log` | No | Validation log for filtering failed mutations |
+| `--output, -o` | Yes | Output base directory |
 
 ---
 

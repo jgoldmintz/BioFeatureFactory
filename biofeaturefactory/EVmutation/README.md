@@ -4,8 +4,8 @@
 
 This directory contains two complementary pipelines:
 
-1. **`evmutation-pipeline.py`** -- protein-level mutation effects for missense variants using amino acid MSAs
-2. **`evmutation-pipeline.py`** -- codon-level mutation effects for synonymous variants using codon-aware MSAs
+1. **`evmutation_pipeline.py`** -- protein-level mutation effects for missense variants using amino acid MSAs
+2. **`evmutation_pipeline.py`** -- codon-level mutation effects for synonymous variants using codon-aware MSAs
 
 Both pipelines fit a **Potts (pairwise maximum-entropy) model** via plmc and score mutations as changes in the model Hamiltonian.
 
@@ -56,7 +56,7 @@ The **epistatic score** adds the full $J_{ij}$ sum over all other positions $j$ 
 
 ---
 
-## Pipeline 1: Protein EVmutation (`evmutation-pipeline.py`)
+## Pipeline 1: Protein EVmutation (`evmutation_pipeline.py`)
 
 Scores **missense** and **stop** mutations using an amino acid MSA.
 
@@ -122,19 +122,19 @@ Protein MSA (A2M / FASTA)
 
 ```bash
 # Full pipeline (run plmc)
-python evmutation-pipeline.py \
+python evmutation_pipeline.py \
     --msa BRCA1.msa.a2m \
     --focus HUMAN_BRCA1 \
     --plmc-binary /usr/local/bin/plmc \
     --output BRCA1.evmutation.tsv
 
 # Pre-computed parameters
-python evmutation-pipeline.py \
+python evmutation_pipeline.py \
     --model-params BRCA1.model_params \
     --output BRCA1.evmutation.tsv
 
 # With nucleotide mutation mapping
-python evmutation-pipeline.py \
+python evmutation_pipeline.py \
     --msa BRCA1.msa.a2m \
     --focus HUMAN_BRCA1 \
     --plmc-binary /usr/local/bin/plmc \
@@ -144,7 +144,7 @@ python evmutation-pipeline.py \
 
 ---
 
-## Pipeline 2: Codon EVmutation (`evmutation-pipeline.py`)
+## Pipeline 2: Codon EVmutation (`evmutation_pipeline.py`)
 
 Scores **synonymous** mutations using a codon-aware MSA. This pipeline addresses the limitation that protein EVmutation assigns no score to synonymous variants. It trains a separate Potts model where each sequence position represents a **codon triplet** rather than an amino acid.
 
@@ -294,7 +294,7 @@ For a well-characterized gene with a deep MSA (e.g., TP53, F9), DISCORDANT cases
 
 ## Combined Pipeline: Inputs, Outputs, and Structure
 
-`evmutation-pipeline.py` runs both models in a single process and writes two output tables per gene.
+`evmutation_pipeline.py` runs both models in a single process and writes two output tables per gene.
 
 ### Output Structure
 
@@ -310,7 +310,7 @@ For a well-characterized gene with a deep MSA (e.g., TP53, F9), DISCORDANT cases
 
 ```bash
 # Single gene, pre-built params
-python evmutation-pipeline.py \
+python evmutation_pipeline.py \
     --fasta SMN2.fasta \
     --mutations SMN2.csv \
     --model-params SMN2.model_params \
@@ -318,7 +318,7 @@ python evmutation-pipeline.py \
     --output results/
 
 # Single gene, build params from MSAs
-python evmutation-pipeline.py \
+python evmutation_pipeline.py \
     --fasta SMN2.fasta \
     --mutations SMN2.csv \
     --msa SMN2.msa.a2m \
@@ -327,7 +327,7 @@ python evmutation-pipeline.py \
     --output results/
 
 # Multi-gene directory mode
-python evmutation-pipeline.py \
+python evmutation_pipeline.py \
     --fasta /data/fastas/ \
     --mutations /data/mutations/ \
     --msa /data/msas/ \
@@ -336,7 +336,7 @@ python evmutation-pipeline.py \
     --output results/
 
 # Codon only (no protein model)
-python evmutation-pipeline.py \
+python evmutation_pipeline.py \
     --fasta SMN2.fasta \
     --mutations SMN2.csv \
     --codon-model-params SMN2.codon_model_params \

@@ -88,6 +88,7 @@ One of:
 | `--strand` | `+` | Strand (`+`/`-`) |
 | `--multi-window` | off | Run multiple windows per mutation (multiplies AF3 runs) |
 | `--multi-window-offsets` | `0.3,0.5,0.7` | Mutation position as fraction of window |
+| `--max-gpus` | auto-detect | Max GPUs for parallel AF3 execution |
 
 ---
 

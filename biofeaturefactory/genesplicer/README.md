@@ -55,7 +55,7 @@ Per-gene output written to:
 ```
 
 **Conventions**
-- Coordinates are absolute in `genome`/`extended` scan modes; window-relative only in `window` mode.
+- Coordinates are absolute in `full` scan mode; window-relative only in `window` mode.
 - Distances are base pairs (bp) from the SNV.
 - Scores are raw GeneSplicer scores (dimensionless).
 - Confidence mapping: `low=0.5`, `med/medium=0.75`, `high=1.0`.
@@ -214,12 +214,12 @@ python genesplicer_ensemble.py \
 - Cluster radius is hardcoded to 3 bp and is not a CLI parameter.
 
 ## Performance
-- Cost dominated by GeneSplicer scan length: `genome` $\geq$ `extended` $\gg$ `window`.
-- Cache WT once per gene in `genome` mode; run ALT per SNV only.
+- Cost dominated by GeneSplicer scan length: `full` $\gg$ `window`.
+- Cache WT once per gene in `full` mode; run ALT per SNV only.
 - Memory scales with site count; use per-gene writes if millions of rows are expected.
 
 ## File Discovery
-- FASTA and mapping files discovered via `discover_fasta_files()` and `discover_mapping_files()` returning `{gene: Path}`.
+- FASTA and mapping files discovered by scanning the input and mapping directories.
 - Gene key derived from filenames (logic in `utility.py`).
 
 ## Reproducibility
@@ -228,7 +228,7 @@ python genesplicer_ensemble.py \
 - Thresholds are implied by columns; persist CLI in job metadata if needed.
 
 ## Assumptions
-- Coordinates are absolute in `genome/extended`; window-relative only in `window`.
+- Coordinates are absolute in `full` mode; window-relative only in `window`.
 - Confidence mapped to numeric weights: `{low: 0.5, med: 0.75, high: 1.0}`.
 - Model directory expected at `../human` relative to the GeneSplicer binary.
 - `should_skip_mutation()` uses `--log` if provided.

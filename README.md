@@ -30,7 +30,7 @@ Modular bioinformatics framework for automated feature extraction, coordinate ma
 ## Architecture Overview
 
 - **Unified mutation processing** keeps mutant sequence analysis consistent across pipelines.  
-- **Shared utilities** in `utils/utility.py` provide discovery helpers, mapping loaders, and mutation filters for every pipeline.  
+- **Shared utilities** in `biofeaturefactory/utils/utility.py` provide discovery helpers, mapping loaders, and mutation filters for every pipeline.  
 - **Multiple processing modes** let you run full pipelines, single tools, or parse-only passes.  
 - **Parallel execution** leverages multiprocessing/threading tuned per tool (`ProcessPoolExecutor`, `ThreadPoolExecutor`).
 - **Comprehensive logging** ensures validation, warnings, and errors are traceable.  
@@ -41,20 +41,20 @@ Modular bioinformatics framework for automated feature extraction, coordinate ma
 
 | Pipeline | Entry Point | Primary Inputs* | Notable Outputs |
 |----------|-------------|-----------------|-----------------|
-| **NetNGlyc** | `netNglyc/netnglyc-pipeline.py` | WT & mutant protein FASTA, mapping CSV dir, SignalP 6.0 | Glycosylation calls with SignalP-aware summaries |
-| **NetPhos** | `netphos/netphos-pipeline.py` | WT/mutant protein FASTA, mapping CSV dir | Kinase-specific phosphorylation predictions |
-| **NetMHC** | `netMHC/netmhc-pipeline.py` | WT/mutant protein FASTA, mapping CSV dir, HLA alleles | MHC binding predictions, epitope gain/loss |
-| **NetSurfP3** | `NetSurfP3/netsurfp3-pipeline.py` | WT/mutant protein FASTA, mapping CSV dir | RSA, secondary structure, disorder predictions |
-| **Miranda** | `miranda/miranda-ensemble.py` | WT transcript FASTA, MirandA binary, miRNA DB | Δ-based miRNA binding summaries |
-| **GeneSplicer** | `genesplicer/genesplicer_ensemble.py` | Genomic FASTA, mutation CSV dir, GeneSplicer binary | Donor/acceptor delta summaries |
-| **SpliceAI** | `spliceai/spliceai-pipeline-controller.py` | Mutation CSVs or VCFs, reference genome, annotation file, transcript/genomic/chromosome mapping dirs | SpliceAI VCFs, parsed consequence tables |
-| **RNAfold** | `RNAfold/run_viennaRNA_pipeline.py` | Transcript FASTA, transcript-mapping CSV dir | ΔΔG summaries, accessibility deltas |
-| **AlphaFold3** | `alphafold3/alphafold3_pipeline.py` | Mutation CSV, RBP binding data (POSTAR3/eCLIP) | RNA-RBP structure predictions, PAE metrics |
-| **EVmutation** | `EVmutation/evmutation-pipeline.py` | Protein MSA, plmc binary | Epistatic mutation effect scores |
-| **Codon Usage** | `codon_usage/codon-usage-pipeline.py` | ORF FASTA, mutation CSV | RSCU, CAI, tAI, codon pair scores |
-| **Rare Codon** | `rare_codon/rare-codon-pipeline.py` | Codon MSA, codon usage file | Rare codon enrichment p-values |
+| **NetNGlyc** | `biofeaturefactory/netNglyc/netnglyc_pipeline.py` | WT & mutant protein FASTA, mapping CSV dir, SignalP 6.0 | Glycosylation calls with SignalP-aware summaries |
+| **NetPhos** | `biofeaturefactory/netphos/netphos_pipeline.py` | WT/mutant protein FASTA, mapping CSV dir | Kinase-specific phosphorylation predictions |
+| **NetMHC** | `biofeaturefactory/netMHC/netmhc_pipeline.py` | WT/mutant protein FASTA, mapping CSV dir, HLA alleles | MHC binding predictions, epitope gain/loss |
+| **NetSurfP3** | `biofeaturefactory/NetSurfP3/netsurfp3_pipeline.py` | WT/mutant protein FASTA, mapping CSV dir | RSA, secondary structure, disorder predictions |
+| **Miranda** | `biofeaturefactory/miranda/miranda_ensemble.py` | WT transcript FASTA, MirandA binary, miRNA DB | Δ-based miRNA binding summaries |
+| **GeneSplicer** | `biofeaturefactory/genesplicer/genesplicer_ensemble.py` | Genomic FASTA, mutation CSV dir, GeneSplicer binary | Donor/acceptor delta summaries |
+| **SpliceAI** | `biofeaturefactory/spliceai/spliceai_pipeline_controller.py` | Mutation CSVs or VCFs, reference genome, annotation file, transcript/genomic/chromosome mapping dirs | SpliceAI VCFs, parsed consequence tables |
+| **RNAfold** | `biofeaturefactory/RNAfold/run_viennaRNA_pipeline.py` | Transcript FASTA, transcript-mapping CSV dir | ΔΔG summaries, accessibility deltas |
+| **AlphaFold3** | `biofeaturefactory/alphafold3/alphafold3_pipeline.py` | Mutation CSV, RBP binding data (POSTAR3/eCLIP) | RNA-RBP structure predictions, PAE metrics |
+| **EVmutation** | `biofeaturefactory/EVmutation/evmutation_pipeline.py` | Protein MSA, plmc binary | Epistatic mutation effect scores |
+| **Codon Usage** | `biofeaturefactory/codon_usage/codon_usage_pipeline.py` | ORF FASTA, mutation CSV | RSCU, CAI, tAI, codon pair scores |
+| **Rare Codon** | `biofeaturefactory/rare_codon/rare_codon_pipeline.py` | Codon MSA, codon usage file | Rare codon enrichment p-values |
 
-Each script auto-discovers dependencies via `utils/utility.py` if the repository layout is preserved.
+Each script auto-discovers dependencies via `biofeaturefactory/utils/utility.py` if the repository layout is preserved.
 
 *_Either single files or directories (for bulk processing) are accepted inputs_
 
@@ -101,7 +101,7 @@ WT<->ALT ensemble delta caller for splice donor/acceptor sites.
 
 Deep learning-based splice site prediction orchestrated by an adaptive controller.
 
-- `spliceai-pipeline-controller.py` wraps `nextflow run main.nf`, so one command handles VCF generation, SpliceAI inference, and result parsing.
+- `spliceai_pipeline_controller.py` wraps `nextflow run main.nf`, so one command handles VCF generation, SpliceAI inference, and result parsing.
 - Automatically launches `spliceai-tracker.py` to report per-gene processed/total mutation counts in real time; disable with `--disable_tracker`.
 - Supports mutation-driven runs (auto-build per-gene VCFs) and reuse of pre-built VCFs via `--input_vcf_path --skip_vcf_generation`.
 - Intelligent isoform management: genes exceeding `--max_isoforms_per_gene` (default 50) are filtered via hybrid stratified sampling to prevent processing bottlenecks; override with `--forceAll_isoforms`.
@@ -176,21 +176,29 @@ pip install -e .
 ```
 
 This installs:
-- Core dependencies: `biopython`, `pandas`, `numpy<2`, `requests`, `pysam`
+- Core dependencies: `biopython`, `pandas`, `numpy<2`, `requests`, `pysam`, `scipy`
 - The `biofeaturefactory` package in editable mode (changes take effect immediately)
 
-Pipeline-specific dependencies (install separately as needed):
-- **RNAfold**: `conda install -c bioconda viennarna`
-- **NetSurfP3**: `pip install nsp3`
+To install all optional dependencies at once:
+```bash
+pip install -e ".[all]"
+```
+
+Pipeline-specific optional dependencies (installed individually or via `[all]`):
+- **RNAfold**: `pip install -e ".[rnafold]"` or `conda install -c bioconda viennarna`
+- **EVmutation**: `pip install -e ".[evmutation]"` (installs `numba`)
+- **Rare Codon**: `pip install -e ".[rare-codon]"` (installs `networkx`, `prody`)
+- **Miranda**: `conda install -c bioconda miranda` (conda only)
+- **NetSurfP3**: Clone NetSurfP-3.0, then `pip install -r NetSurfP3/nsp3/requirements.txt`
 - **NetNGlyc with SignalP**: Download SignalP 6.0 fast from DTU, then `pip install /path/to/signalp-6-package`
 
 ---
 
 ## Shared Infrastructure & Pathing
 
-- `utils/utility.py` serves as the core helper module for NetNGlyc, NetPhos, Miranda, GeneSplicer, SpliceAI preprocessors, and RNAfold.
+- `biofeaturefactory/utils/utility.py` serves as the core helper module for all pipelines.
 - The `utils` package is installed via `pip install -e .` (see [Installation](#installation)).
-- Helpers include directory discovery (`get_input_dir`, `get_output_dir`), mutation CSV loaders, exon-aware mapping filters, FASTA retrieval utilities, and logging wrappers.
+- Helpers include directory discovery, mutation CSV loaders, exon-aware mapping filters, FASTA I/O, codon usage calculations, and logging wrappers.
 - All net-tool pipelines (NetNGlyc, NetPhos, NetMHC) require native binary installations.
 
 ---
@@ -202,26 +210,24 @@ For the vast majority of the pipelines in this repository properly mapped mutati
 1. **Generate exon-aware assets**
 
 ```bash
-   python3 utils/exon_aware_mapping.py \
+   python3 biofeaturefactory/utils/exon_aware_mapping.py \
      --mutations /path/to/mutations/ \
      --annotation /path/to/annotations.gtf \
      --reference /path/to/reference_genome.fa \
-     --out-fasta /path/to/output_fastas/ \
-     --out-chromosome-mapping /path/to/chromosome_mappings/ \
-     --out-genomic-mapping /path/to/genomic_mappings/ \
-     --out-transcript-mapping /path/to/transcript_mappings/ \
-     --out-aa-mapping /path/to/aa_mappings/ \
+     --output /path/to/output_dir/ \
      --orf /path/to/orf_fastas/ \
      --force-cds transcript_overrides.csv \
      --verbose
 ```
 
    **Key options:**
+   - `--output` / `-o` — Output directory (defaults to current working directory). Produces chromosome, genomic, transcript, and AA mapping CSVs plus per-gene FASTAs.
+   - `--exclude-chromosome` / `-Ec` — Skip chromosome mapping output.
+   - `--exclude-genomic` / `-Eg` — Skip gDNA mapping output.
+   - `--exclude-transcript` / `-Et` — Skip transcript mapping output.
+   - `--exclude-aa` / `-EA` — Skip amino-acid mapping output.
    - `--orf` — Directory or file containing known ORF sequences. If omitted, ORF is inferred from transcript.
-   - `--force-cds` — Force specific transcript isoforms. Accepts either:
-     - Single accession (e.g., `NM_022162.3`) applied to all genes
-     - CSV file with `gene,transcript_id` columns for per-gene overrides
-   - `--out-aa-mapping` — Optional output directory for amino-acid mapping CSVs.
+   - `--force-cds` — Force specific transcript isoforms. Accepts either a single accession (e.g., `NM_022162.3`) applied to all genes, or a CSV file with `gene,transcript_id` columns for per-gene overrides.
    - `--verbose` — Print detailed ORF/mutation validation messages and write log file.
 
    **Outputs:**
@@ -236,7 +242,7 @@ For the vast majority of the pipelines in this repository properly mapped mutati
 
 3. **Optional: reference checks and VCF conversion**
 
-   - `utils/vcf_converter.py` cross-validates FASTA headers against the reference genome, normalizes chromosome naming, and creates sorted per-gene VCFs for SpliceAI.  
+   - `biofeaturefactory/utils/vcf_converter.py` cross-validates FASTA headers against the reference genome, normalizes chromosome naming, and creates sorted per-gene VCFs for SpliceAI.  
    - Run when VCF input is required or genome mismatches are suspected.  
 
 4. **Stage outputs for pipelines**

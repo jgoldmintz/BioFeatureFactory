@@ -23,6 +23,7 @@ GeneSplicer WT<->ALT ensemble delta caller
 import os
 import sys
 import argparse
+import shutil
 import tempfile
 import subprocess
 from pathlib import Path
@@ -58,27 +59,34 @@ DEFAULT_MAX_WORKERS = 8
 # helpers: run genesplicer
 # ---------------------------------------------------------------------------
 
-def _run_genesplicer_on_seq(seq_name: str, seq: str, genesplicer_dir: str, model_rel: str = "../human") -> pd.DataFrame:
+def _run_genesplicer_on_seq(seq_name: str, seq: str, genesplicer_dir: str | None, model_rel: str = "../human") -> pd.DataFrame:
     """
     Run GeneSplicer on a single in-memory sequence.
     Returns a DataFrame with columns:
         End5, End3, Score, confidence, splice_site_type
+
+    genesplicer_dir may be None to use genesplicer from PATH.
     """
-    os.makedirs(genesplicer_dir, exist_ok=True)
-    # use temp file in genesplicer_dir to avoid path issues
-    with tempfile.NamedTemporaryFile(mode="w", dir=genesplicer_dir, delete=False, suffix=".fasta") as tmpf:
+    if genesplicer_dir:
+        os.makedirs(genesplicer_dir, exist_ok=True)
+        tmp_dir = genesplicer_dir
+    else:
+        tmp_dir = tempfile.gettempdir()
+
+    with tempfile.NamedTemporaryFile(mode="w", dir=tmp_dir, delete=False, suffix=".fasta") as tmpf:
         tmp_name = os.path.basename(tmpf.name)
         tmpf.write(f">{seq_name}\n{seq}\n")
         tmp_path = tmpf.name
 
     out = None
     try:
-        cmd = f"cd {genesplicer_dir} && ./genesplicer {tmp_name} {model_rel}"
-        # capture stdout
+        if genesplicer_dir:
+            cmd = f"cd {genesplicer_dir} && ./genesplicer {tmp_name} {model_rel}"
+        else:
+            cmd = f"genesplicer {tmp_path} {model_rel}"
         result = subprocess.run(cmd, shell=True, capture_output=True, text=True)
         out = result.stdout.strip()
     finally:
-        # cleanup temp file
         try:
             os.remove(tmp_path)
         except OSError:
@@ -736,7 +744,9 @@ def main():
     parser = argparse.ArgumentParser(description="GeneSplicer WT<->ALT ensemble delta caller")
     parser.add_argument("-i", "--input", required=True, help="Directory of genomic FASTA files, or a single FASTA file")
     parser.add_argument("-m", "--mapping-dir", required=True, help="Genomic mutation mapping CSV file, or directory of CSV files")
-    parser.add_argument("-g", "--genesplicer-dir", required=True, help="Directory containing GeneSplicer binary")
+    parser.add_argument("-g", "--genesplicer-dir", default=None,
+                        help="Directory containing GeneSplicer binary; "
+                             "omit to use genesplicer from PATH (e.g. after conda install)")
     parser.add_argument("-o", "--output", required=True, help="Output base directory (writes {GENE}/GeneSplicer/{GENE}.tsv, .events.tsv, .sites.tsv)")
     parser.add_argument("--pipeline", choices=["full", "window", "custom"], default="full",
                         help="Pipeline mode. 'full' = run on whole genomic sequence once and mutate in-memory.")
@@ -755,6 +765,14 @@ def main():
                         help="Max parallel workers (default: half cores, capped at 8)")
     parser.add_argument("--log", help="Validation log file/dir to skip failed mutations")
     args = parser.parse_args()
+
+    if args.genesplicer_dir:
+        bin_path = os.path.join(args.genesplicer_dir, "genesplicer")
+        if not os.access(bin_path, os.X_OK):
+            parser.error(f"genesplicer executable not found or not executable at {bin_path}")
+    elif not shutil.which("genesplicer"):
+        parser.error("genesplicer not found on PATH. Install via conda (conda install -c bioconda genesplicer) "
+                      "or provide --genesplicer-dir")
 
     input_path = Path(args.input)
     mapping_dir = args.mapping_dir

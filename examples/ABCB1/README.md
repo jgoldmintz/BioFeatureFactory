@@ -11,15 +11,11 @@ For the vast majority of the pipelines in this repository properly mapped mutati
 Example usage:
 
 ```bash
-   python3 utils/exon_aware_mapping.py \
+   python3 biofeaturefactory/utils/exon_aware_mapping.py \
      --mutations /path/to/mutations/ \
      --annotation /path/to/annotations.gtf \
      --reference /path/to/reference_genome.fa \
-     --out-fasta /path/to/output_fastas/ \
-     --out-chromosome-mapping /path/to/chromosome_mappings/ \
-     --out-genomic-mapping /path/to/genomic_mappings/ \
-     --out-transcript-mapping /path/to/transcript_mappings/ \
-     --out-aa-mapping /path/to/aa_mappings/ \
+     --output /path/to/output_dir/ \
      --orf /path/to/orf_fastas/ \
      --force-cds transcript_overrides.csv \
      --verbose

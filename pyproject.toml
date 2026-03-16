@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "biofeaturefactory"
 version = "0.1.0"
-description = "BioFeatureFactory — feature extraction for disease-associated synonymous mutations"
+description = "BioFeatureFactory — feature extraction for disease-associated mutations"
 requires-python = ">=3.9"
 dependencies = [
     "biopython>=1.79",
@@ -13,13 +13,23 @@ dependencies = [
     "numpy>=1.20.0,<2",
     "requests>=2.25.0",
     "pysam>=0.19.0",
+    "scipy>=1.7.0",
 ]
 
 [tool.setuptools.packages.find]
 include = ["biofeaturefactory*"]
 
 [project.optional-dependencies]
-dev = ["pytest>=7.0"]
+rnafold = ["ViennaRNA"]
+evmutation = ["numba>=0.53"]
+rare-codon = ["networkx>=2.6", "prody>=2.0"]
+all = [
+    "ViennaRNA",
+    "numba>=0.53",
+    "networkx>=2.6",
+    "prody>=2.0",
+]
+dev = ["pytest>=7.0", "pytest-cov>=4.0"]
 
 [tool.pytest.ini_options]
 testpaths = ["test"]

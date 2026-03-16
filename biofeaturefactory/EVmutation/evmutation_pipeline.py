@@ -72,9 +72,11 @@ from biofeaturefactory.utils.utility import (
     discover_fasta_files,
     extract_gene_from_filename,
     load_validation_failures,
+    mutation_class,
     read_fasta,
     should_skip_mutation,
     trim_muts,
+    write_tsv,
 )
 
 
@@ -326,17 +328,6 @@ def aa_symbol(aa):
     return "*" if aa == "Stop" else aa
 
 
-def mutation_class(wt_aa, mut_aa):
-    if wt_aa == "X" or mut_aa == "X":
-        return "UNKNOWN"
-    if wt_aa == mut_aa:
-        return "SYNONYMOUS"
-    if mut_aa == "Stop" and wt_aa != "Stop":
-        return "STOP_GAIN"
-    if wt_aa == "Stop" and mut_aa != "Stop":
-        return "STOP_LOSS"
-    return "MISSENSE"
-
 
 def score_nt_mutations(nt_mutations, gene, orf_seq, aa_lookup, failure_map=None, codon_lookup=None):
     """
@@ -467,20 +458,12 @@ def score_nt_mutations(nt_mutations, gene, orf_seq, aa_lookup, failure_map=None,
 # ---------------------------------------------------------------------------
 
 def write_protein_output(results, output_path):
-    with open(output_path, "w", newline="") as f:
-        writer = csv.DictWriter(f, fieldnames=PROTEIN_FIELDNAMES, delimiter="\t",
-                                extrasaction="ignore")
-        writer.writeheader()
-        writer.writerows(results)
+    write_tsv(results, output_path, PROTEIN_FIELDNAMES, extrasaction='ignore')
     print(f"  Wrote {len(results)} rows -> {output_path}")
 
 
 def write_codon_output(results, output_path):
-    with open(output_path, "w", newline="") as f:
-        writer = csv.DictWriter(f, fieldnames=CODON_FIELDNAMES, delimiter="\t",
-                                extrasaction="ignore")
-        writer.writeheader()
-        writer.writerows(results)
+    write_tsv(results, output_path, CODON_FIELDNAMES, extrasaction='ignore')
     print(f"  Wrote {len(results)} rows -> {output_path}")
 
 
@@ -742,14 +725,14 @@ MSA resolution (--msa / --codon-msa):
 
 Examples:
   # Single gene, pre-built params
-  python evmutation-pipeline.py \\
+  python evmutation_pipeline.py \\
       --fasta SMN2.fasta --mutations SMN2.csv \\
       --model-params SMN2.model_params \\
       --codon-model-params SMN2.codon_model_params \\
       --output results/
 
   # Single gene, build from MSAs
-  python evmutation-pipeline.py \\
+  python evmutation_pipeline.py \\
       --fasta SMN2.fasta --mutations SMN2.csv \\
       --msa SMN2.msa.a2m \\
       --codon-msa SMN2.codon.msa.fasta \\
@@ -757,7 +740,7 @@ Examples:
       --output results/
 
   # Multi-gene directory
-  python evmutation-pipeline.py \\
+  python evmutation_pipeline.py \\
       --fasta /data/fastas/ --mutations /data/mutations/ \\
       --msa /data/msas/ --codon-msa /data/codon_msas/ \\
       --plmc-binary /usr/local/bin/plmc \\

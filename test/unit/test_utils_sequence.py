@@ -5,7 +5,6 @@ Run with: pytest test/unit/test_utils_sequence.py -v
 """
 
 import sys
-import warnings
 from pathlib import Path
 
 import pytest
@@ -16,7 +15,6 @@ from utility import (
     subseq,
     get_mutation_data,
     get_mutation_data_bioAccurate,
-    convert_position,
     translate_orf_sequence,
     infer_aamutation_from_nt,
 )
@@ -136,41 +134,6 @@ class TestGetMutationDataBioAccurate:
         assert nts is None
 
 
-
-# convert_position
-
-
-class TestConvertPosition:
-
-    def test_identity_no_gaps(self):
-        pos, err = convert_position("ACGT", "ACGT", 1)
-        assert pos == 1
-        assert err is None
-
-    def test_position_2_no_gaps(self):
-        pos, err = convert_position("ACGT", "ACGT", 2)
-        assert pos == 2
-        assert err is None
-
-    def test_gap_in_seq1_shifts_seq2_position(self):
-        # seq1: A - C G T  (C is 2nd non-gap residue)
-        # seq2: A A C G T  (C is 3rd non-gap residue)
-        pos, err = convert_position("A-CGT", "AACGT", 2)
-        assert pos == 3
-        assert err is None
-
-    def test_seq1_position_aligns_with_gap_in_seq2(self):
-        # seq1: A C G T
-        # seq2: A C - T  (seq1 pos 3 = G aligns with gap in seq2)
-        pos, err = convert_position("ACGT", "AC-T", 3)
-        assert err is not None
-        assert "gap" in err.lower()
-
-    def test_zero_position_sets_error(self):
-        with warnings.catch_warnings(record=True):
-            warnings.simplefilter("always")
-            _, err = convert_position("ACGT", "ACGT", 0)
-        assert err is not None
 
 
 

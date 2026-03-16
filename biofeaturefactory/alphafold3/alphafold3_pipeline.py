@@ -18,7 +18,7 @@
 """
 AlphaFold3 RNA-RBP Interaction Pipeline
 
-Analyzes how synonymous mutations affect RNA-binding protein interactions
+Analyzes how mutations affect RNA-binding protein interactions
 using AlphaFold3 structure predictions.
 
 Outputs:
@@ -53,7 +53,7 @@ from biofeaturefactory.alphafold3.bin.binding_metrics import (
 from biofeaturefactory.utils.utility import (
     read_fasta, trim_muts, get_mutation_data_bioAccurate,
     extract_gene_from_filename, subseq, load_mapping,
-    _collect_failures_from_logs
+    _collect_failures_from_logs, write_tsv
 )
 
 
@@ -700,11 +700,7 @@ class AlphaFold3Pipeline:
     def _write_rows(self, rows, path):
         """Write a list of row dicts to a TSV file."""
         if rows:
-            fieldnames = list(rows[0].keys())
-            with open(path, 'w', newline='') as f:
-                writer = csv.DictWriter(f, fieldnames=fieldnames, delimiter='\t')
-                writer.writeheader()
-                writer.writerows(rows)
+            write_tsv(rows, path)
             print(f"Wrote {len(rows)} rows to {path}", file=sys.stderr)
 
     def flush_gene(self, gene_name: str):
