@@ -32,7 +32,6 @@ import re
 import sys
 import argparse
 import os
-import csv
 import subprocess
 import tempfile
 import shutil
@@ -53,7 +52,8 @@ from biofeaturefactory.utils.utility import (
     synthesize_gene_fastas,
     extract_mutation_from_sequence_name,
     extract_gene_from_filename,
-    read_fasta,
+    resolve_output_base,
+    write_tsv,
 )
 
 
@@ -647,10 +647,7 @@ def write_ensemble_outputs(output_base, summary_rows, events_rows, sites_rows):
         'top_event_type', 'top_event_delta', 'top_event_position', 'top_event_kinase',
         'top_event_classification_code', 'qc_flags',
     ]
-    with open(summary_path, 'w', newline='') as f:
-        writer = csv.DictWriter(f, fieldnames=summary_fields, delimiter='\t', extrasaction='ignore')
-        writer.writeheader()
-        writer.writerows(summary_rows)
+    write_tsv(summary_rows, summary_path, summary_fields, extrasaction='ignore')
     print(f"Wrote {len(summary_rows)} summary rows to {summary_path}")
 
     # Events
@@ -659,10 +656,7 @@ def write_ensemble_outputs(output_base, summary_rows, events_rows, sites_rows):
         'kinase', 'wt_score', 'mut_score', 'delta',
         'wt_answer', 'mut_answer', 'classification', 'classification_code',
     ]
-    with open(events_path, 'w', newline='') as f:
-        writer = csv.DictWriter(f, fieldnames=events_fields, delimiter='\t', extrasaction='ignore')
-        writer.writeheader()
-        writer.writerows(events_rows)
+    write_tsv(events_rows, events_path, events_fields, extrasaction='ignore')
     print(f"Wrote {len(events_rows)} events to {events_path}")
 
     # Sites
@@ -670,10 +664,7 @@ def write_ensemble_outputs(output_base, summary_rows, events_rows, sites_rows):
         'pkey', 'Gene', 'allele', 'seq_name', 'position',
         'amino_acid', 'context', 'score', 'kinase', 'answer',
     ]
-    with open(sites_path, 'w', newline='') as f:
-        writer = csv.DictWriter(f, fieldnames=sites_fields, delimiter='\t', extrasaction='ignore')
-        writer.writeheader()
-        writer.writerows(sites_rows)
+    write_tsv(sites_rows, sites_path, sites_fields, extrasaction='ignore')
     print(f"Wrote {len(sites_rows)} site predictions to {sites_path}")
 
 
@@ -876,7 +867,6 @@ def run_netphos_only_mode(args, executor_fn, ape_bin):
         return 1
 
     print(f"NetPhos outputs in: {temp_output_dir}")
-    print("Use --mode parse-only to parse these outputs.")
     return 0
 
 
@@ -965,9 +955,6 @@ def main():
     parser.add_argument('--verbose', action='store_true',
                         help='Verbose output')
 
-    # Mode selection
-    parser.add_argument('--mode', choices=['full-pipeline'], default='full-pipeline',
-                        help='Processing mode (only full-pipeline is supported)')
     parser.add_argument('--batch-size', type=int,
                         help='Batch size for large FASTA files')
     parser.add_argument('--timeout', type=int, default=300,

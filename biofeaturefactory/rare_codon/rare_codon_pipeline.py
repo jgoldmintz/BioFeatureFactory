@@ -49,6 +49,7 @@ from biofeaturefactory.utils.utility import (
     extract_gene_from_filename,
     load_validation_failures,
     should_skip_mutation,
+    write_tsv,
 )
 
 # Import cg_cotrans library (GPL v3 licensed, Copyright 2017 William M. Jacobs)
@@ -297,11 +298,7 @@ def write_output(results, output_path):
         print("No results to write")
         return
 
-    with open(output_path, 'w', newline='') as f:
-        writer = csv.DictWriter(f, fieldnames=FIELDNAMES, delimiter='\t', extrasaction='ignore')
-        writer.writeheader()
-        writer.writerows(results)
-
+    write_tsv(results, output_path, FIELDNAMES, extrasaction='ignore')
     print(f"Wrote {len(results)} rows to {output_path}")
 
 
@@ -553,7 +550,7 @@ def main():
         epilog="""
 Examples:
   # Single gene
-  python rare-codon-pipeline.py \\
+  python rare_codon_pipeline.py \\
     --msa /path/to/codon_msa.fasta \\
     --usage /path/to/codon_usage.p.gz \\
     --wt-gi "focus_sequence_id" \\
@@ -562,12 +559,12 @@ Examples:
     --output results/
 
   # Directory mode
-  python rare-codon-pipeline.py \\
+  python rare_codon_pipeline.py \\
     --fasta fastas/ --msa msas/ --usage codon_usage.p.gz \\
     --mutations mutations/ --output results/
 
 Required preprocessing:
-  1. Generate codon-aware MSA (use msa/codon-msa-pipeline.py)
+  1. Generate codon-aware MSA (use msa/codon_msa_pipeline.py)
   2. Optional: provide --usage codon_usage.p.gz (auto-generated if omitted)
 
 Copyright notice:

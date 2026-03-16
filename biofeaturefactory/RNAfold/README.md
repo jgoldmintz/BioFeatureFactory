@@ -7,6 +7,36 @@ Both reference and alternate sequences are folded, sampled, and compared at mult
 
 ---
 
+## Usage
+
+```bash
+python run_viennaRNA_pipeline.py \
+    -i /path/to/fastas/ \
+    -o results/ \
+    --transcript-mapping /path/to/mappings/ \
+    --log /path/to/validation.log \
+    --samples 1000 \
+    --tau 0.05 \
+    --window 151 \
+    --workers 8
+# Writes per gene: results/{GENE}/RNAfold/{GENE}.rnafold.{tsv,positions.tsv}
+```
+
+### Arguments
+
+| Argument | Required | Default | Description |
+|----------|----------|---------|-------------|
+| `-i, --input` | Yes | -- | Input FASTA sequence file or directory |
+| `-o, --output` | Yes | -- | Output base directory |
+| `-w, --window` | No | `151` | Window size in nt (odd; truncates near ends) |
+| `--transcript-mapping` | No | -- | Path to transcript mapping file or directory |
+| `--log` | No | -- | Validation log (file or directory) used to filter failed mutations |
+| `--samples` | No | `1000` | Number of Boltzmann samples per sequence |
+| `--tau` | No | `0.05` | Threshold for `change_flag` on delta\_u |
+| `--workers` | No | auto | Max parallel workers (processes) |
+
+---
+
 ## Workflow Summary
 
 1. **Window Extraction**  
@@ -177,4 +207,4 @@ This threshold filters out small fluctuations due to ensemble sampling noise, al
 
 ## License
 
-This project is licensed under the AGPL-3.0 License - see the [LICENSE](../LICENSE) file in the root BioFeatureFactory directory for details.
+This project is licensed under the AGPL-3.0 License - see the [LICENSE](../../LICENSE) file in the root BioFeatureFactory directory for details.

@@ -1,6 +1,6 @@
 # SpliceAI Pipeline
 
-This Nextflow-based pipeline provides automated SpliceAI splice site prediction analysis for disease-associated synonymous mutations, featuring complete end-to-end processing from mutation CSV files to parsed results with pkey mapping.
+This Nextflow-based pipeline provides automated SpliceAI splice site prediction analysis for disease-associated mutations, featuring complete end-to-end processing from mutation CSV files to parsed results with pkey mapping.
 
 ## Key Features
 
@@ -19,7 +19,7 @@ This Nextflow-based pipeline provides automated SpliceAI splice site prediction 
 ## Required Files and Setup
 
 ### Essential Pipeline Files
-- **`spliceai-pipeline-controller.py`** - Main entry point with progress tracking
+- **`spliceai_pipeline_controller.py`** - Main entry point with progress tracking
 - **`bin/main.nf`** - Nextflow pipeline with multi-input support
 - **`bin/filter_annotation.py`** - Hybrid stratified sampling filter for high-isoform genes
 - **`bin/spliceai-parser.py`** - Advanced VCF parser with pkey mapping and log filtering
@@ -35,11 +35,11 @@ This Nextflow-based pipeline provides automated SpliceAI splice site prediction 
 - File mode reuses the single CSV for one gene
 
 #### Mapping Files (Required for pkey generation)
-- Supply mapping paths using `--transcript_mapping_path`, `--genomic_mapping_path`, and optional `--chromosome_mapping_path` (legacy aliases: `--*_dir`)
+- Supply mapping paths using `--transcript_mapping_path`, `--genomic_mapping_path`, and `--chromosome_mapping_path` (all required; legacy aliases: `--*_dir`)
 - Paths may point to a directory (per-gene CSVs) or a single CSV reused for every gene
 - Directory mode discovery is case-insensitive and matches `*<GENE>*.csv`
 - Transcript and genomic mapping are required per gene; missing files trigger an error
-- Chromosome mapping is optional. If absent for a gene, the parser warns and continues without chromosome mapping for that gene
+- Chromosome mapping is required. The path must be provided via `--chromosome_mapping_path`; if a per-gene file is absent within that path, the parser warns and continues without chromosome mapping for that gene
 - Chromosome mapping example (`combined_{GENE}.csv`):
   ```csv
   mutant,chromosome
@@ -99,7 +99,7 @@ python3 annot_to_spliceai.py \
 Use the controller as the single entry point. The commands below show typical invocations; replace the sample paths with your own locations.
 
 ```bash
-python spliceai-pipeline-controller.py \
+python spliceai_pipeline_controller.py \
     --mutations_path mutations/ \
     --reference_genome /path/to/reference.fna \
     --annotation_file annotation_ncbi.txt \
@@ -135,13 +135,19 @@ python spliceai-pipeline-controller.py \
 - **`--maxforks`**: Max concurrent `run_spliceai` tasks (default: 0 = no limit).
 - **`--disable_tracker`**: Disable the live progress tracker.
 
+### Controller Options
+- **`--retry_jitter`**: Random jitter in seconds added to retry delays (default: 10).
+- **`--resume`**: Resume from a previous run using Nextflow's built-in `-resume` flag.
+- **`--poll_seconds`**: Tracker poll interval in seconds (default: 15.0).
+- **`--pipeline`**: Path to the Nextflow script to run (default: `bin/main.nf`).
+
 ### Isoform Management
 - **`--forceAll_isoforms`**: Process all transcript isoforms regardless of count. By default, genes with more than `max_isoforms_per_gene` isoforms are filtered using hybrid stratified sampling to prevent catastrophic slowdowns.
 - **`--max_isoforms_per_gene`**: Threshold for applying isoform filtering (default: 50). Genes exceeding this count trigger hybrid sampling: the top 10 longest isoforms (capturing canonical/MANE transcripts) plus 40 randomly selected from the remainder. Uses deterministic seeding based on gene name hash for reproducibility.
 
 ### Validation and Filtering
 - **`--validation_log`**: Path to validation log for filtering failed mutations
-- **`--chromosome_mapping_path`**: Optional per-gene chromosome mapping (legacy `--chromosome_mapping_dir`)
+- **`--chromosome_mapping_path`**: Required per-gene chromosome mapping (legacy `--chromosome_mapping_dir`)
 - **`--transcript_mapping_path`**: Required for mutation ID mapping (legacy `--transcript_mapping_dir`)
 - **`--genomic_mapping_path`**: Required for genomic mapping (legacy `--genomic_mapping_dir`)
 
@@ -252,10 +258,7 @@ python3 ../utils/exon_aware_mapping.py \
     --mutations /path/to/mutations/ \
     --annotation /path/to/annotation.gtf \
     --reference /path/to/reference_genome.fna \
-    --out-chromosome-mapping /path/to/chromosome_mappings/ \
-    --out-transcript-mapping /path/to/transcript_mappings/ \
-    --out-genomic-mapping /path/to/genomic_mappings/ \
-    --out-fasta /path/to/output_fastas/
+    --output /path/to/output_dir/
 ```
 
 #### Extremely Slow Processing (High-Isoform Genes)
@@ -270,7 +273,7 @@ grep "FILTER" work/*/*/.command.log
 # [FILTER] BRCA1: 368 isoforms -> 50 (top 10 longest + 40 random, seed=1234567890)
 
 # To force processing all isoforms (warning: may take days for genes like BRCA1):
-python spliceai-pipeline-controller.py \
+python spliceai_pipeline_controller.py \
     --mutations_path /path/to/mutations \
     --reference_genome /path/to/reference.fna \
     --annotation_file annotation_ncbi.txt \
@@ -288,7 +291,7 @@ By default, the pipeline automatically handles genes with excessive isoform coun
 
 ```bash
 # Default behavior: automatic filtering for genes with >50 isoforms
-python spliceai-pipeline-controller.py \
+python spliceai_pipeline_controller.py \
     --mutations_path /path/to/mutations \
     --reference_genome /path/to/reference.fna \
     --annotation_file annotation_ncbi.txt \
@@ -298,7 +301,7 @@ python spliceai-pipeline-controller.py \
     --output_dir results/
 
 # Force processing of ALL isoforms (not recommended for genes like BRCA1 with 300+ isoforms)
-python spliceai-pipeline-controller.py \
+python spliceai_pipeline_controller.py \
     --mutations_path /path/to/mutations \
     --reference_genome /path/to/reference.fna \
     --annotation_file annotation_ncbi.txt \
@@ -309,7 +312,7 @@ python spliceai-pipeline-controller.py \
     --forceAll_isoforms
 
 # Custom isoform threshold: apply filtering for genes with >100 isoforms
-python spliceai-pipeline-controller.py \
+python spliceai_pipeline_controller.py \
     --mutations_path /path/to/mutations \
     --reference_genome /path/to/reference.fna \
     --annotation_file annotation_ncbi.txt \

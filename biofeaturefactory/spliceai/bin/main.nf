@@ -201,7 +201,7 @@ params.max_isoforms_per_gene      = 50
 
   // ---------------- PROCESSES ----------------
   process generate_vcfs {
-      publishDir params.vcf_output_dir ?: '.', mode: 'copy', pattern: '*.vcf', enabled: params.vcf_output_dir != null
+      publishDir params.vcf_output_dir ? params.vcf_output_dir : "${params.output_dir ?: '.'}/${gene_id}/VCF", mode: 'copy', pattern: '*.vcf'
       tag { gene_id }
 
       input:
@@ -230,7 +230,7 @@ params.max_isoforms_per_gene      = 50
   }
 
   process compress_and_index {
-      publishDir params.vcf_output_dir ?: '.', mode: 'copy', pattern: '*.vcf.gz*', enabled: params.vcf_output_dir != null
+      publishDir params.vcf_output_dir ? params.vcf_output_dir : "${params.output_dir ?: '.'}/${gene_id}/VCF", mode: 'copy', pattern: '*.vcf.gz*'
       tag { gene_id }
 
       input:
@@ -251,7 +251,7 @@ process run_spliceai {
     maxForks params.maxforks.toInteger()
     errorStrategy 'retry'
     maxRetries 3
-    publishDir params.vcf_output_dir ?: '.', mode: 'copy', pattern: '*.spliceai.vcf*', enabled: params.vcf_output_dir != null
+    publishDir params.vcf_output_dir ? params.vcf_output_dir : "${params.output_dir ?: '.'}/${gene_id}/VCF", mode: 'copy', pattern: '*.spliceai.vcf*'
     tag { gene_id }
 
     input:

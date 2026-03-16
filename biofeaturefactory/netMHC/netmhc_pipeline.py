@@ -31,7 +31,6 @@ Key features:
 """
 
 import os
-import csv
 import subprocess
 import tempfile
 import shutil
@@ -49,9 +48,8 @@ from typing import Optional, Dict, List, Tuple
 
 # Import utility functions
 from biofeaturefactory.utils.utility import (
-    read_fasta,
-    get_mutation_data_bioAccurate,
     write_fasta,
+    write_tsv,
     split_fasta_into_batches,
     combine_batch_outputs,
     discover_mapping_files,
@@ -62,9 +60,6 @@ from biofeaturefactory.utils.utility import (
     should_skip_mutation,
     load_wt_sequences,
     load_wt_sequence_map,
-    trim_muts,
-    get_mutant_aa,
-    update_str,
     extract_gene_from_filename,
     extract_mutation_from_sequence_name,
     translate_orf_sequence,
@@ -306,11 +301,7 @@ def write_netmhc_tsv(predictions, output_file, include_pkey=False):
     if include_pkey:
         fieldnames.insert(0, 'pkey')
 
-    with open(output_file, 'w', newline='') as f:
-        writer = csv.DictWriter(f, fieldnames=fieldnames, delimiter='\t', extrasaction='ignore')
-        writer.writeheader()
-        writer.writerows(predictions)
-
+    write_tsv(predictions, output_file, fieldnames, extrasaction='ignore')
     print(f"Wrote {len(predictions)} NetMHC predictions to {output_file}")
 
 
@@ -498,11 +489,7 @@ def write_summary_tsv(summary_rows, output_file):
         'qc_flags'
     ]
 
-    with open(output_file, 'w', newline='') as f:
-        writer = csv.DictWriter(f, fieldnames=fieldnames, delimiter='\t', extrasaction='ignore')
-        writer.writeheader()
-        writer.writerows(summary_rows)
-
+    write_tsv(summary_rows, output_file, fieldnames, extrasaction='ignore')
     print(f"Wrote {len(summary_rows)} summary rows to {output_file}")
 
 
@@ -520,11 +507,7 @@ def write_events_tsv(events, output_file):
         'classification', 'classification_code'
     ]
 
-    with open(output_file, 'w', newline='') as f:
-        writer = csv.DictWriter(f, fieldnames=fieldnames, delimiter='\t', extrasaction='ignore')
-        writer.writeheader()
-        writer.writerows(events)
-
+    write_tsv(events, output_file, fieldnames, extrasaction='ignore')
     print(f"Wrote {len(events)} events to {output_file}")
 
 
@@ -540,11 +523,7 @@ def write_sites_tsv(sites, output_file):
         'affinity', 'rank', 'bind_level', 'identity'
     ]
 
-    with open(output_file, 'w', newline='') as f:
-        writer = csv.DictWriter(f, fieldnames=fieldnames, delimiter='\t', extrasaction='ignore')
-        writer.writeheader()
-        writer.writerows(sites)
-
+    write_tsv(sites, output_file, fieldnames, extrasaction='ignore')
     print(f"Wrote {len(sites)} site predictions to {output_file}")
 
 
@@ -692,11 +671,6 @@ def main():
                        help='Input: WT FASTA file/directory')
     parser.add_argument('output', nargs='?',
                        help='Output base directory')
-
-    # Mode selection
-    parser.add_argument('--mode', choices=['full-pipeline'],
-                       default='full-pipeline',
-                       help='Processing mode (only full-pipeline is supported)')
 
     # MHC-specific options
     parser.add_argument('--alleles', nargs='+',

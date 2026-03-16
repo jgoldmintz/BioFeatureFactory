@@ -43,10 +43,9 @@ setenv SIGNALP /path/to/BioFeatureFactory/biofeaturefactory/netNglyc/bin/signalp
 ### Full pipeline (WT input -> TSV ensemble)
 
 ```bash
-python netnglyc-pipeline.py \
+python netnglyc_pipeline.py \
     ../../FASTA_files/newnt3/ \
     results/ \
-    --mode full-pipeline \
     --mapping-dir ../../mutations/combined/aa \
     --log /path/to/validation.log \
     --cache-dir /path/to/cache \
@@ -60,26 +59,21 @@ This flow:
 3. Runs SignalP 6.0 once per FASTA and executes NetNGlyc (native binary).
 4. Writes the ensemble TSV trio (`summary`, `.events.tsv`, `.sites.tsv`).
 
-### NetNGlyc-only processing
+### Processing Options
 
-```bash
-python netnglyc-pipeline.py wt/ABCB1.fasta results/ --mode process
-```
-
-Produces raw `.out` files (no parsing).
-
-### Parse-only mode
-
-```bash
-python netnglyc-pipeline.py \
-    /var/folders/.../netnglyc_outputs_XXXX \
-    results/ \
-    --mode parse \
-    --mapping-dir ../../mutations/combined/aa \
-    --cache-dir .
-```
-
-**Important:** `--mode parse` expects a directory that already contains NetNGlyc outputs (e.g., the `netnglyc_outputs_*` folder from a previous run). The parser reuses SignalP metadata from `--cache-dir` (or the default `~/.signalp6_cache`) by reading every `*_sp6_output/prediction_results.txt`.
+| Option | Description |
+|--------|-------------|
+| `--test` | Run test with ABCB1 sequence. |
+| `--workers N` | Number of parallel workers. |
+| `--batch-size N` | Sequences per batch (default: 100). |
+| `--batch-timeout SEC` | Timeout in seconds per batch (default: 5000). |
+| `--mapping-dir DIR` | Mutation mapping CSV directory (required for full pipeline). |
+| `--log FILE` | Validation log to skip failed mutations. |
+| `--cache-dir DIR` | Custom cache directory for SignalP results. |
+| `--threshold FLOAT` | Minimum glycosylation potential score. |
+| `--native-netnglyc-bin PATH` | Path to native NetNGlyc binary. |
+| `--keep-intermediates` | Retain intermediate files for debugging. |
+| `--verbose` | Enable verbose output. |
 
 ---
 
@@ -185,8 +179,8 @@ Classifications align with NetNGlyc visibility thresholds: a site is **gained** 
 | Symptom                                             | Resolution                                                                                                                                                                                                   |
 |-----------------------------------------------------|--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
 | `ProcessPoolExecutor ... SC_SEM_NSEMS_MAX` on macOS | Set `--workers 1` or run in Linux/native mode (macOS limits POSIX semaphores).                                                                                                                  |
-| Parser says WT/MUT missing despite completed run    | Ensure `netnglyc_outputs_*` (with `wt/` and `mut/` directories) is passed to `--mode parse`; FASTA inputs are not valid parse targets.                                                                       |
-| SignalP columns blank in parse mode                 | Confirm `--cache-dir` matches the location containing `*_sp6_output/prediction_results.txt`, or omit `--cache-dir` to fall back to `~/.signalp6_cache`.                                                      |
+| Parser says WT/MUT missing despite completed run    | Ensure `netnglyc_outputs_*` (with `wt/` and `mut/` directories) exists; FASTA inputs are not valid parse targets.                                                                       |
+| SignalP columns blank                               | Confirm `--cache-dir` matches the location containing `*_sp6_output/prediction_results.txt`, or omit `--cache-dir` to fall back to `~/.signalp6_cache`.                                                      |
 | Repeated mutants flagged `missing_mut`              | No predictions were emitted (NetNGlyc wrote "No sites predicted"). Lower `--threshold` if you expect weaker signals.                                                                                         |
 | NetNGlyc binary not found                           | Use `--native-netnglyc-bin /path/to/netNglyc`, or set `NETNGLYC_PATH` or `NETNGLYC_HOME` environment variable. |
 | SignalP integration not working                     | Verify `$SIGNALP` in the netNglyc tcsh script points to `signalp6_adapter`. Check that the adapter is executable (`chmod +x`). |
@@ -204,4 +198,4 @@ Classifications align with NetNGlyc visibility thresholds: a site is **gained** 
 
 ## License
 
-This project is licensed under the AGPL-3.0 License - see the [LICENSE](../LICENSE) file in the root BioFeatureFactory directory for details.
+This project is licensed under the AGPL-3.0 License - see the [LICENSE](../../LICENSE) file in the root BioFeatureFactory directory for details.

@@ -45,13 +45,12 @@ from biofeaturefactory.utils.utility import (
     get_mutation_data_bioAccurate,
     load_validation_failures,
     should_skip_mutation,
-    trim_muts,
     get_mutant_aa,
-    update_str,
     extract_gene_from_filename,
     discover_fasta_files,
     translate_orf_sequence,
     build_mutant_sequences_for_gene,
+    write_tsv,
 )
 
 # Import for NSP3 prediction
@@ -573,11 +572,7 @@ def write_summary_tsv(summary_rows, output_file):
         'max_abs_delta_rsa', 'max_abs_delta_disorder', 'qc_flags'
     ]
 
-    with open(output_file, 'w', newline='') as f:
-        writer = csv.DictWriter(f, fieldnames=fieldnames, delimiter='\t')
-        writer.writeheader()
-        writer.writerows(summary_rows)
-
+    write_tsv(summary_rows, output_file, fieldnames)
     print(f"Wrote {len(summary_rows)} summary entries to {output_file}")
 
 
@@ -597,11 +592,7 @@ def write_residues_tsv(residues_rows, output_file):
         'q3_h', 'q3_e', 'q3_c'
     ]
 
-    with open(output_file, 'w', newline='') as f:
-        writer = csv.DictWriter(f, fieldnames=fieldnames, delimiter='\t')
-        writer.writeheader()
-        writer.writerows(residues_rows)
-
+    write_tsv(residues_rows, output_file, fieldnames)
     print(f"Wrote {len(residues_rows)} residue entries to {output_file}")
 
 
@@ -621,11 +612,7 @@ def write_local_tsv(local_rows, output_file):
         'is_mutation_site'
     ]
 
-    with open(output_file, 'w', newline='') as f:
-        writer = csv.DictWriter(f, fieldnames=fieldnames, delimiter='\t')
-        writer.writeheader()
-        writer.writerows(local_rows)
-
+    write_tsv(local_rows, output_file, fieldnames)
     print(f"Wrote {len(local_rows)} local change entries to {output_file}")
 
 

@@ -15,16 +15,16 @@
 
   | Path / Flag | Description |
   |-------------|-------------|
-  | `--mapping-dir` | Directory containing mutation CSVs named like `*{GENE}*.csv` (case-insensitive). Required for every mode except `netphos-only`. |
-  | `INPUT` arg | FASTA file/dir (full or NetPhos-only modes) or NetPhos output file/dir (parse-only). |
-  | `OUTPUT` arg | TSV (parse/full modes) or `.out` (NetPhos-only). |
+  | `--mapping-dir` | Directory containing mutation CSVs named like `*{GENE}*.csv` (case-insensitive). |
+  | `INPUT` arg | FASTA file/dir. |
+  | `OUTPUT` arg | Output directory for TSV results. |
   | Optional logs | `--log` validation log to skip failed mutations in mutant mode. |
 
   ## 3. Quick Start Recipes
 
   ```bash
   # Full pipeline, WT sequences (auto-detect native or Docker)
-  python3 netphos-pipeline.py --mode full-pipeline \
+  python3 netphos_pipeline.py \
       --mapping-dir mutations/combined/aa/ \
       wt/aaseq/ \
       results/
@@ -32,26 +32,12 @@
 ```
 ```bash
   # Mutant run with validation filtering
-  python3 netphos-pipeline.py --mode full-pipeline \
-      --is-mutant \
+  python3 netphos_pipeline.py \
       --log validation.log \
       --mapping-dir mutations/combined/aa/ \
       mut/aaseq/ \
       results/
   # Writes per gene: results/{GENE}/NetPhos/{GENE}.{tsv,events.tsv,sites.tsv}
-```
-```bash
-  # Parse existing NetPhos outputs
-  python3 netphos-pipeline.py --mode parse-only \
-      --mapping-dir mutations/combined/aa/ \
-      netphos_outputs/ \
-      results/
-```
-```bash
-  # Run NetPhos only (no parsing)
-  python3 netphos-pipeline.py --mode netphos-only \
-      wt/ABCB1.fa \
-      ABCB1-netphos.out
 ```
   ## 4. Execution Backend Controls
 
@@ -62,19 +48,17 @@
 
   ## 5. Processing Controls
 
-  - `--mode {full-pipeline, netphos-only, parse-only}` -- processing mode
   - `--batch-size N` and `--timeout SEC` -- tune long FASTA runs. Batch strategy is chosen automatically by sequence count: 1 seq -> single run; 2-10 -> batch of 10; 11-100 -> batch of 25; >100 -> batch of 50.
   - `--threshold FLOAT` -- filter by score (default: 0.5). Sites with score below threshold are excluded.
   - `--yes-only` -- sets `--threshold` to 0.0 (disables score filtering entirely); does not filter for YES-answered predictions.
   - `--no-cache` / `--clear-cache` -- manage `~/.netphos_cache`.
-  - `--is-mutant` -- toggles mutant vs WT parsing logic (affects amino-acid matching, validation filtering).
   - `--wt-header HEADER` -- FASTA header used to identify the WT sequence (default: `ORF`).
   - `--keep-intermediates` -- retain intermediate files for debugging.
   - `--verbose` -- enable verbose output.
 
   ## 6. Outputs
 
-  Full/parse modes produce three TSV files per gene. NetPhos-only mode writes raw `.out` files per FASTA which can be parsed later with `--mode parse-only`.
+  The pipeline produces three TSV files per gene.
 
   Output structure:
   ```
@@ -148,10 +132,10 @@
   | tcsh: Command not found | Install tcsh (required by APE). |
   | "No mapping file found" | Confirm --mapping-dir contains files named like *{GENE}*.csv. |
   | APE binary not found | Ensure the binary is executable and provide --native-ape-path or set NETPHOS_APE_PATH. |
-  | Cache confusion | Run python3 netphos-pipeline.py --clear-cache. |
+  | Cache confusion | Run python3 netphos_pipeline.py --clear-cache. |
 
 ---
 
 ## License
 
-This project is licensed under the AGPL-3.0 License - see the [LICENSE](../LICENSE) file in the root BioFeatureFactory directory for details.
+This project is licensed under the AGPL-3.0 License - see the [LICENSE](../../LICENSE) file in the root BioFeatureFactory directory for details.

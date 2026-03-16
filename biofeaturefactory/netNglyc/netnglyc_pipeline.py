@@ -41,7 +41,6 @@ from typing import Optional
 from biofeaturefactory.utils.utility import (
     read_fasta,
     get_mutation_data_bioAccurate,
-    write_fasta,
     split_fasta_into_batches,
     combine_batch_outputs,
     discover_mapping_files,
@@ -51,9 +50,6 @@ from biofeaturefactory.utils.utility import (
     load_validation_failures,
     should_skip_mutation,
     load_wt_sequences,
-    trim_muts,
-    get_mutant_aa,
-    update_str,
     extract_gene_from_filename,
     extract_mutation_from_sequence_name,
     translate_orf_sequence,
@@ -61,6 +57,7 @@ from biofeaturefactory.utils.utility import (
     infer_aamutation_from_nt,
     build_mutant_sequences_for_gene,
     synthesize_gene_fastas,
+    write_tsv,
 )
 
 
@@ -1704,15 +1701,6 @@ class RobustDockerNetNGlyc:
             )
         return summary, events
 
-    def _write_tsv(self, path, fieldnames, rows):
-        directory = os.path.dirname(path)
-        if directory:
-            os.makedirs(directory, exist_ok=True)
-        with open(path, "w", newline="") as handle:
-            writer = csv.DictWriter(handle, fieldnames=fieldnames, delimiter="\t")
-            writer.writeheader()
-            writer.writerows(rows)
-
     def build_netnglyc_ensemble(
         self,
         wt_dirs,
@@ -1816,24 +1804,19 @@ class RobustDockerNetNGlyc:
         summary_path = Path(summary_path)
         events_path = summary_path.with_suffix(".events.tsv")
         sites_path = summary_path.with_suffix(".sites.tsv")
-        self._write_tsv(str(summary_path), summary_fields, summary_rows)
-        self._write_tsv(str(events_path), events_fields, events_rows)
-        self._write_tsv(str(sites_path), sites_fields, sites_rows)
+        write_tsv(summary_rows, str(summary_path), summary_fields)
+        write_tsv(events_rows, str(events_path), events_fields)
+        write_tsv(sites_rows, str(sites_path), sites_fields)
 
     def save_parsed_results(self, results, output_file):
         """Save parsed results to TSV file"""
-        import csv
-        
         if not results:
             print("No results to save")
             return
-            
-        with open(output_file, 'w', newline='') as f:
-            fieldnames = ['pkey', 'Gene', 'pos', 'Sequon', 'potential', 'jury_agreement', 'n_glyc_result']
-            writer = csv.DictWriter(f, fieldnames=fieldnames, delimiter='\t')
-            writer.writeheader()
-            writer.writerows(results)
-            
+
+        fieldnames = ['pkey', 'Gene', 'pos', 'Sequon', 'potential', 'jury_agreement', 'n_glyc_result']
+        write_tsv(results, output_file, fieldnames)
+
         print(f"Saved {len(results)} parsed results to {output_file}")
 
     def process_directory(self, input_dir, output_dir, pattern=None, processing_mode="auto"):
@@ -2544,8 +2527,6 @@ def main():
                         help="Run test with ABCB1 sequence (no other args required)")
     parser.add_argument("--clear-cache", action="store_true",
                         help="Clear all cached results and exit (no other args required)")
-    parser.add_argument("--mode", choices=["full-pipeline"], default="full-pipeline",
-                        help="Processing mode (only full-pipeline is supported)")
     parser.add_argument("--mapping-dir",
                         help="Directory containing mutation mapping CSV files (REQUIRED for parsing modes)")
     parser.add_argument("--threshold", type=float, default=0.5,
@@ -2612,7 +2593,6 @@ def main():
         test_args.input = str(fasta_dir)
         test_args.output = str(test_output_tsv)
         test_args.mapping_dir = str(mapping_dir)
-        test_args.mode = "full-pipeline"
         test_args.test = False
 
         try:

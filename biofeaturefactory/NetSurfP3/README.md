@@ -62,7 +62,7 @@ The pipeline imports directly from the cloned `nsp3/` directory. The required `-
 ### Full pipeline (WT FASTA -> Mutant synthesis -> NetSurfP -> TSV ensemble)
 
 ```bash
-python netsurfp3-pipeline.py \
+python netsurfp3_pipeline.py \
     ../../FASTA_files/newnt3/ \
     results/ \
     --mutation-dir ../../mutations/combined/aa \
@@ -226,6 +226,10 @@ Disordered   +2     +1             0
 
 ## 8. Command-Line Options
 
+### Positional Arguments
+- `input`: Input WT FASTA file or directory of FASTA files (nucleotide or amino acid)
+- `output`: Output base directory
+
 ### Required
 - `--mutation-dir DIR`: Mutation CSV directory
 - `--model PATH`: ESM model weights (required; passed to NetSurfP-3.0)
@@ -234,8 +238,9 @@ Disordered   +2     +1             0
 ### Processing Options
 - `--log FILE`: Validation log to skip failed mutations
 - `--batch-size N`: Number of sequences to process per NSP3 batch (default: 100)
-- `--timeout SEC`: Command timeout (default: 600)
+- `--max-seq-length N`: Maximum sequence length before chunking (default: 1500)
 - `--input-type {nt, aa}`: Whether input FASTAs contain nucleotide or amino acid sequences (default: `nt`)
+- `--verbose`: Enable verbose output
 
 ---
 
@@ -245,7 +250,7 @@ Disordered   +2     +1             0
 |---------|------------|
 | `NetSurfP not found` | Confirm `nsp3/` is cloned correctly and PyTorch/ESM weights are available |
 | `PyTorch/ESM not found` | Install PyTorch and provide valid `--model` and `--config` paths |
-| Execution timeout | Increase `--timeout` (NetSurfP can be slow for long sequences) |
+| Execution timeout | Reduce `--max-seq-length` or `--batch-size` (NetSurfP can be slow for long sequences) |
 | `No mapping file found` | Verify `--mutation-dir` contains `{GENE}*.csv` files |
 | `Out of memory` | Reduce `--batch-size` (default: 100 sequences per batch) |
 
@@ -261,7 +266,7 @@ Mutations can alter:
 3. **Disorder regions** -> Protease susceptibility
 
 ```bash
-python netsurfp3-pipeline.py \
+python netsurfp3_pipeline.py \
     wt_fastas/ \
     results/ \
     --mutation-dir mappings/ \
@@ -277,7 +282,7 @@ Identify mutations causing:
 3. **Secondary structure loss** -> Unfolding
 
 ```bash
-python netsurfp3-pipeline.py \
+python netsurfp3_pipeline.py \
     wt_fastas/ \
     results/ \
     --mutation-dir mappings/ \
@@ -294,13 +299,6 @@ Detect changes in:
 
 ---
 
-## 12. Citations
-
-- NetSurfP-3.0: Hoie, M. H. et al. (2022). "NetSurfP-3.0: accurate and fast prediction of protein structural features by protein language models and deep learning." *Nucleic Acids Research*, 50(W1), W510-W515.
-- Klausen, M. S. et al. (2019). "NetSurfP-2.0: Improved prediction of protein structural features by integrated deep learning." *Proteins*, 87(6), 520-527.
-
----
-
 ## 11. Example Workflow
 
 ```bash
@@ -313,7 +311,7 @@ ls ../../mutations/combined/aa/
 # ABCB1_transcript_mapping.csv, BRCA1_transcript_mapping.csv, ...
 
 # 3. Run full pipeline
-python netsurfp3-pipeline.py \
+python netsurfp3_pipeline.py \
     ../../FASTA_files/newnt3/ \
     results/ \
     --mutation-dir ../../mutations/combined/aa \
@@ -352,8 +350,15 @@ NetSurfP-3.0 predictions complement other BioFeatureFactory analyses:
 
 ---
 
+## 13. Citations
+
+- NetSurfP-3.0: Hoie, M. H. et al. (2022). "NetSurfP-3.0: accurate and fast prediction of protein structural features by protein language models and deep learning." *Nucleic Acids Research*, 50(W1), W510-W515.
+- Klausen, M. S. et al. (2019). "NetSurfP-2.0: Improved prediction of protein structural features by integrated deep learning." *Proteins*, 87(6), 520-527.
+
+---
+
 ## License
 
-This pipeline wrapper is licensed under the AGPL-3.0 License - see the [LICENSE](../LICENSE) file in the root BioFeatureFactory directory for details.
+This pipeline wrapper is licensed under the AGPL-3.0 License - see the [LICENSE](../../LICENSE) file in the root BioFeatureFactory directory for details.
 
 The NetSurfP-3.0 library (`nsp3/`) is third-party software with its own license.

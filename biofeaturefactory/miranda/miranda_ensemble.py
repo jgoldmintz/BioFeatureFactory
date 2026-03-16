@@ -44,7 +44,6 @@ import pandas as pd
 # -------------------------------------------------------------------------
 HERE = os.path.dirname(os.path.abspath(__file__))
 from biofeaturefactory.utils.utility import (
-    read_fasta,
     get_mutation_data,
     load_validation_failures,
     should_skip_mutation,

@@ -8,8 +8,8 @@ Shared utilities and standalone pipelines for coordinate mapping, VCF conversion
 
 1. [exon_aware_mapping.py](#exon_aware_mappingpy)
 2. [vcf_converter.py](#vcf_converterpy)
-3. [codon-msa-pipeline.py](#codon-msa-pipelinepy)
-4. [msa-generation-pipeline.py](#msa-generation-pipelinepy)
+3. [codon_msa_pipeline.py](#codon_msa_pipelinepy)
+4. [msa_generation_pipeline.py](#msa_generation_pipelinepy)
 5. [utility.py](#utilitypy)
 
 ---
@@ -25,11 +25,7 @@ python3 exon_aware_mapping.py \
   --mutations /path/to/mutations/ \
   --annotation /path/to/annotations.gtf \
   --reference /path/to/reference_genome.fa \
-  --out-fasta /path/to/output_fastas/ \
-  --out-chromosome-mapping /path/to/chromosome_mappings/ \
-  --out-genomic-mapping /path/to/genomic_mappings/ \
-  --out-transcript-mapping /path/to/transcript_mappings/ \
-  --out-aa-mapping /path/to/aa_mappings/ \
+  --output /path/to/output_dir/ \
   --orf /path/to/orf_fastas/ \
   --force-cds transcript_overrides.csv \
   --verbose
@@ -39,14 +35,14 @@ python3 exon_aware_mapping.py \
 
 | Flag | Required | Description |
 |------|----------|-------------|
-| `--mutations` | Yes | Mutation CSV file or directory of CSVs |
-| `--reference` | Yes | Indexed reference genome FASTA |
-| `--annotation` | Yes | Gene annotation file (GTF, GFF3, or custom) |
-| `--out-fasta` | Yes | Output directory for per-gene FASTAs |
-| `--out-chromosome-mapping` | Yes | Output directory for absolute genomic coordinate mappings |
-| `--out-genomic-mapping` | No | Output directory for gDNA mapping CSVs (relative to gene slice) |
-| `--out-transcript-mapping` | No | Output directory for transcript coordinate mappings |
-| `--out-aa-mapping` | No | Output directory for amino-acid mappings |
+| `--mutations` / `-m` | Yes | Mutation CSV file or directory of CSVs |
+| `--reference` / `-r` | Yes | Indexed reference genome FASTA |
+| `--annotation` / `-a` | Yes | Gene annotation file (GTF, GFF3, or custom) |
+| `--output` / `-o` | No | Output directory (defaults to current working directory) |
+| `--exclude-chromosome` / `-Ec` | No | Skip chromosome mapping CSV output |
+| `--exclude-genomic` / `-Eg` | No | Skip gDNA mapping CSV output (relative to gene slice) |
+| `--exclude-transcript` / `-Et` | No | Skip transcript coordinate mapping output |
+| `--exclude-aa` / `-EA` | No | Skip amino-acid mapping output |
 | `--orf` | No | ORF FASTA file or directory. If omitted, ORF is inferred from transcript |
 | `--force-cds` | No | Force specific transcript. Single accession (applied to all genes) or CSV with `gene,transcript_id` columns |
 | `--verbose` | No | Detailed ORF/mutation validation messages and log file |
@@ -122,49 +118,47 @@ python3 vcf_converter.py \
 
 ---
 
-## codon-msa-pipeline.py
+## codon_msa_pipeline.py
 
-Back-translates a protein MSA to a codon-aware MSA using corresponding nucleotide sequences. Gaps in the protein alignment are expanded to codon-triplet gaps (`---`), preserving alignment structure for evolutionary analysis (e.g., rare codon enrichment).
+Builds codon-aware MSAs by running mmseqs2 searches against RefSeq assemblies, aligning proteins with mafft/muscle, and back-translating to codon-level alignments. Gaps in the protein alignment are expanded to codon-triplet gaps (`---`), preserving alignment structure for evolutionary analysis (e.g., rare codon enrichment).
 
 ### Usage
 
 ```bash
-python3 codon-msa-pipeline.py \
-  --protein-msa /path/to/protein.msa.fasta \
-  --nucleotide-dir /path/to/nt_sequences/ \
-  --output /path/to/codon.msa.fasta \
-  --focus HUMAN_QUERY \
-  --validate
+python3 codon_msa_pipeline.py \
+  --fasta /path/to/gene.fasta \
+  --db-root /path/to/Bio_DBs/ \
+  --output /path/to/output_dir/ \
+  --aligner mafft \
+  --verbose
 ```
 
 ### Arguments
 
 | Flag | Required | Description |
 |------|----------|-------------|
-| `--protein-msa` | Yes | Protein MSA FASTA |
-| `--nucleotide-dir` | No* | Directory of nucleotide FASTAs |
-| `--nucleotide-file` | No* | Single FASTA with all nucleotide sequences |
-| `--focus` | No | Focus sequence ID (placed first in output) |
-| `--output` | No | Output path (default: `<input>_codon.msa.fasta`) |
-| `--validate` | No | Validate codon MSA translates back to protein MSA |
-
-*One of `--nucleotide-dir` or `--nucleotide-file` is required.
+| `--fasta` | Yes | ORF nucleotide FASTA (file or directory) |
+| `--db-root` | Yes | Root directory containing RefSeq databases |
+| `--output` / `-o` | Yes | Output directory |
+| `--min-seqid` | No | Minimum sequence identity for final filtering (default: 1.0) |
+| `--search-min-seqid` | No | Minimum sequence identity for mmseqs2 search (default: 0.5) |
+| `--search-min-qcov` | No | Minimum query coverage for mmseqs2 search (default: 0.5) |
+| `--max-hits` | No | Maximum number of hits to retain (default: 500) |
+| `--aligner` | No | Protein aligner: `mafft` (default) or `muscle` |
+| `--mmseqs-binary` | No | Path to mmseqs2 binary (default: `mmseqs`) |
+| `--threads` | No | CPU threads |
+| `--target-db-base` | No | Pre-built mmseqs2 target database |
+| `--mmseqs-tmp-dir` | No | Temporary directory for mmseqs2 |
+| `--verbose` | No | Verbose output |
 
 ### Outputs
 
-- **Codon MSA FASTA**: Aligned nucleotide sequences with `---` for gaps, maintaining column correspondence with the protein MSA.
-- **Validation report**: Printed to stdout when `--validate` is used.
-
-### Key Functions
-
-| Function | Purpose |
-|----------|---------|
-| `backtranslate_protein_to_codons` | Maps aligned protein positions to unaligned nucleotide codons, inserting `---` gaps |
-| `validate_codon_msa` | Confirms codon MSA translates back to the original protein MSA |
+- **Codon MSA FASTA**: `{GENE}/CodonMSA/{GENE}.codon.msa.fasta` — aligned nucleotide sequences with `---` for gaps.
+- **Manifest TSV**: `.manifest.tsv` with processing metadata.
 
 ---
 
-## msa-generation-pipeline.py
+## msa_generation_pipeline.py
 
 Generates protein MSAs for EVmutation/PLMC analysis using iterative jackhmmer search against UniRef90. Outputs A2M format with quality assessment metrics.
 
@@ -173,7 +167,7 @@ Accepts either a protein or nucleotide FASTA as `--query`. Nucleotide sequences 
 ### Usage
 
 ```bash
-python3 msa-generation-pipeline.py \
+python3 msa_generation_pipeline.py \
   --query /path/to/query.fasta \
   --database /path/to/uniref90.fasta \
   --jackhmmer-binary /path/to/jackhmmer \
@@ -186,18 +180,18 @@ python3 msa-generation-pipeline.py \
 
 | Flag | Required | Description |
 |------|----------|-------------|
-| `--query` | Yes | Query FASTA -- protein or nucleotide (auto-detected; nucleotide is translated before search) |
-| `--database` | Yes | Sequence database (e.g., UniRef90) |
-| `--jackhmmer-binary` | Yes | Path to jackhmmer executable |
-| `--output` | Yes | Output MSA file (A2M format) |
-| `--iterations` | No | jackhmmer iterations (default: 5) |
-| `--evalue-inclusion` | No | E-value inclusion threshold (default: 1e-3) |
+| `--query` / `-q` | Yes | Query FASTA -- protein or nucleotide (auto-detected; nucleotide is translated before search) |
+| `--database` / `-d` | Yes | Sequence database (e.g., UniRef90) |
+| `--jackhmmer-binary` / `-j` | Yes | Path to jackhmmer executable |
+| `--output` / `-o` | Yes | Output MSA file (A2M format) |
+| `--iterations` / `-N` | No | jackhmmer iterations (default: 5) |
+| `--evalue-inclusion` / `-E` | No | E-value inclusion threshold (default: 1e-3) |
 | `--bitscore-threshold` | No | Minimum bits per residue (default: 0.5) |
 | `--min-neff-ratio` | No | Minimum N_eff / L ratio (default: 10) |
 | `--max-seq-gaps` | No | Max gap fraction per sequence (default: 0.4) |
 | `--max-col-gaps` | No | Max gap fraction per column (default: 0.6) |
 | `--identity-threshold` | No | Clustering threshold for N_eff (default: 0.8) |
-| `--threads` | No | CPU threads (default: 4) |
+| `--threads` / `-t` | No | CPU threads (default: 4) |
 | `--keep-intermediate` | No | Retain intermediate Stockholm file |
 
 ### Outputs
@@ -205,99 +199,21 @@ python3 msa-generation-pipeline.py \
 - **A2M MSA**: Uppercase = match states, lowercase = insertions, `-` = deletions, `.` = query insertions.
 - **Stats JSON**: `<output>.stats.json` with N_eff, coverage, mean identity, and quality pass/fail.
 
-### Key Functions
-
-| Function | Purpose |
-|----------|---------|
-| `run_jackhmmer` | Executes jackhmmer iterative search |
-| `stockholm_to_a2m` | Converts Stockholm MSA to A2M format with match/insert state annotation |
-| `filter_msa_by_gaps` | Removes gappy sequences then gappy columns |
-| `compute_neff` | Calculates effective sequence count via clustering-based weighting |
-
 ---
 
 ## utility.py
 
 Central utility library used by all BioFeatureFactory pipelines. Not a standalone script.
 
-### Annotation Parsing
+### Function Categories
 
-| Function | Purpose |
-|----------|---------|
-| `get_genome_loc(genename, annotation_file, assembly, transcript_id)` | Returns `{chrom, strand, tx_start, tx_end, exons, transcript_id}` from GTF/GFF3/custom annotation. Auto-detects format. |
-| `_normalize_chrom_name(raw_name, assembly)` | Normalizes chromosome labels across naming conventions (`NC_000001`, `chr1`, `1` -> `1`) |
-
-### FASTA I/O
-
-| Function | Purpose |
-|----------|---------|
-| `read_fasta(inf, aformat, duplicate)` | Loads FASTA with format modes: `NCBI` (full header), `FIRST` (first word), `WORD` (second word). `duplicate` controls collision handling. |
-| `write_fasta(path, name_to_seq)` | Writes sequences with 60-character line wrapping |
-
-### Mutation Handling
-
-| Function | Purpose |
-|----------|---------|
-| `get_mutation_data(ntposnt)` | Parses mutation string (e.g., `G123A`) to 0-based position and nucleotides |
-| `get_mutation_data_bioAccurate(ntposnt)` | Same but returns 1-based position, skips stop codons |
-| `trim_muts(ntPosnt, log, gene_name)` | Loads mutations from CSV, optionally filters by validation logs |
-| `extract_mutation_from_sequence_name(seq_name)` | Extracts `(gene, mutation_id)` from sequence names like `ZFP36-C330T` |
-
-### Mapping & Discovery
-
-| Function | Purpose |
-|----------|---------|
-| `load_mapping(mapping_file, mapType)` | Loads 2-column CSV mapping. `mapType` selects column: `'mutant'` or `'mapped'` |
-| `discover_mapping_files(mapping_dir)` | Scans directory for mapping CSVs, returns `{GENE: path}` |
-| `discover_fasta_files(fasta_dir)` | Scans directory for FASTA files, returns `{GENE: path}` |
-| `extract_gene_from_filename(filename)` | Extracts gene name from filenames using pattern matching |
-
-### WT/Mutant FASTA Synthesis
-
-| Function | Purpose |
-|----------|---------|
-| `build_mutant_sequences_for_gene` | Generates mutant protein sequences from WT nucleotide sequence + mapping file |
-| `synthesize_gene_fastas` | Creates WT and mutant FASTAs for all genes in batch |
-| `translate_orf_sequence(nt_sequence)` | Translates nucleotide ORF to amino acid sequence |
-| `infer_aamutation_from_nt(mutant_id, nt_sequence)` | Infers amino-acid change from nucleotide mutation |
-
-### Codon Usage
-
-| Function | Purpose |
-|----------|---------|
-| `get_codon_counts(seq)` | Computes RSCU, W, RSCPU, CPS for codons and codon pairs |
-| `compute_cai(seq, w_values)` | Codon Adaptation Index (geometric mean of codon weights) |
-| `compute_tai(seq, tai_weights)` | tRNA Adaptation Index |
-| `extract_codon_with_bicodons(ntposnt, seq)` | Extracts codon and flanking bicodons at a mutation site |
-
-### MSA Analysis
-
-| Function | Purpose |
-|----------|---------|
-| `detect_alphabet(sequence)` | Returns `'nucleotide'` or `'protein'` based on character composition ($\geq 90\%$ IUPAC nucleotide chars -> nucleotide) |
-| `prepare_protein_query(query_fasta)` | Returns a protein FASTA path suitable for jackhmmer. Translates nucleotide input automatically; passes protein input through unchanged. Returns `(path, tmp_path_or_None)` -- caller deletes tmp if not None. |
-| `stockholm_to_a2m` | Converts Stockholm MSA to A2M format |
-| `filter_msa_by_gaps` | Filters gappy sequences and columns |
-| `compute_neff` | Effective sequence count via clustering |
-| `validate_msa_quality` | Quality metrics: N_eff ratio, coverage, mean identity |
-
-### Batch Processing
-
-| Function | Purpose |
-|----------|---------|
-| `split_fasta_into_batches(fasta_file, batch_size, temp_dir)` | Splits FASTA into chunks for parallel processing |
-| `combine_batch_outputs(batch_output_files, final_output_file, format_type)` | Combines batch results (netnglyc/netphos formats) |
-
-### Reference Genome
-
-| Function | Purpose |
-|----------|---------|
-| `download_reference_genome(build, cache_dir)` | Downloads and decompresses GRCh37/GRCh38 from NCBI |
-
-### Other
-
-| Function | Purpose |
-|----------|---------|
-| `convert_position(seq1, seq2, position1, space)` | Projects positions between gapped sequence alignments |
-| `retry_request(func, positional_arguments, keyword_arguments, lim, wait)` | Retries HTTP requests with configurable limit and backoff |
-| `load_validation_failures(log_path)` | Loads validation failure maps for mutation filtering |
+- **Annotation Parsing** — GTF/GFF3/custom annotation loading, chromosome name normalization, exon/CDS extraction
+- **FASTA I/O** — Reading and writing FASTA files with configurable header parsing and duplicate handling
+- **Mutation Handling** — Parsing mutation strings, loading mutation CSVs, validation log filtering, mutation-to-amino-acid inference
+- **Mapping & Discovery** — Loading mapping CSVs, auto-discovering gene-specific FASTA and mapping files in directories
+- **WT/Mutant FASTA Synthesis** — Building mutant protein sequences from WT nucleotide + mapping, batch FASTA generation
+- **Prediction Filtering** — Filtering NetPhos/NetNGlyc predictions by mutation position, threshold, and failure maps
+- **Codon Usage** — RSCU, CAI, tAI, codon pair scores (CPS, RSCPU), relative adaptiveness (W, W_CP)
+- **MSA Analysis** — Alphabet detection, protein query preparation, Stockholm-to-A2M conversion, gap filtering, N_eff computation
+- **Batch Processing** — Splitting FASTAs into batches, combining NetNGlyc/NetPhos batch outputs
+- **Output Writing** — TSV writing, A2M writing, mutation classification

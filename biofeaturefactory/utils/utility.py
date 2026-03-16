@@ -15,26 +15,17 @@
 # along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
 import csv
-import inspect
-import warnings
 import re
 import os
 import math
 import tempfile
 import subprocess
 import shutil
-import requests
-import time
-import traceback
 import sys
-import json
-import logging
-from collections import Counter
 from pathlib import Path
 from urllib.parse import unquote
-from Bio import Entrez
 from Bio.Seq import Seq
-from typing import Dict, List, Tuple
+from typing import Dict
 
 chromosome_map = {
     "GRCh37": {"1": "NC_000001.10", "2": "NC_000002.11", "3": "NC_000003.11", "4": "NC_000004.11", "5": "NC_000005.9",
@@ -97,7 +88,7 @@ def read_fasta(inf, aformat="FIRST", duplicate="replace"):
                 continue
             if ">" in line:
                 if aformat.upper() == "NCBI":
-                    name = re.search(">[a-zA-Z]+_?\d+(\.\d+)*", line).group(0)
+                    name = re.search(r">[a-zA-Z]+_?\d+(\.\d+)*", line).group(0)
                 elif aformat.upper() in ["FIRST", "WORD"]:
                     name = line.split()[0]
                 else:
@@ -109,7 +100,7 @@ def read_fasta(inf, aformat="FIRST", duplicate="replace"):
                     elif duplicate.lower() in ["replace", "r"]:  # reset sequence to empty
                         data[name] = ""
                     elif duplicate.lower() in ["separate", "s"]:  # add underscore+number to end of sequence name
-                        matches = re.findall("/_\d+$/", name)
+                        matches = re.findall(r"/_\d+$/", name)
                         if matches != None and len(matches) > 0:
                             num = int(max(matches)[1:])
                             name = name[:-len(str(num))] + str(num + 1)
@@ -286,54 +277,6 @@ def get_mutant_aa(ntmut, ntseq, aaseq=None, index=0):
 
     return (aa_position_1_based, (wtaa, mutaa)), original_codon
 
-def convert_position(seq1, seq2, position1, space="-"):
-    """Project a one-based index from seq1 onto seq2 while accounting for gap characters."""
-    error = None
-
-    if position1 == 0:
-        warnings.warn("\033[93m" + "Position given is not 1-indexed in function " + str(inspect.stack()[1].function) + "\033[0m")
-        error = "Position given is not 1-indexed\n" + str(inspect.stack()[1].function)
-
-    i1 = 0
-    i2 = 0
-    increment = 0
-    while i1 < int(position1) and increment < len(seq1) and increment < len(seq2):
-        if seq1[increment] != space:
-            i1 += 1
-        if seq2[increment] != space:
-            i2 += 1
-        increment += 1
-    if not seq1[increment - 1] == seq1.replace(space, "")[i1 - 1]:
-        warnings.warn("\033[93m" + "Positions improperly converted (" + str(inspect.stack()[1].function) + ") at position " + str(position1) + ": " + seq1[increment - 1] + " " + seq1.replace(space, "")[i1 - 1] + "\033[0m")
-    elif seq2[increment - 1] != space and not seq2[increment - 1] == seq2.replace(space, "")[i2 - 1]:
-        warnings.warn("\033[93m" + "Positions improperly converted (" + str(inspect.stack()[1].function) + ") at position " + str(position1) + ": " + seq2[increment - 1] + " " + seq2.replace(space, "")[i2 - 1] + "\033[0m")
-    if seq2[increment - 1] == space:
-        error = "Sequence 1 position aligns with a gap in sequence 2\n" + str(inspect.stack()[1].function)
-    return (i2, error)
-
-# retries a requests library function
-# assumes a response object is returned (which can be raised for HTML status)
-def retry_request(func, positional_arguments=[], keyword_arguments={}, lim=10, wait=2):
-    """Retry a requests-style call, returning the response or None after repeated failures."""
-    for i in range(lim):
-        try:
-            response = func(*positional_arguments, **keyword_arguments)
-            response.raise_for_status()
-            return (response)
-        except:
-            time.sleep(wait * i)
-    warnings.warn("\033[93m" + str(func.__name__) + " failed after " + str(lim) + " tries." + "\033[0m")
-    return (None)
-
-def retry_func(func, positional_arguments=[], keyword_arguments={}, lim=10, wait=2):
-    """Retry a callable that may raise exceptions, returning its result or None."""
-    for i in range(lim):
-        try:
-            return (func(*positional_arguments, **keyword_arguments))
-        except Exception as e:
-            time.sleep(wait * i)
-    warnings.warn("\033[93m" + str(func.__name__) + " failed after " + str(lim) + " tries." + "\033[0m")
-    return (None)
 
 def _detect_annotation_format(annotation_file):
     """Infer whether an annotation file resembles GTF, GFF3, or a custom tab format."""
@@ -731,87 +674,6 @@ def get_genome_loc(genename, annotation_file, assembly="GRCh38", transcript_id=N
     except Exception as e:
         print(f"Error parsing annotation file {annotation_file}: {e}", file=sys.stderr)
         return None
-
-def detect_reference_build_from_gid(gid):
-    """Return reference build label for a RefSeq genomic accession."""
-    if not gid:
-        return None
-    for build, mapping in chromosome_map.items():
-        if gid in mapping.values():
-            return build
-    return None
-
-
-def collect_gene_reference_builds(mutation_files, annotation_file, assembly="GRCh38"):
-    """Infer reference builds for mutation files using local annotation data."""
-    if not annotation_file:
-        raise ValueError("annotation_file is required to collect reference builds")
-
-    gene_builds, failed_genes, build_counts = {}, {}, Counter()
-    for mutation_file in mutation_files:
-        try:
-            gene_name = extract_gene_from_filename(str(mutation_file))
-            print(f"Detecting reference build for {gene_name}...")
-
-            genome_loc_result = get_genome_loc(gene_name, annotation_file, assembly=assembly)
-            if not genome_loc_result:
-                failed_genes[gene_name] = "Could not retrieve genome location"
-                continue
-
-            chromosome = genome_loc_result["chrom"]
-            coordinates = [genome_loc_result["tx_start"], genome_loc_result["tx_end"]]
-            strand = genome_loc_result["strand"]
-            gid = chromosome_map.get(assembly, {}).get(str(chromosome))
-            build = detect_reference_build_from_gid(gid)
-            if not build:
-                failed_genes[gene_name] = f"Unknown reference build for gid: {gid}"
-                continue
-
-            gene_builds[gene_name] = {
-                "build": build,
-                "gid": gid,
-                "chromosome": chromosome,
-                "coordinates": coordinates,
-                "strand": strand,
-            }
-            build_counts[build] += 1
-        except Exception as e:
-            failed_genes[gene_name] = str(e)
-    return build_counts, gene_builds, failed_genes
-
-
-def determine_consensus_build(build_counts):
-    """Return the most frequent reference build observed."""
-    return build_counts.most_common(1)[0][0] if build_counts else None
-
-
-def get_reference_cache_path(cache_dir="./reference_cache"):
-    """Return path to reference metadata cache file, ensuring directory exists."""
-    cache_path = Path(cache_dir)
-    cache_path.mkdir(exist_ok=True)
-    return cache_path / "reference_metadata.json"
-
-
-def load_reference_cache(cache_dir="./reference_cache"):
-    """Load reference metadata cache from disk if present."""
-    cache_file = get_reference_cache_path(cache_dir)
-    if cache_file.exists():
-        try:
-            with open(cache_file, "r") as f:
-                return json.load(f)
-        except Exception as e:
-            print(f"Warning: Could not load reference cache: {e}", file=sys.stderr)
-    return {}
-
-
-def save_reference_cache(cache_data, cache_dir="./reference_cache"):
-    """Persist reference metadata cache to disk."""
-    cache_file = get_reference_cache_path(cache_dir)
-    try:
-        with open(cache_file, "w") as f:
-            json.dump(cache_data, f, indent=2)
-    except Exception as e:
-        print(f"Warning: Could not save reference cache: {e}", file=sys.stderr)
 
 
 def load_mapping(mapping_file: str, mapType: str ='transcript') -> Dict[str, str]:
@@ -2439,43 +2301,47 @@ def compute_neff(msa, identity_threshold=0.8):
     return sum(weights.values())
 
 
-def validate_msa_quality(msa, min_neff_ratio=10, query_length=None, focus_seq_id=None):
-    """
-    Validate MSA quality for EVmutation analysis.
+
+def write_tsv(rows, path, fieldnames=None, *, extrasaction='ignore', mkdir=True):
+    """Write a list of row dicts to a tab-separated file.
 
     Args:
-        msa: dict {seq_id: sequence}
-        min_neff_ratio: Minimum N_eff / L ratio (default: 10)
-        query_length: Length of query sequence (computed if not provided)
-        focus_seq_id: ID of focus sequence (for length calculation)
-
-    Returns:
-        dict: Quality metrics including pass/fail status
+        rows: list of dicts to write.
+        path: output file path (str or Path).
+        fieldnames: column names. If None, derived from rows[0].keys().
+            When rows is empty and fieldnames is provided, a header-only
+            file is written; when both are empty, no file is created.
+        extrasaction: passed to csv.DictWriter ('ignore' or 'raise').
+        mkdir: create parent directories if they don't exist.
     """
-    if not msa:
-        return {'pass': False, 'error': 'Empty MSA'}
+    path = Path(path)
+    if mkdir:
+        path.parent.mkdir(parents=True, exist_ok=True)
+    if not rows and not fieldnames:
+        return
+    if fieldnames is None:
+        if not rows:
+            return
+        fieldnames = list(rows[0].keys())
+    with open(path, 'w', newline='') as f:
+        writer = csv.DictWriter(f, fieldnames=fieldnames, delimiter='\t',
+                                extrasaction=extrasaction)
+        writer.writeheader()
+        if rows:
+            writer.writerows(rows)
 
-    # Get query length
-    if query_length is None:
-        if focus_seq_id and focus_seq_id in msa:
-            query_length = len(msa[focus_seq_id].replace('-', '').replace('.', ''))
-        else:
-            first_seq = next(iter(msa.values()))
-            query_length = len(first_seq.replace('-', '').replace('.', ''))
 
-    # Compute N_eff
-    neff = compute_neff(msa)
-    neff_ratio = neff / query_length if query_length > 0 else 0
-    min_neff = min_neff_ratio * query_length
-
-    return {
-        'pass': neff >= min_neff,
-        'n_sequences': len(msa),
-        'n_eff': round(neff, 1),
-        'n_eff_ratio': round(neff_ratio, 2),
-        'query_length': query_length,
-        'min_neff_required': min_neff
-    }
+def mutation_class(wt_aa, mut_aa):
+    """Classify a mutation as SYNONYMOUS, MISSENSE, STOP_GAIN, STOP_LOSS, or UNKNOWN."""
+    if wt_aa == "X" or mut_aa == "X":
+        return "UNKNOWN"
+    if wt_aa == mut_aa:
+        return "SYNONYMOUS"
+    if mut_aa == "Stop" and wt_aa != "Stop":
+        return "STOP_GAIN"
+    if wt_aa == "Stop" and mut_aa != "Stop":
+        return "STOP_LOSS"
+    return "MISSENSE"
 
 
 def write_a2m(msa, output_path, focus_seq_id=None):

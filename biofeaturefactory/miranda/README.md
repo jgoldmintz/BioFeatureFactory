@@ -40,12 +40,10 @@ MirandA (John *et al.*, 2004) remains the scoring engine; the Python layer struc
 - `-i, --input` -- WT transcript FASTA directory  
 - `-o, --output` -- Output directory  
 - `-d, --mirna_db` -- Path to the miRNA reference database
+- `--mapping-dir` -- Directory of transcript mapping CSV/TSV files
 
 ### Optional Arguments
 - `-m, --miranda_dir` -- Directory containing the MirandA executable; omit to use `miranda` from PATH (e.g. after `conda install -c bioconda miranda`)
-- `--mapping-dir` -- Directory of transcript mapping CSV/TSV files
-- `--cache-file` -- Path to cache JSON file (default: `MIRANDA_CACHE.json` in output directory)
-- `--clear-cache` -- Ignore any existing cache and start fresh
 - `--no-parallel` -- Disable multiprocessing
 - `--max-workers` -- Limit number of workers
 - `--log` -- Validation log or directory
@@ -233,19 +231,19 @@ As $k \to \infty$, this reduces to the unweighted sum $\sum \lvert \Delta_i \rve
 Run full unified pipeline:
 
 ```bash
-python miranda-ensemble.py -i ./FASTA_files/wt/transcript -o ./miranda_out -m /opt/miranda -d ./db/hsa_miRNA.fa --mapping-dir ./mutations/combined/transcript --log ./logs/validation
+python miranda_ensemble.py -i ./FASTA_files/wt/transcript -o ./miranda_out -m /opt/miranda -d ./db/hsa_miRNA.fa --mapping-dir ./mutations/combined/transcript --log ./logs/validation
 ```
 
 Run without parallel processing:
 
 ```bash
-python miranda-ensemble.py -i ./FASTA_files/wt/transcript -o ./miranda_out -m /opt/miranda -d ./db/hsa_miRNA.fa --mapping-dir ./mutations/combined/transcript --no-parallel
+python miranda_ensemble.py -i ./FASTA_files/wt/transcript -o ./miranda_out -m /opt/miranda -d ./db/hsa_miRNA.fa --mapping-dir ./mutations/combined/transcript --no-parallel
 ```
 
 Limit worker count:
 
 ```bash
-python miranda-ensemble.py -i ./FASTA_files/wt/transcript -o ./miranda_out -m /opt/miranda -d ./db/hsa_miRNA.fa --max-workers 8
+python miranda_ensemble.py -i ./FASTA_files/wt/transcript -o ./miranda_out -m /opt/miranda -d ./db/hsa_miRNA.fa --max-workers 8
 ```
 
 ---
@@ -263,14 +261,17 @@ These transformations convert sequence changes into **quantitative functional ev
 
 ## Thresholds and Parameters
 
-| Parameter | Default | Description |
+These are hardcoded constants defined at the top of `miranda_ensemble.py`, not CLI arguments.
+
+| Constant | Value | Description |
 |------------|----------|-------------|
-| `--visibility-threshold` | 140.0 | Minimum MirandA score for site visibility |
-| `--high-cutoff` | 150.0 | Defines "high-impact" events |
-| `--report-radius` | 40 bp | Local radius for $f_{local}$ |
-| `--distance-k` | 25 bp | Decay constant for exponential weighting |
-| `--merge-window` | 15 bp | Intra-miRNA cluster merge window |
-| `--segment-window` | 25 bp | Inter-miRNA segment merge window |
+| `VISIBILITY_THRESHOLD` | 140.0 | Minimum MirandA score for site visibility |
+| `HIGH_CUTOFF` | 150.0 | Defines "high-impact" events |
+| `REPORT_RADIUS` | 40 bp | Local radius for $f_{local}$ |
+| `DISTANCE_K` | 25.0 bp | Decay constant for exponential weighting |
+| `MERGE_WINDOW_NT` | 15 bp | Intra-miRNA cluster merge window |
+| `SEGMENT_WINDOW_NT` | 25 bp | Inter-miRNA segment merge window |
+| `SHIFT_NT` | 4 bp | Positional shift threshold |
 
 ---
 

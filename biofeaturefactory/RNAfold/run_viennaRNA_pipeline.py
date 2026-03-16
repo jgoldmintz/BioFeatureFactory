@@ -34,7 +34,6 @@ os.environ["OMP_NUM_THREADS"] = "1"
 from biofeaturefactory.utils.utility import (
     _collect_failures_from_logs,
     read_fasta,
-    load_mapping,
     update_str,
     subseq,
     validate_fasta_content,

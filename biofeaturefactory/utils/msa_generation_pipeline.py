@@ -211,7 +211,7 @@ def main():
         epilog="""
 Examples:
   # Basic usage
-  python msa-generation-pipeline.py \\
+  python msa_generation_pipeline.py \\
     --query protein.fasta \\
     --database /path/to/uniref90.fasta \\
     --jackhmmer-binary jackhmmer \\
@@ -220,7 +220,7 @@ Examples:
   #         results/GENE/MSA/GENE.msa.stats.json
 
   # With custom parameters
-  python msa-generation-pipeline.py \\
+  python msa_generation_pipeline.py \\
     --query protein.fasta \\
     --database /path/to/uniref90.fasta \\
     --jackhmmer-binary /usr/local/bin/jackhmmer \\

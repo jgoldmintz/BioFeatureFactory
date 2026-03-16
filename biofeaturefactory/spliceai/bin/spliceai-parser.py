@@ -28,7 +28,7 @@ import sys
 from collections import OrderedDict
 from pathlib import Path
 
-from biofeaturefactory.utils.utility import _collect_failures_from_logs, load_mapping
+from biofeaturefactory.utils.utility import _collect_failures_from_logs, load_mapping, write_tsv
 
 LABELS = ['A', 'B', 'C', 'D']
 
@@ -278,28 +278,13 @@ def parse_spliceai_vcf(
                     predictions.append(prediction)
 
         # Write TSV output
-        if predictions:
-            with open(output_file, 'w', newline='') as out_f:
-                fieldnames = [
-                    'pkey', 'gene', 'chrom', 'pos', 'ref', 'alt', 'allele', 'block_label',
-                    'ds_ag', 'ds_al', 'ds_dg', 'ds_dl',
-                    'dp_ag', 'dp_al', 'dp_dg', 'dp_dl',
-                    'max_delta_score'
-                ]
-                writer = csv.DictWriter(out_f, fieldnames=fieldnames, delimiter='\t')
-                writer.writeheader()
-                writer.writerows(predictions)
-        else:
-            # Create empty file with header
-            with open(output_file, 'w', newline='') as out_f:
-                fieldnames = [
-                    'pkey', 'gene', 'chrom', 'pos', 'ref', 'alt', 'allele', 'block_label',
-                    'ds_ag', 'ds_al', 'ds_dg', 'ds_dl',
-                    'dp_ag', 'dp_al', 'dp_dg', 'dp_dl',
-                    'max_delta_score'
-                ]
-                writer = csv.DictWriter(out_f, fieldnames=fieldnames, delimiter='\t')
-                writer.writeheader()
+        fieldnames = [
+            'pkey', 'gene', 'chrom', 'pos', 'ref', 'alt', 'allele', 'block_label',
+            'ds_ag', 'ds_al', 'ds_dg', 'ds_dl',
+            'dp_ag', 'dp_al', 'dp_dg', 'dp_dl',
+            'max_delta_score'
+        ]
+        write_tsv(predictions, output_file, fieldnames)
 
         print(f"Processed {processed_count} variants, found {len(predictions)} predictions above threshold {threshold}")
         return True, processed_count, len(predictions)
