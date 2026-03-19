@@ -56,8 +56,34 @@ from biofeaturefactory.utils.utility import (
 # Import for NSP3 prediction
 import pandas as pd
 import numpy as np
+
+# Add local nsp3 git clone to sys.path so it's importable from any working directory
+_nsp3_package_dir = Path(__file__).resolve().parent / "nsp3" / "nsp3"
+if str(_nsp3_package_dir) not in sys.path:
+    sys.path.insert(0, str(_nsp3_package_dir))
+
 from nsp3 import main as nsp3_main
 from nsp3.cli import load_config
+
+# Patch nsp3's BasePredict to use strict=False when loading state_dict.
+# The ESM-1b checkpoint may contain extra keys (e.g., emb_layer_norm_before)
+# not present in the model constructed from config.
+# Wrapped in try/except so future nsp3 updates that fix this upstream won't break the pipeline.
+try:
+    import nsp3.base.base_predict as _base_predict
+
+    def _patched_base_init(self, model, model_data, *args, **kwargs):
+        import torch as _torch
+        super(_base_predict.BasePredict, self).__init__()
+        self.model = model
+        print("Loading model... \n")
+        data = _torch.load(model_data, map_location='cpu')
+        self.model.load_state_dict(data['state_dict'], strict=False)
+        self.model.eval()
+
+    _base_predict.BasePredict.__init__ = _patched_base_init
+except Exception:
+    pass
 
 
 # Q8/Q3 class labels
@@ -277,35 +303,41 @@ def run_nsp3_prediction(fasta_file, model_path, config_path, batch_size=100, ver
 
                 # Process results
                 # NSP3 returns (identifiers_list, sequences_list, predictions_list)
-                # Each element may be nested - extract properly
-                identifiers_batch = result[0]
-                sequences_batch = result[1]
-                predictions_batch = result[2]
+                # SecondaryFeatures.__call__ internally chunks by 25, returning:
+                #   identifiers = [[chunk0_ids], [chunk1_ids], ...]
+                #   sequences   = [[chunk0_seqs], [chunk1_seqs], ...]
+                #   predictions = [[chunk0_tensors], [chunk1_tensors], ...]
+                # Each chunk's tensors have their own seq_idx space (0..len(chunk)-1)
+                identifiers_all = result[0]
+                sequences_all = result[1]
+                predictions_all = result[2]
 
-                # Handle nested structure - results might be [[items]] instead of [items]
-                if identifiers_batch and isinstance(identifiers_batch[0], list):
-                    identifiers_batch = identifiers_batch[0]
-                if sequences_batch and isinstance(sequences_batch[0], list):
-                    sequences_batch = sequences_batch[0]
-                # Predictions are nested as [[tensor1, tensor2, ...]] - flatten to [tensor1, tensor2, ...]
-                if predictions_batch and isinstance(predictions_batch[0], list):
-                    predictions_batch = predictions_batch[0]
+                # Normalize to list-of-chunks if not already nested
+                if identifiers_all and not isinstance(identifiers_all[0], list):
+                    identifiers_all = [identifiers_all]
+                    sequences_all = [sequences_all]
+                    predictions_all = [predictions_all]
 
-                # Process each sequence in the batch
-                for seq_idx in range(len(identifiers_batch)):
-                    chunk_id = identifiers_batch[seq_idx]
-                    sequence = sequences_batch[seq_idx]
-                    seq_len = len(sequence)
+                # Process each NSP3 internal chunk
+                for chunk_idx in range(len(identifiers_all)):
+                    identifiers_chunk = identifiers_all[chunk_idx]
+                    sequences_chunk = sequences_all[chunk_idx]
+                    predictions_chunk = predictions_all[chunk_idx]
 
-                    per_residue_predictions = {}
+                    for seq_idx in range(len(identifiers_chunk)):
+                        chunk_id = identifiers_chunk[seq_idx]
+                        sequence = sequences_chunk[seq_idx]
+                        seq_len = len(sequence)
 
-                    for pos_idx in range(seq_len):
-                        residue = sequence[pos_idx]
-                        per_residue_predictions[pos_idx] = extract_residue_predictions(
-                            predictions_batch, seq_idx, pos_idx, residue
-                        )
+                        per_residue_predictions = {}
 
-                    all_predictions_raw[chunk_id] = per_residue_predictions
+                        for pos_idx in range(seq_len):
+                            residue = sequence[pos_idx]
+                            per_residue_predictions[pos_idx] = extract_residue_predictions(
+                                predictions_chunk, seq_idx, pos_idx, residue
+                            )
+
+                        all_predictions_raw[chunk_id] = per_residue_predictions
 
             except RuntimeError as e:
                 if "exceeds dimension size" in str(e) or "start" in str(e):
@@ -320,33 +352,35 @@ def run_nsp3_prediction(fasta_file, model_path, config_path, batch_size=100, ver
 
                             try:
                                 result = nsp3_main.predict(config, "SecondaryFeatures", model_path, single_fasta.name)
-                                # Process single result (same as above)
-                                identifiers_batch = result[0]
-                                sequences_batch = result[1]
-                                predictions_batch = result[2]
+                                # Process single result (same chunk iteration as above)
+                                identifiers_all = result[0]
+                                sequences_all = result[1]
+                                predictions_all = result[2]
 
-                                # Handle nested structure
-                                if identifiers_batch and isinstance(identifiers_batch[0], list):
-                                    identifiers_batch = identifiers_batch[0]
-                                if sequences_batch and isinstance(sequences_batch[0], list):
-                                    sequences_batch = sequences_batch[0]
-                                if predictions_batch and isinstance(predictions_batch[0], list):
-                                    predictions_batch = predictions_batch[0]
+                                if identifiers_all and not isinstance(identifiers_all[0], list):
+                                    identifiers_all = [identifiers_all]
+                                    sequences_all = [sequences_all]
+                                    predictions_all = [predictions_all]
 
-                                for seq_idx in range(len(identifiers_batch)):
-                                    chunk_id = identifiers_batch[seq_idx]
-                                    sequence = sequences_batch[seq_idx]
-                                    seq_len = len(sequence)
+                                for ci in range(len(identifiers_all)):
+                                    ids_c = identifiers_all[ci]
+                                    seqs_c = sequences_all[ci]
+                                    preds_c = predictions_all[ci]
 
-                                    per_residue_predictions = {}
+                                    for seq_idx in range(len(ids_c)):
+                                        chunk_id = ids_c[seq_idx]
+                                        sequence = seqs_c[seq_idx]
+                                        seq_len = len(sequence)
 
-                                    for pos_idx in range(seq_len):
-                                        residue = sequence[pos_idx]
-                                        per_residue_predictions[pos_idx] = extract_residue_predictions(
-                                            predictions_batch, seq_idx, pos_idx, residue
-                                        )
+                                        per_residue_predictions = {}
 
-                                    all_predictions_raw[chunk_id] = per_residue_predictions
+                                        for pos_idx in range(seq_len):
+                                            residue = sequence[pos_idx]
+                                            per_residue_predictions[pos_idx] = extract_residue_predictions(
+                                                preds_c, seq_idx, pos_idx, residue
+                                            )
+
+                                        all_predictions_raw[chunk_id] = per_residue_predictions
 
                             except Exception as e2:
                                 print(f"      Skipping {chunk_id}: {e2}")

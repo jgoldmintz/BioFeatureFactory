@@ -19,7 +19,7 @@ Ensemble workflow for licensed NetNGlyc 1.0 with host-side SignalP 6.0.
 
 ## 2. Running
 
-### 2.1 SignalP 6 Integration (Optional but Recommended)
+### 2.1 SignalP 6 Integration
 
 NetNGlyc's native tcsh script expects an old SignalP binary (v3/4) at `$SIGNALP`. To feed it modern SignalP 6 results, configure the adapter:
 

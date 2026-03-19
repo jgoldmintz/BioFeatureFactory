@@ -14,7 +14,13 @@ numba>=0.53
 # Rare codon pipeline
 networkx>=2.6
 prody>=2.0
-
+#NetSurfP3 installs
+optuna>=4.8.0
+matplotlib>=3.10.8
+torch>=2.0.0
+fair-esm>=2.0.0
+h5py>=3.16.0
+click>=8.3.1
 # Miranda — conda only, not pip-installable:
 #   conda install -c bioconda miranda
 

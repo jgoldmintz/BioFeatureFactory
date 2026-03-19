@@ -244,9 +244,9 @@ fi
 echo "[4/12] NetSurfP3 module dependency..."
 if [[ "$CLONE_NETSURFP3" -eq 1 ]]; then
   clone_or_update "https://github.com/Eryk96/NetSurfP-3.0.git" "$BFF_DIR/NetSurfP3/nsp3"
-  if [[ "$PIP_INSTALL" -eq 1 ]] && [[ -f "$BFF_DIR/NetSurfP3/nsp3/requirements.txt" ]]; then
-    echo "  PIP install NetSurfP3 requirements"
-    python -m pip install -r "$BFF_DIR/NetSurfP3/nsp3/requirements.txt"
+  if [[ "$PIP_INSTALL" -eq 1 ]] && [[ -f "$BFF_DIR/NetSurfP3/nsp3/nsp3/setup.py" ]]; then
+    echo "  PIP install nsp3 package (editable)"
+    python -m pip install -e "$BFF_DIR/NetSurfP3/nsp3/nsp3"
   fi
 fi
 
@@ -352,7 +352,9 @@ Manual installs required (cannot be auto-downloaded):
     Patch NetNGlyc tcsh SIGNALP path to:
       biofeaturefactory/netNglyc/bin/signalp6_adapter
   - netphos/: NetPhos 3.1 + APE (DTU academic license), requires tcsh
-  - netMHC/: NetMHCpan 4.1 (DTU academic license)
+  - netMHC/: NetMHCpan 4.1 / NetMHC 4.0 (DTU academic license)
+    NetMHC 4.0 data files: https://services.healthtech.dtu.dk/services/NetMHC-4.0/data.tar.gz
+    Extract into the netMHC-4.0 installation directory.
   - alphafold3/: NVIDIA GPU stack + Docker + AF3 model weights
 EOF
 

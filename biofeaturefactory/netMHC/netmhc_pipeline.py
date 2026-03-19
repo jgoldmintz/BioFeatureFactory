@@ -52,7 +52,6 @@ from biofeaturefactory.utils.utility import (
     write_tsv,
     split_fasta_into_batches,
     combine_batch_outputs,
-    discover_mapping_files,
     discover_fasta_files,
     ExtractGeneFromFASTA,
     parse_predictions_with_mutation_filtering,
@@ -112,7 +111,17 @@ def resolve_native_netmhc_path(user_path=None, tool_version="netMHCpan"):
         _add(str(candidate))
 
     for path in candidates:
-        if path and os.path.isfile(path) and os.access(path, os.X_OK):
+        if not path:
+            continue
+        # If given a directory, look for the binary inside it
+        if os.path.isdir(path):
+            for subpath in [
+                os.path.join(path, "bin", tool_version),
+                os.path.join(path, tool_version),
+            ]:
+                if os.path.isfile(subpath) and os.access(subpath, os.X_OK):
+                    return os.path.abspath(subpath)
+        elif os.path.isfile(path) and os.access(path, os.X_OK):
             return os.path.abspath(path)
 
     return None
@@ -158,7 +167,7 @@ def _run_native_netmhc(fasta_file, output_file, timeout, netmhc_path, alleles=No
         tuple: (success, output_content, error_message)
     """
     if not alleles:
-        alleles = ["HLA-A*02:01"]  # Default allele
+        alleles = ["HLA-A0201"]  # Default allele (netMHC-4.0 format)
 
     all_outputs = []
 
@@ -169,16 +178,26 @@ def _run_native_netmhc(fasta_file, output_file, timeout, netmhc_path, alleles=No
             # Format: netMHC -a HLA-A*02:01 -f input.fasta
             cmd = [netmhc_path, "-a", allele, "-f", fasta_file]
 
+            # netMHC binary expects $NETMHC pointing to the platform dir
+            # (the parent of bin/), e.g. netMHC-4.0/Darwin_x86_64/
+            env = os.environ.copy()
+            netmhc_bin_dir = os.path.dirname(os.path.abspath(netmhc_path))
+            env["NETMHC"] = os.path.dirname(netmhc_bin_dir) if os.path.basename(netmhc_bin_dir) == "bin" else netmhc_bin_dir
+
             result = subprocess.run(
                 cmd,
                 capture_output=True,
                 text=True,
                 timeout=timeout,
-                cwd=os.path.dirname(netmhc_path)
+                env=env,
             )
 
-            if result.returncode != 0:
+            # netMHC-4.0 returns exit code 1 even on success;
+            # check stderr and stdout for actual error indicators
+            if result.stderr and "error" in result.stderr.lower():
                 return False, result.stdout, result.stderr
+            if "cannot be found" in result.stdout or (not result.stdout.strip()):
+                return False, result.stdout, result.stderr or result.stdout
 
             all_outputs.append(result.stdout)
 
@@ -683,8 +702,8 @@ def main():
                        help='Path to native NetMHC executable')
 
     # Processing options
-    parser.add_argument('--mapping-dir',
-                       help='Directory containing mutation mapping CSV files (REQUIRED for full-pipeline mode)')
+    parser.add_argument('--mutations', '-m',
+                       help='Mutation file or directory of mutation CSVs (single-column NT mutations)')
     parser.add_argument('--log',
                        help='Validation log file to skip failed mutations')
     parser.add_argument('--threshold', type=float, default=0.5,
@@ -705,8 +724,8 @@ def main():
     if not args.input or not args.output:
         parser.error("input and output arguments are required")
 
-    if not args.mapping_dir:
-        parser.error("--mapping-dir is REQUIRED for full-pipeline mode")
+    if not args.mutations:
+        parser.error("--mutations is REQUIRED for full-pipeline mode")
 
     # Build NetMHC executor
     executor, exec_desc = build_netmhc_executor(args, parser)
@@ -727,8 +746,15 @@ def main():
     if args.verbose:
         print(f"Loaded {len(wt_sequences)} WT sequences")
 
-    # Discover mapping files
-    mapping_files = discover_mapping_files(args.mapping_dir) if args.mapping_dir else {}
+    # Discover mutation files
+    mutation_files = {}
+    if args.mutations:
+        mut_path = Path(args.mutations)
+        if mut_path.is_file():
+            mutation_files[extract_gene_from_filename(mut_path.name)] = str(mut_path)
+        elif mut_path.is_dir():
+            for csv_file in mut_path.glob("*.csv"):
+                mutation_files[extract_gene_from_filename(csv_file.name)] = str(csv_file)
 
     # Process each gene
     for gene_name, wt_nt_seq in wt_sequences.items():
@@ -745,7 +771,7 @@ def main():
             continue
 
         # Build mutant sequences
-        mapping_file = mapping_files.get(gene_name)
+        mapping_file = mutation_files.get(gene_name)
         mutant_seqs = build_mutant_sequences_for_gene(
             gene_name, wt_nt_seq, wt_aa_seq, mapping_file, args.log, failure_map
         )
