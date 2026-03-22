@@ -24,14 +24,14 @@ set -euo pipefail
 #
 # Usage:
 #   ./bootstrap.sh                 # Full install (all steps)
-#   ./bootstrap.sh pip-only        # Only pip install
+#   ./bootstrap.sh env-only        # Only pip install
 #   ./bootstrap.sh git-only        # Only git clones and builds
 #   ./bootstrap.sh db-only         # Only database downloads
 #   ./bootstrap.sh git-only --exclude-evmutation --exclude-cg-cotrans
 #   ./bootstrap.sh db-only --exclude-uniref90
 #
 # Subcommands:
-#   pip-only       Only run pip install (step 2).
+#   env-only       Only run pip and conda installs (steps 2, 6-6c).
 #   git-only       Only run git clones, builds, and conda installs (steps 3-8).
 #   db-only        Only run FTP downloads and build_db (steps 9, 12).
 #   (none)         Run everything.
@@ -69,17 +69,16 @@ SUBCOMMAND=""
 ARGS=()
 for arg in "$@"; do
   case "$arg" in
-    pip-only|git-only|db-only) SUBCOMMAND="$arg" ;;
+    env-only|git-only|db-only) SUBCOMMAND="$arg" ;;
     *) ARGS+=("$arg") ;;
   esac
 done
 
 # Apply subcommand: disable groups not selected
 case "$SUBCOMMAND" in
-  pip-only)
+  env-only)
     CLONE_EVMUTATION=0; BUILD_PLMC=0; DOWNLOAD_CG_COTRANS=0
-    CLONE_NETSURFP3=0; INSTALL_SIGNALP=0
-    BUILD_GENESPLICER=0; CLONE_AF3=0
+    CLONE_NETSURFP3=0; INSTALL_SIGNALP=0; CLONE_AF3=0
     DOWNLOAD_UNIREF90=0; DOWNLOAD_IDMAPPING=0; RUN_BUILD_DB=0
     ;;
   git-only)
@@ -125,8 +124,8 @@ while [[ $# -gt 0 ]]; do
 done
 
 # --- Validate contradictions ---
-if [[ "$SUBCOMMAND" == "pip-only" && "$PIP_INSTALL" -eq 0 ]]; then
-  echo "ERROR: pip-only with --exclude-pip-install is contradictory." >&2
+if [[ "$SUBCOMMAND" == "env-only" && "$PIP_INSTALL" -eq 0 ]]; then
+  echo "ERROR: env-only with --exclude-pip-install is contradictory." >&2
   exit 1
 fi
 if [[ "$SUBCOMMAND" == "db-only" && "$DOWNLOAD_UNIREF90" -eq 0 && "$DOWNLOAD_IDMAPPING" -eq 0 && "$RUN_BUILD_DB" -eq 0 ]]; then
@@ -276,6 +275,34 @@ if [[ "$INSTALL_MIRANDA" -eq 1 ]]; then
   fi
 fi
 
+# ── Step 6b: mmseqs2 (EVmutation codon MSA) ─────────────────────────────
+echo "[6b/12] mmseqs2..."
+if command -v mmseqs >/dev/null 2>&1; then
+  echo "  OK mmseqs2 already on PATH"
+elif command -v mamba >/dev/null 2>&1; then
+  echo "  MAMBA install mmseqs2"
+  mamba install -y -c bioconda mmseqs2
+elif command -v conda >/dev/null 2>&1; then
+  echo "  CONDA install mmseqs2"
+  conda install -y -c bioconda mmseqs2
+else
+  echo "  WARN conda/mamba not found; install mmseqs2 manually: conda install -c bioconda mmseqs2"
+fi
+
+# ── Step 6c: HMMER / jackhmmer (EVmutation protein MSA) ────────────────
+echo "[6c/12] HMMER (jackhmmer)..."
+if command -v jackhmmer >/dev/null 2>&1; then
+  echo "  OK jackhmmer already on PATH"
+elif command -v mamba >/dev/null 2>&1; then
+  echo "  MAMBA install hmmer"
+  mamba install -y -c bioconda hmmer
+elif command -v conda >/dev/null 2>&1; then
+  echo "  CONDA install hmmer"
+  conda install -y -c bioconda hmmer
+else
+  echo "  WARN conda/mamba not found; install hmmer manually: conda install -c bioconda hmmer"
+fi
+
 # ── Step 7: GeneSplicer ─────────────────────────────────────────────────
 echo "[7/12] GeneSplicer binary..."
 if [[ "$BUILD_GENESPLICER" -eq 1 ]]; then
@@ -307,6 +334,23 @@ if [[ "$BUILD_GENESPLICER" -eq 1 ]]; then
       fi
     fi
   fi
+fi
+
+# ── Step 7b: Nextflow (optional, recommended for multi-gene runs) ───────
+echo "[7b/12] Nextflow..."
+if command -v nextflow >/dev/null 2>&1; then
+  echo "  OK nextflow already on PATH"
+elif command -v mamba >/dev/null 2>&1; then
+  echo "  MAMBA install nextflow"
+  mamba install -y -c bioconda nextflow
+elif command -v conda >/dev/null 2>&1; then
+  echo "  CONDA install nextflow"
+  conda install -y -c bioconda nextflow
+else
+  echo "  Installing nextflow via curl"
+  curl -s https://get.nextflow.io | bash
+  chmod +x nextflow
+  mv nextflow /usr/local/bin/ 2>/dev/null || echo "  WARN: move nextflow to a directory on PATH"
 fi
 
 # ── Step 8: AlphaFold3 ──────────────────────────────────────────────────

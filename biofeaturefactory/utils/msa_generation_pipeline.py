@@ -57,7 +57,8 @@ def get_focus_id(query_fasta):
 def generate_msa(query_fasta, database, output_dir, jackhmmer_binary,
                  iterations=5, evalue_inclusion=1e-3, bitscore_threshold=0.5,
                  min_neff_ratio=10, max_seq_gaps=0.4, max_col_gaps=0.6,
-                 identity_threshold=0.8, threads=4, keep_intermediate=False):
+                 identity_threshold=0.8, threads=4, keep_intermediate=False,
+                 max_seqs=10000):
     """
     Generate high-quality MSA using jackhmmer.
 
@@ -105,7 +106,8 @@ def generate_msa(query_fasta, database, output_dir, jackhmmer_binary,
             jackhmmer_binary=jackhmmer_binary,
             iterations=iterations,
             evalue_inclusion=evalue_inclusion,
-            threads=threads
+            threads=threads,
+            max_seqs=max_seqs
         )
     finally:
         if tmp_protein and os.path.exists(tmp_protein):
@@ -119,6 +121,17 @@ def generate_msa(query_fasta, database, output_dir, jackhmmer_binary,
 
     if n_raw == 0:
         raise RuntimeError("No sequences found in jackhmmer output")
+
+    # Cap sequence count to prevent profile drift on large superfamilies
+    if max_seqs and n_raw > max_seqs:
+        print(f"Capping MSA from {n_raw} to {max_seqs} sequences (keeping focus + random sample)")
+        import random
+        random.seed(42)
+        other_ids = [k for k in msa if k != focus_id]
+        keep_ids = set(random.sample(other_ids, max_seqs - 1))
+        keep_ids.add(focus_id)
+        msa = {k: v for k, v in msa.items() if k in keep_ids}
+        n_raw = len(msa)
 
     # Convert to A2M format
     print("Converting to A2M format...")
@@ -212,7 +225,7 @@ def main():
 Examples:
   # Basic usage
   python msa_generation_pipeline.py \\
-    --query protein.fasta \\
+    --query /path/to/fasta \\
     --database /path/to/uniref90.fasta \\
     --jackhmmer-binary jackhmmer \\
     --output results/
@@ -221,7 +234,7 @@ Examples:
 
   # With custom parameters
   python msa_generation_pipeline.py \\
-    --query protein.fasta \\
+    --query /path/to/fasta \\
     --database /path/to/uniref90.fasta \\
     --jackhmmer-binary /usr/local/bin/jackhmmer \\
     --iterations 5 \\
@@ -237,7 +250,7 @@ Quality thresholds:
 
     # Required arguments
     parser.add_argument('--query', '-q', required=True,
-                        help='Query protein sequence (FASTA format)')
+                        help='Query sequence (FASTA format)')
     parser.add_argument('--database', '-d', required=True,
                         help='Sequence database (e.g., UniRef90)')
     parser.add_argument('--jackhmmer-binary', '-j', required=True,
@@ -262,6 +275,9 @@ Quality thresholds:
                         help='Clustering threshold for N_eff (default: 0.8)')
     parser.add_argument('--threads', '-t', type=int, default=4,
                         help='Number of CPU threads (default: 4)')
+    parser.add_argument('--max-seqs', type=int, default=10000,
+                        help='Maximum sequences in alignment (default: 10000). '
+                             'Prevents profile drift for genes in large superfamilies.')
     parser.add_argument('--keep-intermediate', action='store_true',
                         help='Keep intermediate Stockholm file')
 
@@ -287,7 +303,8 @@ Quality thresholds:
         max_col_gaps=args.max_col_gaps,
         identity_threshold=args.identity_threshold,
         threads=args.threads,
-        keep_intermediate=args.keep_intermediate
+        keep_intermediate=args.keep_intermediate,
+        max_seqs=args.max_seqs
     )
 
     # Print summary

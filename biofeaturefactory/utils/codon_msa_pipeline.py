@@ -39,6 +39,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import json
 from pathlib import Path
 
 from biofeaturefactory.utils.utility import (
@@ -46,6 +47,7 @@ from biofeaturefactory.utils.utility import (
     write_fasta,
     codon_to_aa,
     extract_gene_from_filename,
+    compute_neff,
 )
 
 
@@ -979,6 +981,39 @@ def generate_codon_msa_from_focus(
     write_fasta(output_path, codon_msa)
     print(f"Wrote codon MSA to {output_path}")
     _write_manifest(manifest_rows, str(manifest_path))
+
+    # Compute and write stats JSON (mirrors msa_generation_pipeline.py output)
+    focus_id = gene
+    query_length = len(focus_nt_seq) // 3  # codon positions
+    n_seqs = len(codon_msa)
+    neff = compute_neff(codon_msa, identity_threshold=0.8)
+    neff_ratio = neff / query_length if query_length > 0 else 0.0
+
+    # Mean identity to focus
+    focus_seq = codon_msa.get(focus_id, '')
+    identities = []
+    for seq_id, seq in codon_msa.items():
+        if seq_id != focus_id and len(seq) == len(focus_seq):
+            matches = sum(1 for a, b in zip(seq, focus_seq) if a == b and a not in '-.')
+            aligned = sum(1 for a, b in zip(seq, focus_seq) if a not in '-.' and b not in '-.')
+            if aligned > 0:
+                identities.append(matches / aligned)
+    mean_identity = float(np.mean(identities)) if identities else 0.0
+
+    stats = {
+        'query_id': focus_id,
+        'query_length_codons': query_length,
+        'n_sequences': n_seqs,
+        'n_eff': float(round(neff, 1)),
+        'n_eff_ratio': float(round(neff_ratio, 2)),
+        'mean_identity': float(round(mean_identity, 3)),
+        
+    }
+
+    stats_path = out_dir / f"{gene}.codon.msa.stats.json"
+    with open(stats_path, 'w') as f:
+        json.dump(stats, f, indent=2)
+    print(f"Statistics written to {stats_path}")
 
     return codon_msa, manifest_rows
 

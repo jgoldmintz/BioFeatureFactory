@@ -1,0 +1,19 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+dist/
+build/
+
+# Nextflow runtime
+.nextflow/
+.nextflow.log*
+work/
+
+# OS
+.DS_Store
+
+# Credentials
+config.json
+*.env

@@ -2023,7 +2023,7 @@ def prepare_protein_query(query_fasta):
 
 
 def run_jackhmmer(query_fasta, database, output_sto, jackhmmer_binary,
-                  iterations=5, evalue_inclusion=1e-3, threads=4):
+                  iterations=5, evalue_inclusion=1e-3, threads=4, max_seqs=10000):
     """
     Run jackhmmer iterative search against a sequence database.
 
@@ -2035,6 +2035,8 @@ def run_jackhmmer(query_fasta, database, output_sto, jackhmmer_binary,
         iterations: Number of search iterations
         evalue_inclusion: E-value threshold for inclusion
         threads: Number of CPU threads
+        max_seqs: Maximum number of sequences to include in the alignment (default: 10000).
+                  Prevents profile drift for genes in large superfamilies.
 
     Returns:
         Path to Stockholm output file
