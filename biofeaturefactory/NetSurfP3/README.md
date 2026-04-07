@@ -56,7 +56,7 @@ print(ckpt["config"]["arch"]["type"])  # e.g., "CNNbLSTM_ESM1b_Complete"
 
 ## 3. Running
 
-### Full pipeline (WT FASTA -> Mutant synthesis -> NetSurfP -> TSV ensemble)
+### Full pipeline (WT FASTA $\rightarrow$ Mutant synthesis $\rightarrow$ NetSurfP $\rightarrow$ TSV ensemble)
 
 ```bash
 python netsurfp3_pipeline.py \
@@ -96,37 +96,37 @@ Output is written per gene to:
 
 Per-mutation summary with structural changes:
 
-| Column | Description | Units |
-|--------|-------------|-------|
-| `pkey` | `{GENE}-{MUTATION}` primary key | string |
-| `mutation_pos` | Position of the mutation | residue index |
-| `wt_aa`, `mut_aa` | WT and mutant amino acids | single-letter |
-| `delta_rsa` | Change in relative surface accessibility | 0-1 |
+| Column | Description                                          | Units |
+|--------|------------------------------------------------------|-------|
+| `pkey` | `{GENE}-{MUTATION}` primary key                      | string |
+| `mutation_pos` | Position of the mutation                             | residue index |
+| `wt_aa`, `mut_aa` | WT and mutant amino acids                            | single-letter |
+| `delta_rsa` | Change in relative surface accessibility             | 0-1 |
 | `delta_disorder_pf`, `delta_disorder_pt` | Change in disorder probability (two scoring methods) | 0-1 |
-| `ss3_change` | 1 if 3-state secondary structure changed, else 0 | 0/1 |
-| `ss8_change` | 1 if 8-state secondary structure changed, else 0 | 0/1 |
-| `burial_classification` | Buried/Intermediate/Exposed change (-2 to +2) | integer |
-| `disorder_classification` | Ordered/Disordered change (-2 to +2) | integer |
-| `local_structural_impact` | Sum of $\lvert\Delta\rvert$ within $\pm$5 residues | various |
-| `global_mean_delta_rsa` | Average RSA change across all residues | 0-1 |
-| `global_ss_changes` | Count of secondary structure changes | count |
-| `qc_flags` | Quality control flags | string |
+| `ss3_change` | 1 if 3-state secondary structure changed, else 0     | 0/1 |
+| `ss8_change` | 1 if 8-state secondary structure changed, else 0     | 0/1 |
+| `burial_classification` | Buried/Intermediate/Exposed change (-2 to +2)        | integer |
+| `disorder_classification` | Ordered/Disordered change (-2 to +2)                 | integer |
+| `local_structural_impact` | Sum of $\lvert\Delta\rvert$ within ± 5 residues      | various |
+| `global_mean_delta_rsa` | Average RSA change across all residues               | 0-1 |
+| `global_ss_changes` | Count of secondary structure changes                 | count |
+| `qc_flags` | Quality control flags                                | string |
 
 ### 4.2 Per-Residue TSV (`{GENE}.netsurfp3.residues.tsv`)
 
 Raw predictions for all residues:
 
-| Column | Description | Units |
-|--------|-------------|-------|
-| `pos` | Residue position | residue index |
-| `aa` | Amino acid | single-letter |
+| Column | Description | Units                     |
+|--------|-------------|---------------------------|
+| `pos` | Residue position | residue index             |
+| `aa` | Amino acid | single-letter             |
 | `rsa` | Relative Solvent Accessibility | 0-1 (0=buried, 1=exposed) |
-| `asa` | Absolute Solvent Accessibility | $\text{\AA}^2$ |
+| `asa` | Absolute Solvent Accessibility | $\text{Å}^2$              |
 | `ss3` | 3-state secondary structure | H/E/C (helix/strand/coil) |
-| `ss8` | 8-state secondary structure | G/H/I/B/E/S/T/C |
-| `disorder_pf`, `disorder_pt` | Disorder probabilities (two scoring methods) | 0-1 |
-| `phi`, `psi` | Backbone dihedral angles | degrees |
-| `sequence_type` | wt or mut | categorical |
+| `ss8` | 8-state secondary structure | G/H/I/B/E/S/T/C           |
+| `disorder_pf`, `disorder_pt` | Disorder probabilities (two scoring methods) | 0-1                       |
+| `phi`, `psi` | Backbone dihedral angles | degrees                   |
+| `sequence_type` | wt or mut | categorical               |
 
 ### 4.3 Local Changes TSV (`{GENE}.netsurfp3.local.tsv`)
 
@@ -157,8 +157,8 @@ Changes in the $\pm$5 residue window around each mutation (14 columns):
 | 0.50 - 1.0 | **Exposed** | Surface residues, interaction interfaces, epitopes |
 
 **Delta RSA Interpretation:**
-- **$\Delta > +0.2$**: Buried -> Exposed transition (potential new interaction site, epitope exposure)
-- **$\Delta < -0.2$**: Exposed -> Buried transition (loss of interaction site, epitope masking)
+- **$\Delta > +0.2$**: Buried $\rightarrow$ Exposed transition (potential new interaction site, epitope exposure)
+- **$\Delta < -0.2$**: Exposed $\rightarrow$ Buried transition (loss of interaction site, epitope masking)
 - **$|\Delta| > 0.1$**: Significant accessibility change
 
 ### 5.2 Secondary Structure (SS3)
@@ -170,9 +170,9 @@ Changes in the $\pm$5 residue window around each mutation (14 columns):
 | **C** | Coil | Loop/turn (irregular structure) |
 
 **Important Transitions:**
-- **H -> C or E -> C**: Loss of regular structure (potential destabilization)
-- **C -> H or C -> E**: Gain of regular structure (potential stabilization)
-- **H <-> E**: Major structural rearrangement
+- **H $\rightarrow$ C or E $\rightarrow$ C**: Loss of regular structure (potential destabilization)
+- **C $\rightarrow$ H or C $\rightarrow$ E**: Gain of regular structure (potential stabilization)
+- **H $\leftrightarrow$ E**: Major structural rearrangement
 
 ### 5.3 Disorder
 
@@ -183,8 +183,8 @@ Changes in the $\pm$5 residue window around each mutation (14 columns):
 | > 0.7 | **Disordered** | Intrinsically disordered region (IDR) |
 
 **Clinical Relevance:**
-- Disorder -> Order: May stabilize protein, affect binding
-- Order -> Disorder: May destabilize, create flexible linkers
+- Disorder $\rightarrow$ Order: May stabilize protein, affect binding
+- Order $\rightarrow$ Disorder: May destabilize, create flexible linkers
 
 ---
 
@@ -201,8 +201,8 @@ Intermediate +1        0           -1
 Exposed      +2       +1            0
 ```
 
-- **+2 (Buried -> Exposed)**: Potentially exposes epitopes, creates new interfaces
-- **-2 (Exposed -> Buried)**: May mask epitopes, disrupt existing interactions
+- **+2 (Buried $\rightarrow$ Exposed)**: Potentially exposes epitopes, creates new interfaces
+- **-2 (Exposed $\rightarrow$ Buried)**: May mask epitopes, disrupt existing interactions
 - **0 (No change)**: Minimal impact on surface properties
 
 ### 6.2 Disorder Classification
@@ -216,8 +216,8 @@ Intermediate +1      0            -1
 Disordered   +2     +1             0
 ```
 
-- **+2 (Ordered -> Disordered)**: May increase flexibility, affect binding dynamics
-- **-2 (Disordered -> Ordered)**: May rigidify structure, alter conformational ensemble
+- **+2 (Ordered $\rightarrow$ Disordered)**: May increase flexibility, affect binding dynamics
+- **-2 (Disordered $\rightarrow$ Ordered)**: May rigidify structure, alter conformational ensemble
 
 ---
 
@@ -258,9 +258,9 @@ Disordered   +2     +1             0
 ### 9.1 Immunogenicity Assessment
 
 Mutations can alter:
-1. **Surface accessibility** -> Epitope exposure/masking
-2. **Secondary structure** -> Conformational epitopes
-3. **Disorder regions** -> Protease susceptibility
+1. **Surface accessibility** $\rightarrow$ Epitope exposure/masking
+2. **Secondary structure** $\rightarrow$ Conformational epitopes
+3. **Disorder regions** $\rightarrow$ Protease susceptibility
 
 ```bash
 python netsurfp3_pipeline.py \
@@ -274,9 +274,9 @@ python netsurfp3_pipeline.py \
 ### 9.2 Protein Stability Analysis
 
 Identify mutations causing:
-1. **Burial changes** -> Hydrophobic core disruption
-2. **Disorder gain** -> Destabilization
-3. **Secondary structure loss** -> Unfolding
+1. **Burial changes** $\rightarrow$ Hydrophobic core disruption
+2. **Disorder gain** $\rightarrow$ Destabilization
+3. **Secondary structure loss** $\rightarrow$ Unfolding
 
 ```bash
 python netsurfp3_pipeline.py \
@@ -290,9 +290,9 @@ python netsurfp3_pipeline.py \
 ### 9.3 Interaction Interface Mapping
 
 Detect changes in:
-1. **Local structural context** -> Altered residue geometry near interface
-2. **RSA transitions** -> Burial changes at interaction surfaces
-3. **Surface patches** -> Modified solvent-accessible regions
+1. **Local structural context** $\rightarrow$ Altered residue geometry near interface
+2. **RSA transitions** $\rightarrow$ Burial changes at interaction surfaces
+3. **Surface patches** $\rightarrow$ Modified solvent-accessible regions
 
 ---
 
@@ -339,7 +339,7 @@ NetSurfP-3.0 predictions complement other BioFeatureFactory analyses:
 | **NetMHC** | RSA > 0.5 + predicted epitope = accessible epitope |
 | **NetNglyc** | Surface glycosylation sites (RSA > 0.4) are functionally relevant |
 | **NetPhos** | Exposed phosphorylation sites (RSA > 0.3) are kinase-accessible |
-| **SpliceAI** | Splice-altering mutations -> RSA changes -> functional impact |
+| **SpliceAI** | Splice-altering mutations $\rightarrow$ RSA changes $\rightarrow$ functional impact |
 
 ---
 

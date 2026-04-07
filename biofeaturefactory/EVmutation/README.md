@@ -37,7 +37,9 @@ $P(A_1, \ldots, A_L) = \frac{1}{Z} \exp\left(\sum_i h_i(A_i) + \sum_{i \lt j} J_
 
 For a single substitution at position $i$ (wildtype $a \to$ mutant $b$) against the wildtype background $\mathbf{s}$:
 
-$\Delta H = \underbrace{\left[h_i(b) - h_i(a)\right]}_{\text{independent}} + \underbrace{\sum_{j \neq i} \left[J_{ij}(b,\, s_j) - J_{ij}(a,\, s_j)\right]}_{\text{epistatic contribution}}$
+
+
+$$\Delta H = \underbrace{\left[h_i(b) - h_i(a)\right]}_{\text{independent}} + \underbrace{\sum_{j \neq i} \left[J_{ij}(b,\, s_j) - J_{ij}(a,\, s_j)\right]}_{\text{epistatic contribution}}$$
 
 The **independent score** uses $h_i$ only (equivalent to `model.to_independent_model()`).
 The **epistatic score** adds the full $J_{ij}$ sum over all other positions $j$ in the wildtype background.
@@ -347,11 +349,11 @@ The observed frequency of the mutant codon at this position in the MSA (`model.f
 
 From SMN2 ($N_{eff}=113$, $L=294$ -- low $N_{eff}$ regime; primary score is `prediction_codon_independent`):
 
-| Mutation | indep | epi | contrib | concordance | freq | Notes |
-|----------|-------|-----|---------|-------------|------|-------|
-| F280F (TTT->TTC) | +2.09 | +1.50 | -0.59 | CONCORDANT | 0.387 | TTC favored; 39% of MSA use TTC; couplings slightly oppose but agree in sign |
-| S292S (TCC->TCG) | -8.03 | -6.75 | +1.28 | CONCORDANT | 0.000 | TCG never observed; strongly disfavored; couplings partially rescue but both remain negative |
-| Q27Q (CAG->CAA) | -2.85 | -5.46 | -2.61 | CONCORDANT | 0.052 | Site penalizes CAA; couplings amplify the deleterious signal |
+| Mutation                    | indep | epi | contrib | concordance | freq | Notes |
+|-----------------------------|-------|-----|---------|-------------|------|-------|
+| F280F (TTT$\rightarrow$TTC) | +2.09 | +1.50 | -0.59 | CONCORDANT | 0.387 | TTC favored; 39% of MSA use TTC; couplings slightly oppose but agree in sign |
+| S292S (TCC$\rightarrow$TCG)            | -8.03 | -6.75 | +1.28 | CONCORDANT | 0.000 | TCG never observed; strongly disfavored; couplings partially rescue but both remain negative |
+| Q27Q (CAG$\rightarrow$CAA)             | -2.85 | -5.46 | -2.61 | CONCORDANT | 0.052 | Site penalizes CAA; couplings amplify the deleterious signal |
 
 For a well-characterized gene with a deep MSA (e.g., TP53, F9), DISCORDANT cases would indicate genuine epistatic conflict between local codon preference and genome-wide codon usage context.
 

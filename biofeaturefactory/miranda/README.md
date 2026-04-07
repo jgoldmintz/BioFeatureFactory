@@ -1,4 +1,4 @@
-# Miranda WT->MUT Comparative miRNA Binding Pipeline
+# Miranda WT$\rightarrow$MUT Comparative miRNA Binding Pipeline
 
 ## Overview
 
@@ -12,7 +12,7 @@ MirandA (John *et al.*, 2004) remains the scoring engine; the Python layer struc
 
 ## Capabilities
 
-- **Unified WT<->MUT execution** -- WT sequences are analyzed once and reused for all mutations in that gene.  
+- **Unified WT$\leftrightarrow$MUT execution** -- WT sequences are analyzed once and reused for all mutations in that gene.  
 - **Parallelized mutant computation** -- MirandA is single-threaded, but runs for hundreds of mutations can be distributed across CPUs.  
 - **$\Delta$-based comparison** -- per-miRNA, per-locus, and per-segment $\Delta$ metrics quantify mutation-driven perturbation.
 - **Competitive binding analysis** -- detects overlapping miRNAs competing for the same local target region (Hausser & Zavolan, 2014).  
@@ -250,10 +250,10 @@ python miranda_ensemble.py -i ./FASTA_files/wt/transcript -o ./miranda_out -m /o
 
 ## Interpretation
 
-- **Localized perturbations** (large $|\Delta|$ near SNV, high $f_{local}$) -> direct structural disruption of seed pairing.  
-- **Distant competitive perturbations** -> emergence or loss of distal binding clusters.  
-- **Low global $\Delta_{score}$** and constant $C_{seg}$ -> negligible regulatory change.
-- **High weighted $\Delta_{score}$** at large $d$ -> gain of cryptic distal binding site.
+- **Localized perturbations** (large $|\Delta|$ near SNV, high $f_{local}$) $\rightarrow$ direct structural disruption of seed pairing.  
+- **Distant competitive perturbations** $\rightarrow$ emergence or loss of distal binding clusters.  
+- **Low global $\Delta_{score}$** and constant $C_{seg}$ $\rightarrow$ negligible regulatory change.
+- **High weighted $\Delta_{score}$** at large $d$ $\rightarrow$ gain of cryptic distal binding site.
 
 These transformations convert sequence changes into **quantitative functional evidence**, enabling ranking and integrative modeling.
 

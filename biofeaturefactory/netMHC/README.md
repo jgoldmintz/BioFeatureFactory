@@ -52,7 +52,7 @@ This pipeline:
 
 ## 4. Running
 
-### Full pipeline (WT FASTA -> Mutant synthesis -> NetMHC -> TSV ensemble)
+### Full pipeline (WT FASTA $\rightarrow$ Mutant synthesis $\rightarrow$ NetMHC $\rightarrow$ TSV ensemble)
 
 ```bash
 python netmhc_pipeline.py \

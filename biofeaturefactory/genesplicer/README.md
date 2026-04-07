@@ -65,29 +65,29 @@ Per-gene output written to:
 ### 1. Summary Table (`{GENE}.tsv`)
 Each row represents a single SNV comparison (`pkey = GENE-mutation`). Global view + optional local triage slice.
 
-| Column                      | Description                                                                                | Units                           |
-|-----------------------------|--------------------------------------------------------------------------------------------|---------------------------------|
-| `pkey`                      | Unique variant key `GENE-mutation`                                                         | --                               |
-| `n_sites_wt`                | Count of **visible** WT sites (score $\geq$ `--visibility-threshold`)                      | count                           |
-| `n_sites_mut`               | Count of **visible** MUT sites                                                             | count                           |
-| `n_clusters`                | Number of donor/acceptor clusters evaluated                                                | count                           |
-| `global_count_gained_high`  | Gained clusters where max(wt,mut) $\geq$ `--high-cutoff`                                   | count                           |
-| `global_count_lost_high`    | Lost clusters where max(wt,mut) $\geq$ `--high-cutoff`                                     | count                           |
-| `global_count_shifted`      | Clusters with positional shift (`dpos` $\geq$ `--shift-bp`)                                | count                           |
-| `global_max_abs_deltascore` | Max absolute score change across all clusters                                              | dimensionless                   |
-| `global_sum_weighted_abs_delta` | $\sum \lvert\Delta\text{score}\rvert \cdot \exp(-\text{distance}/\texttt{--distance-k})$ across clusters | dimensionless              |
-| `nearest_event_bp_any`      | Minimum distance to SNV among all events                                                   | bp                              |
-| `local_count_gained_high`   | As above, restricted to `distance $\leq$ --report-radius`                                       | count                           |
-| `local_count_lost_high`     | As above, restricted local                                                                 | count                           |
-| `local_count_shifted`       | As above, restricted local                                                                 | count                           |
-| `local_max_abs_deltascore`  | Max abs $\Delta$score within local radius                                                  | dimensionless                   |
-| `nearest_event_bp_local`    | Nearest event within local radius                                                          | bp                              |
-| `frac_effect_in_radius`     | ($\sum \lvert\Delta\rvert$ in radius) / ($\sum \lvert\Delta\rvert$ global)                  | 0-1                             |
-| `top_event_type`            | Event class of highest-priority cluster (`gained/lost/shifted/strengthened/weakened/none`) | enum                            |
-| `top_event_deltascore`      | $\Delta$score of the highest-priority event                                                | dimensionless                   |
-| `top_event_pos`             | Representative position of top event (MUT if present else WT)                              | bp (absolute) or index (window) |
-| `dominant_boundary`         | Boundary with largest $\sum \lvert\Delta\rvert$ (`donor` or `acceptor`)                     | enum                            |
-| `qc_flags`                  | Semicolon-separated flags: `no_sites;far_event>2kb;low_signal_only`                        | --                               |
+| Column                      | Description                                                                                            | Units                           |
+|-----------------------------|--------------------------------------------------------------------------------------------------------|---------------------------------|
+| `pkey`                      | Unique variant key `GENE-mutation`                                                                     | --                               |
+| `n_sites_wt`                | Count of **visible** WT sites (score $\geq$ `--visibility-threshold`)                                  | count                           |
+| `n_sites_mut`               | Count of **visible** MUT sites                                                                         | count                           |
+| `n_clusters`                | Number of donor/acceptor clusters evaluated                                                            | count                           |
+| `global_count_gained_high`  | Gained clusters where max(wt,mut) $\geq$ `--high-cutoff`                                               | count                           |
+| `global_count_lost_high`    | Lost clusters where max(wt,mut) $\geq$ `--high-cutoff`                                                 | count                           |
+| `global_count_shifted`      | Clusters with positional shift (`dpos` $\geq$ `--shift-bp`)                                            | count                           |
+| `global_max_abs_deltascore` | Max absolute score change across all clusters                                                          | dimensionless                   |
+| `global_sum_weighted_abs_delta` | $\sum \lvert\Delta\text{score}\rvert \cdot e^{(-\text{distance}/\text{--distance-k})}$ across clusters | dimensionless              |
+| `nearest_event_bp_any`      | Minimum distance to SNV among all events                                                               | bp                              |
+| `local_count_gained_high`   | As above, restricted to $\text{distance} \leq \text{--report-radius}$                                  | count                           |
+| `local_count_lost_high`     | As above, restricted local                                                                             | count                           |
+| `local_count_shifted`       | As above, restricted local                                                                             | count                           |
+| `local_max_abs_deltascore`  | Max abs $\Delta$score within local radius                                                              | dimensionless                   |
+| `nearest_event_bp_local`    | Nearest event within local radius                                                                      | bp                              |
+| `frac_effect_in_radius`     | $\dfrac{\sum \lvert\Delta\rvert_{radius}}{\sum \lvert\Delta\rvert_{global}}$                           | 0-1                             |
+| `top_event_type`            | Event class of highest-priority cluster (`gained/lost/shifted/strengthened/weakened/none`)             | enum                            |
+| `top_event_deltascore`      | $\Delta$score of the highest-priority event                                                            | dimensionless                   |
+| `top_event_pos`             | Representative position of top event (MUT if present else WT)                                          | bp (absolute) or index (window) |
+| `dominant_boundary`         | Boundary with largest $\sum \lvert\Delta\rvert$ (`donor` or `acceptor`)                                | enum                            |
+| `qc_flags`                  | Semicolon-separated flags: `no_sites; far_event>2kb; low_signal_only`                                  | --                               |
 
 **Interpretation**
 - Local impact: `local_max_abs_deltascore` and local gained/lost counts.
@@ -99,28 +99,28 @@ Each row represents a single SNV comparison (`pkey = GENE-mutation`). Global vie
 ### 2. Events Table (`{GENE}.events.tsv`)
 Each row represents a donor/acceptor **cluster** (merged nearby sites) and compares top WT vs top MUT within that cluster.
 
-| Column                | Description                                                                               | Units/Values                                     |
-|-----------------------|-------------------------------------------------------------------------------------------|--------------------------------------------------|
-| `pkey`                | Variant key `GENE-mutation`                                                               | --                                                |
-| `type`                | Boundary type                                                                             | `donor` / `acceptor`                             |
-| `cluster_id`          | Stable ID within `(pkey, type)` (e.g., `d1`, `a2`)                                        | string                                           |
-| `wt_pos`              | Top WT site position in cluster                                                           | bp (absolute) or index (window)                  |
-| `mut_pos`             | Top MUT site position in cluster                                                          | bp (absolute) or index (window)                  |
-| `dpos`                | Positional shift: `mut_pos - wt_pos`                                                      | bp (or indices)                                  |
-| `wt_score`            | Top WT score                                                                              | dimensionless                                    |
-| `mut_score`           | Top MUT score                                                                             | dimensionless                                    |
-| `dscore`              | Score delta: `mut_score - wt_score`                                                       | dimensionless                                    |
-| `pct_delta`           | Relative delta: $r_i = \dfrac{\text{dscore}}{\max(\lvert\text{WTscore}\rvert, \varepsilon)}$ | dimensionless                                    |
-| `distance_to_snv`     | Min distance of (WT or MUT) site in the cluster to the SNV                                | bp                                               |
-| `rank_wt`             | Rank of WT site among all WT sites of this `type` (1=strongest)                           | integer                                          |
-| `rank_mut`            | Rank of MUT site among all MUT sites of this `type`                                       | integer                                          |
-| `conf_wt`             | Confidence weight of WT (`0.5/0.75/1.0`)                                                  | numeric                                          |
-| `conf_mut`            | Confidence weight of MUT (`0.5/0.75/1.0`)                                                 | numeric                                          |
-| `conf_weighted_delta` | `conf_mut$\cdot$mut_score - conf_wt$\cdot$wt_score`                                                   | dimensionless                                    |
-| `cls`                 | Event class                                                                               | `gained/lost/shifted/strengthened/weakened/none` |
-| `is_high_impact`      | High $\Delta$ or high gained/lost (policy thresholds)                                     | 0/1                                              |
-| `priority`            | Sorting key: $\lvert\text{dscore}\rvert \cdot e^{(-distance/\text{distance-k})}$ + bonuses | numeric                                          |
-| `in_radius`           | Inside local triage radius (`distance $\leq$ --report-radius`)                                 | 0/1                                              |
+| Column                | Description                                                                                                         | Units/Values                                     |
+|-----------------------|---------------------------------------------------------------------------------------------------------------------|--------------------------------------------------|
+| `pkey`                | Variant key `GENE-mutation`                                                                                         | --                                                |
+| `type`                | Boundary type                                                                                                       | `donor` / `acceptor`                             |
+| `cluster_id`          | Stable ID within `(pkey, type)` (e.g., `d1`, `a2`)                                                                  | string                                           |
+| `wt_pos`              | Top WT site position in cluster                                                                                     | bp (absolute) or index (window)                  |
+| `mut_pos`             | Top MUT site position in cluster                                                                                    | bp (absolute) or index (window)                  |
+| `dpos`                | Positional shift: `mut_pos - wt_pos`                                                                                | bp (or indices)                                  |
+| `wt_score`            | Top WT score                                                                                                        | dimensionless                                    |
+| `mut_score`           | Top MUT score                                                                                                       | dimensionless                                    |
+| `dscore`              | Score delta: `mut_score - wt_score`                                                                                 | dimensionless                                    |
+| `pct_delta`           | Relative delta: $r_i = \dfrac{\text{dscore}}{\max(\lvert\text{WTscore}\rvert, \varepsilon)}$                        | dimensionless                                    |
+| `distance_to_snv`     | Min distance of (WT or MUT) site in the cluster to the SNV                                                          | bp                                               |
+| `rank_wt`             | Rank of WT site among all WT sites of this `type` (1=strongest)                                                     | integer                                          |
+| `rank_mut`            | Rank of MUT site among all MUT sites of this `type`                                                                 | integer                                          |
+| `conf_wt`             | Confidence weight of WT (`0.5/0.75/1.0`)                                                                            | numeric                                          |
+| `conf_mut`            | Confidence weight of MUT (`0.5/0.75/1.0`)                                                                           | numeric                                          |
+| `conf_weighted_delta` | $\text{conf}_{\text{mut}} \cdot \text{mut}_{\text{score}} - \text{conf}_{\text{wt}} \cdot \text{wt}_{\text{score}}$ | dimensionless                                    |
+| `cls`                 | Event class                                                                                                         | `gained/lost/shifted/strengthened/weakened/none` |
+| `is_high_impact`      | High $\Delta$ or high gained/lost (policy thresholds)                                                               | 0/1                                              |
+| `priority`            | Sorting key: $\lvert\text{dscore}\rvert \cdot e^{(-distance/\text{distance-k})}$ + bonuses                          | numeric                                          |
+| `in_radius`           | Inside local triage radius ($\text{distance} \leq \text{--report-radius}$)                                          | 0/1                                              |
 
 **Event taxonomy**
 - `gained`: WT absent, MUT visible ($\geq$ visibility threshold).
@@ -134,19 +134,19 @@ Each row represents a donor/acceptor **cluster** (merged nearby sites) and compa
 ### 3. Sites Table (`{GENE}.sites.tsv`)
 Per-allele per-site audit rows used to build clusters and events.
 
-| Column            | Description                                         | Units/Values                    |
-|-------------------|-----------------------------------------------------|---------------------------------|
-| `pkey`            | Variant key `GENE-mutation`                         | --                               |
-| `allele`          | Allele label                                        | `WT` / `MUT`                    |
-| `type`            | Boundary type                                       | `donor` / `acceptor`            |
-| `site_pos`        | Site position (End5 for donors, End3 for acceptors) | bp (absolute) or index (window) |
-| `score`           | GeneSplicer score                                   | dimensionless                   |
-| `confidence`      | Confidence weight (`low/med/high` -> `0.5/0.75/1.0`) | numeric                         |
-| `rank`            | Rank within allelextype (1=strongest)               | integer                         |
-| `distance_to_snv` | `\|site_pos - snv_pos\|`                            | bp                              |
-| `visible_flag`    | 1 if `score $\geq$ --visibility-threshold` else 0        | 0/1                             |
-| `cluster_id`      | Cluster tag that links to `events`                  | string                          |
-| `in_radius`       | Inside local triage radius                          | 0/1                             |
+| Column            | Description                                                    | Units/Values                    |
+|-------------------|----------------------------------------------------------------|---------------------------------|
+| `pkey`            | Variant key `GENE-mutation`                                    | --                               |
+| `allele`          | Allele label                                                   | `WT` / `MUT`                    |
+| `type`            | Boundary type                                                  | `donor` / `acceptor`            |
+| `site_pos`        | Site position (End5 for donors, End3 for acceptors)            | bp (absolute) or index (window) |
+| `score`           | GeneSplicer score                                              | dimensionless                   |
+| `confidence`      | Confidence weight (`low/med/high` -> `0.5/0.75/1.0`)           | numeric                         |
+| `rank`            | Rank within allelextype (1=strongest)                          | integer                         |
+| `distance_to_snv` | $\lvert \text{site_pos} - \text{snv_pos} \rvert$               | bp                              |
+| `visible_flag`    | 1 if $\text{score} \geq \text{--visibility-threshold}$ else 0 | 0/1                             |
+| `cluster_id`      | Cluster tag that links to `events`                             | string                          |
+| `in_radius`       | Inside local triage radius                                     | 0/1                             |
 
 **Consistency checks**
 - `n_sites_wt` = count of `visible_flag=1` where `allele=WT` for that `pkey`.
@@ -159,7 +159,7 @@ Per-allele per-site audit rows used to build clusters and events.
 - Far-field cryptic activation: high-impact `gained` with large `distance_to_snv`.
 - Local disruption: high local counts or `local_max_abs_deltascore` near the SNV.
 
-Priority = `|dscore| * exp(-distance/k)` with bonuses for high-score gained/lost and large shifts.
+Priority = $\lvert dscore \rvert \cdot e^{(-distance/k)}$ with bonuses for high-score gained/lost and large shifts.
 
 ## Clustering and Pairing
 - Single-linkage clustering by position within `(pkey, type)` using `--cluster-radius` (default 3 bp)
@@ -312,7 +312,7 @@ Site is **visible** if $\text{score} \ge V$. Cluster class depends on visibility
 ## Sites Table fields
 
 ### distance_to_snv
-- **Definition**: `distance = |site_pos - snv_pos|`
+- **Definition**: $\text{distance} = \lvert \text{site_pos} - \text{snv_pos} \rvert$
 - **Interpretation**: feeds distance kernel $w = e^{- d / k}$ used by weighted metrics and `priority` (Tobler, 1970; Cressie, 1993).
 
 ### visible_flag

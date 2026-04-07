@@ -12,13 +12,13 @@ AlphaFold3 (Abramson *et al.*, 2024) provides the structural prediction engine; 
 
 ## Capabilities
 
-- **Unified WT<->MUT execution** -- WT predictions cached and reused across mutations in the same gene.
-- **RBP discovery** -- Automatic query of POSTAR3/ENCODE eCLIP binding sites within configurable window ($\pm$50 bp).
+- **Unified WT$\leftrightarrow$MUT execution** -- WT predictions cached and reused across mutations in the same gene.
+- **RBP discovery** -- Automatic query of POSTAR3/ENCODE eCLIP binding sites within configurable window (±50 bp).
 - **Multi-mode execution** -- Local GPU, SLURM batch, or GCP cloud submission.
 - **$\Delta$-based comparison** -- Per-RBP delta metrics quantify mutation-driven perturbation.
 - **Event classification** -- Gained, lost, strengthened, weakened binding states.
 - **Distance-weighted impact modeling** -- Effects scaled by proximity to SNV using inverse distance weighting (Shepard, 1968).
-- **Ensemble aggregation** -- Parses all AF3 seed/sample outputs (mean $\pm$ std across samples) for robust confidence estimates.
+- **Ensemble aggregation** -- Parses all AF3 seed/sample outputs (mean ± std across samples) for robust confidence estimates.
 - **Interface sites table** -- Per-residue pLDDT and contact data at the RNA-protein interface, with per-residue contact frequency from ensemble.
 - **Multi-window mode** -- Optional placement of the mutation at multiple fractional offsets within the RNA window, aggregating across windows to reduce positional bias.
 - **Validation-aware filtering** -- Exclusion of failed variants via `--validation-log`.
@@ -79,7 +79,7 @@ One of:
 | `--docker-image` | `alphafold3` | Docker image name for AF3 |
 | `--model-dir` | -- | Path to AF3 model weights directory (required for local mode) |
 | `--window-size` | `101` | RNA window size around mutation (nt, odd number) |
-| `--rbp-window` | `50` | Window for RBP site lookup ($\pm$bp) |
+| `--rbp-window` | `50` | Window for RBP site lookup (±bp) |
 | `--validation-log` | -- | Path to validation log for filtering failed mutations |
 | `--vcf` | -- | Per-gene VCF file or directory (provides chromosome) |
 | `--chromosome-mapping` | -- | Chromosome mapping CSV file or directory |
@@ -186,9 +186,9 @@ $$\Delta_{PAE} = PAE_{mut} - PAE_{wt}$$
 - **High PAE (> $20 Å$)**: Low confidence; chains may not interact or their relative position is uncertain
 
 **Delta interpretation:**
-- **Positive $\Delta$** -> Weaker binding in mutant (PAE increased, meaning higher uncertainty)
-- **Negative $\Delta$** -> Stronger binding in mutant (PAE decreased, meaning lower uncertainty)
-- **$\Delta \approx 0$** -> No significant change in predicted binding confidence
+- **Positive $\Delta$** $\rightarrow$ Weaker binding in mutant (PAE increased, meaning higher uncertainty)
+- **Negative $\Delta$** $\rightarrow$ Stronger binding in mutant (PAE decreased, meaning lower uncertainty)
+- **$\Delta \approx 0$** $\rightarrow$ No significant change in predicted binding confidence
 
 ---
 
@@ -349,7 +349,7 @@ By default, the mutation is centered in the RNA window. The `--multi-window` fla
 - Each offset produces a distinct WT/MUT window pair
 - Duplicate windows (possible near transcript ends) are deduplicated
 - AF3 is run separately for each window (jobs suffixed `_w0`, `_w1`, etc.)
-- Metrics are aggregated across windows (mean $\pm$ std), reported identically to ensemble aggregation
+- Metrics are aggregated across windows (mean ± std), reported identically to ensemble aggregation
 - The `n_windows` column in `events.tsv` records how many windows were used
 
 **Compute cost:** With 3 offsets and N RBPs, multi-window mode runs 6xN AF3 jobs per mutation (3 windows x 2 alleles x N RBPs). The flag is off by default.
@@ -358,10 +358,10 @@ By default, the mutation is centered in the RNA window. The `--multi-window` fla
 
 ## Interpretation
 
-- **Localized perturbations** (large $|\Delta_{\text{PAE}}|$ at high priority) -> direct disruption of RBP binding interface.
-- **Multiple gained/lost events** -> mutation affects RBP binding landscape broadly.
-- **Low global $\Delta$** with unchanged classifications -> negligible regulatory change.
-- **High $\Delta$ with lost classification** -> potential functional impact on post-transcriptional regulation.
+- **Localized perturbations** (large $|\Delta_{\text{PAE}}|$ at high priority) $\rightarrow$ direct disruption of RBP binding interface.
+- **Multiple gained/lost events** $\rightarrow$ mutation affects RBP binding landscape broadly.
+- **Low global $\Delta$** with unchanged classifications $\rightarrow$ negligible regulatory change.
+- **High $\Delta$ with lost classification** $\rightarrow$ potential functional impact on post-transcriptional regulation.
 
 ---
 
@@ -420,7 +420,7 @@ alphafold3/
     |-- af3_runner.py           # AF3 execution (local/batch/cloud)
     |-- af3_parser.py           # Parse mmCIF + JSON outputs
     |-- rbp_database.py         # POSTAR3 tabix query interface
-    |-- rbp_sequence_mapper.py  # RBP name -> UniProt -> sequence
+    |-- rbp_sequence_mapper.py  # RBP name $\rightarrow$ UniProt $\rightarrow$ sequence
     `-- binding_metrics.py      # Delta computation and classification
 ```
 
@@ -432,7 +432,7 @@ alphafold3/
 | `bin/af3_runner.py` | AF3 execution (local/batch/cloud) |
 | `bin/af3_parser.py` | Parse mmCIF + JSON outputs |
 | `bin/rbp_database.py` | POSTAR3 tabix query interface |
-| `bin/rbp_sequence_mapper.py` | RBP name -> UniProt -> sequence |
+| `bin/rbp_sequence_mapper.py` | RBP name $\rightarrow$ UniProt $\rightarrow$ sequence |
 | `bin/binding_metrics.py` | Delta computation and classification |
 
 ---

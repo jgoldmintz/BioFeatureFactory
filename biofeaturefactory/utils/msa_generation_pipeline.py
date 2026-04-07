@@ -249,8 +249,8 @@ Quality thresholds:
     )
 
     # Required arguments
-    parser.add_argument('--query', '-q', required=True,
-                        help='Query sequence (FASTA format)')
+    parser.add_argument('--fasta', '-f', required=True,
+                        help='Query FASTA file or directory of FASTA files')
     parser.add_argument('--database', '-d', required=True,
                         help='Sequence database (e.g., UniRef90)')
     parser.add_argument('--jackhmmer-binary', '-j', required=True,
@@ -284,14 +284,24 @@ Quality thresholds:
     args = parser.parse_args()
 
     # Validate inputs
-    if not os.path.exists(args.query):
-        parser.error(f"Query file not found: {args.query}")
+    if not os.path.exists(args.fasta):
+        parser.error(f"Input not found: {args.fasta}")
     if not os.path.exists(args.database):
         parser.error(f"Database not found: {args.database}")
 
-    # Run pipeline
-    stats = generate_msa(
-        query_fasta=args.query,
+    # Collect FASTA files
+    fasta_path = Path(args.fasta)
+    if fasta_path.is_dir():
+        fasta_files = sorted(
+            f for f in fasta_path.iterdir()
+            if f.suffix.lower() in ('.fasta', '.fa', '.fas') and f.is_file()
+        )
+        if not fasta_files:
+            parser.error(f"No FASTA files found in {args.fasta}")
+    else:
+        fasta_files = [fasta_path]
+
+    common_kwargs = dict(
         database=args.database,
         output_dir=args.output,
         jackhmmer_binary=args.jackhmmer_binary,
@@ -304,19 +314,21 @@ Quality thresholds:
         identity_threshold=args.identity_threshold,
         threads=args.threads,
         keep_intermediate=args.keep_intermediate,
-        max_seqs=args.max_seqs
+        max_seqs=args.max_seqs,
     )
 
-    # Print summary
-    print("\n" + "="*50)
-    print("MSA Generation Complete")
-    print("="*50)
-    print(f"Query: {stats['query_id']}")
-    print(f"Query length: {stats['query_length']}")
-    print(f"Sequences (raw): {stats['n_sequences_raw']}")
-    print(f"Sequences (filtered): {stats['n_sequences_filtered']}")
-    print(f"N_eff: {stats['n_eff']} ({stats['n_eff_ratio']}xL)")
-    print(f"Coverage: {stats['coverage']:.1%}")
+    for fasta_file in fasta_files:
+        print(f"\nProcessing: {fasta_file.name}")
+        stats = generate_msa(query_fasta=str(fasta_file), **common_kwargs)
+
+        print("\n" + "="*50)
+        print(f"MSA Generation Complete — {stats['query_id']}")
+        print("="*50)
+        print(f"Query length: {stats['query_length']}")
+        print(f"Sequences (raw): {stats['n_sequences_raw']}")
+        print(f"Sequences (filtered): {stats['n_sequences_filtered']}")
+        print(f"N_eff: {stats['n_eff']} ({stats['n_eff_ratio']}xL)")
+        print(f"Coverage: {stats['coverage']:.1%}")
     print(f"Mean identity: {stats['mean_identity']:.1%}")
     print(f"Quality check: {'PASS' if stats['quality_pass'] else 'WARN (low N_eff)'}")
     print(f"Output dir: {args.output}")

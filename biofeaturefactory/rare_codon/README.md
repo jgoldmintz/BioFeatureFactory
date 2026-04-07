@@ -283,7 +283,7 @@ python msa/codon_msa_pipeline.py \
 ### Window Centering
 
 The window is centered on each codon position:
-- Window size 15 -> positions -7 to +7 around center
+- Window size 15 $\rightarrow$ positions -7 to +7 around center
 - Edge positions have truncated windows (flagged)
 
 ### Sequence Filtering

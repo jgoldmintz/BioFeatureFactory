@@ -273,6 +273,18 @@ class TestExtractGeneFromFilename:
         result = extract_gene_from_filename("BRCA2.csv.gz")
         assert "BRCA2" in result
 
+    def test_pdb_id(self):
+        assert extract_gene_from_filename("1ABC.fasta") == "1ABC"
+
+    def test_pdb_id_with_chain(self):
+        assert extract_gene_from_filename("1ABC_A.fasta") == "1ABC_A"
+
+    def test_pdb_id_chain_b(self):
+        assert extract_gene_from_filename("7RM1_B.pdb") == "7RM1_B"
+
+    def test_pdb_id_no_chain(self):
+        assert extract_gene_from_filename("7RM1.fasta") == "7RM1"
+
 
 # ===========================================================================
 # is_likely_gene_name
@@ -293,8 +305,17 @@ class TestIsLikelyGeneName:
     def test_too_long(self):
         assert is_likely_gene_name("A" * 20) is False
 
-    def test_starts_with_number(self):
-        assert is_likely_gene_name("1ABC") is False
+    def test_pdb_id(self):
+        assert is_likely_gene_name("1ABC") is True
+
+    def test_pdb_id_4char(self):
+        assert is_likely_gene_name("7RM1") is True
+
+    def test_pdb_id_with_chain(self):
+        assert is_likely_gene_name("1ABC_A") is True
+
+    def test_pdb_id_chain_b(self):
+        assert is_likely_gene_name("7RM1_B") is True
 
     def test_with_hyphen(self):
         assert is_likely_gene_name("HLA-A") is True

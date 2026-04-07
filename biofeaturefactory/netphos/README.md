@@ -48,7 +48,7 @@
 
   ## 5. Processing Controls
 
-  - `--batch-size N` and `--timeout SEC` -- tune long FASTA runs. Batch strategy is chosen automatically by sequence count: 1 seq -> single run; 2-10 -> batch of 10; 11-100 -> batch of 25; >100 -> batch of 50.
+  - `--batch-size N` and `--timeout SEC` -- tune long FASTA runs. Batch strategy is chosen automatically by sequence count: 1 seq $\rightarrow$ single run; 2-10 $\rightarrow$ batch of 10; 11-100 $\rightarrow$ batch of 25; >100 $\rightarrow$ batch of 50.
   - `--threshold FLOAT` -- filter by score (default: 0.5). Sites with score below threshold are excluded.
   - `--yes-only` -- sets `--threshold` to 0.0 (disables score filtering entirely); does not filter for YES-answered predictions.
   - `--no-cache` / `--clear-cache` -- manage `~/.netphos_cache`.

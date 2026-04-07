@@ -187,7 +187,7 @@ process generate_protein_msa {
     """
     set -euo pipefail
     python3 ${projectDir}/../../utils/msa_generation_pipeline.py \\
-        --query "${fasta_file}" \\
+        --fasta "${fasta_file}" \\
         --database "${params.uniref90_db}" \\
         --jackhmmer-binary "${params.jackhmmer_binary}" \\
         --output . \\

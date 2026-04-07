@@ -150,7 +150,7 @@ python codon_usage_pipeline.py \
 
 ### RSCU (Relative Synonymous Codon Usage)
 
-$RSCU_i = X_i / ((1/n) \sum_{j=1}^{n} X_j)$
+$RSCU_i = \dfrac{X_i} {\frac{1}{n} \sum_{j=1}^{n} X_j}$
 
 Where:
 - $X_i$ = observed count of codon $i$
@@ -163,7 +163,7 @@ Where:
 
 ### W (Relative Adaptiveness)
 
-$W_i = X_i / max(X_j)$
+$W_i = \dfrac{X_i}{max(X_j)}$
 
 Where $\max(X_j)$ is the count of the most frequent synonymous codon.
 
@@ -173,7 +173,7 @@ Where $\max(X_j)$ is the count of the most frequent synonymous codon.
 
 ### CAI (Codon Adaptation Index)
 
-$CAI = \exp((1/L) \sum_{i=1}^{L} \ln(W_i))$
+$CAI = e^{\frac{1}{L}} \sum_{i=1}^{L} \ln(W_i)$
 
 Where:
 - $L$ = number of codons (excluding stops)
@@ -186,7 +186,7 @@ Where:
 
 ### tAI (tRNA Adaptation Index)
 
-$tAI = \exp((1/L) \sum_{i=1}^{L} \ln(w_i))$
+$tAI = e^{\frac{1}{L}} \sum_{i=1}^{L} \ln(w_i)$
 
 Where:
 - $L$ = number of codons
@@ -199,7 +199,7 @@ Where:
 
 ### CPS (Codon Pair Score)
 
-$CPS_{ij} = \ln(f_{ij} / (f_i \cdot f_j))$
+$CPS_{ij} = \ln(\frac{f_{ij}}{(f_i \cdot f_j)})$
 
 Where:
 - $f_{ij}$ = observed frequency of codon pair

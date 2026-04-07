@@ -1140,16 +1140,23 @@ def strip_all_extensions(name: str) -> str:
     return re.sub(r'(\.[^.]+)+$', '', name)
 
 def is_likely_gene_name(name: str) -> bool:
-    pat = re.compile(r'^[A-Za-z][A-Za-z0-9\-]{1,14}$')
-    return 2 <= len(name) <= 15 and bool(pat.match(name))
+    pat = re.compile(r'^[A-Za-z0-9][A-Za-z0-9\-]{1,14}$')
+    # PDB ID with chain: 1ABC_A, 7RM1_B
+    pdb_chain = re.compile(r'^\d[A-Za-z0-9]{3}_[A-Za-z0-9]{1,2}$')
+    return 2 <= len(name) <= 15 and (bool(pat.match(name)) or bool(pdb_chain.match(name)))
 
 def extract_gene_from_filename(filename: str) -> str:
     """Return the most likely gene symbol from a filename."""
     name = Path(filename).name
     name = strip_all_extensions(name)
 
+    # PDB ID with optional chain: 1ABC, 1ABC_A, 7RM1_B
+    pdb = re.match(r'^(\d[A-Za-z0-9]{3}(?:_[A-Za-z0-9]{1,2})?)(?:_|$)', name)
+    if pdb:
+        return pdb.group(1)
+
     # Fast path: choose the last gene-like token bounded by underscores
-    matches = re.findall(r'(?:^|_)([A-Z][A-Z0-9]{1,14}(?:-[A-Z0-9]+)?)(?=$|_)', name)
+    matches = re.findall(r'(?:^|_)([A-Z0-9][A-Z0-9]{1,14}(?:-[A-Z0-9]+)?)(?=$|_)', name)
     for cand in reversed(matches):
         if is_likely_gene_name(cand):
             return cand
@@ -1180,7 +1187,7 @@ def extract_gene_from_filename(filename: str) -> str:
         return candidates[-1]
 
     # Last resort: first gene-like substring anywhere
-    m = re.search(r'([A-Za-z][A-Za-z0-9\-]{1,14})', name)
+    m = re.search(r'([A-Za-z0-9][A-Za-z0-9\-]{1,14})', name)
     if m and is_likely_gene_name(m.group(1)):
         return m.group(1)
 

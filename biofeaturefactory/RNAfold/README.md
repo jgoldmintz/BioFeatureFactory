@@ -98,24 +98,24 @@ Each row represents a single SNV-centered comparison (`pkey` = gene + mutation).
 ### 2. Per-Position Table (`{GENE}.rnafold.positions.tsv`)
 Each row represents a single nucleotide position within the analyzed window.
 
-| Column | Description                                                                                                                              | Values |
-|--------|------------------------------------------------------------------------------------------------------------------------------------------|---------|
-| `pkey` | Variant key corresponding to the parent SNV                                                                                              | -- |
-| `transcript_pos` | Transcript coordinate of the variant (matches summary table)                                                                             | nt |
-| `pos` | Position index within the window (1 = start, window_length = end). Position 76 corresponds to the SNV.                                   | integer |
-| `delta_u` | Per-position change in unpaired probability (Alt - Ref). Positive values indicate increased accessibility in the alternate structure.    | float |
-| `change_flag` | 1 if $\lvert\Delta u\rvert \geq \tau$ ($\tau = 0.05$ default) else 0. Marks positions with meaningful shifts. | 0/1 |
-| `direction` | Sign of $\Delta u$: 1 = increased unpaired probability, -1 = decreased, 0 = unchanged. Indicates direction of accessibility change. | -1/0/1 |
-| `mfe_change_flag` | 1 if base-pairing status differs between Ref/Alt MFE structures (paired <-> unpaired).                                                     | 0/1 |
-| `mfe_change_dir` | Encodes the type of base-pairing change: 0 = unpaired->paired, 1 = paired->unpaired. Indicates structural opening or closing at that base. | 0/1 |
+| Column | Description                                                                                                                                | Values |
+|--------|--------------------------------------------------------------------------------------------------------------------------------------------|---------|
+| `pkey` | Variant key corresponding to the parent SNV                                                                                                | -- |
+| `transcript_pos` | Transcript coordinate of the variant (matches summary table)                                                                               | nt |
+| `pos` | Position index within the window (1 = start, window_length = end). Position 76 corresponds to the SNV.                                     | integer |
+| `delta_u` | Per-position change in unpaired probability (Alt - Ref). Positive values indicate increased accessibility in the alternate structure.      | float |
+| `change_flag` | 1 if $\lvert\Delta u\rvert \geq \tau$ ($\tau = 0.05$ default) else 0. Marks positions with meaningful shifts.                              | 0/1 |
+| `direction` | Sign of $\Delta u$: 1 = increased unpaired probability, -1 = decreased, 0 = unchanged. Indicates direction of accessibility change.        | -1/0/1 |
+| `mfe_change_flag` | 1 if base-pairing status differs between Ref/Alt MFE structures (paired $\leftrightarrow$ unpaired).                                       | 0/1 |
+| `mfe_change_dir` | Encodes the type of base-pairing change: 0 = unpaired$\rightarrow$paired, 1 = paired$\rightarrow$unpaired. Indicates structural opening or closing at that base. | 0/1 |
 
 ---
 
 ## Interpretation
 
 - **$\Delta\Delta G$ (MFE / Ensemble)**
-  - Positive $\Delta\Delta G$ -> Alt structure is less stable (higher energy).
-  - Negative $\Delta\Delta G$ -> Alt structure is more stable (lower energy).
+  - Positive $\Delta\Delta G$ $\rightarrow$ Alt structure is less stable (higher energy).
+  - Negative $\Delta\Delta G$ $\rightarrow$ Alt structure is more stable (lower energy).
   - Ensemble $\Delta\Delta G$ captures thermodynamic stability averaged across all possible folds, while MFE $\Delta\Delta G$ isolates the most stable structure.
 
 - **JSD_unpaired_bits**  
@@ -187,9 +187,9 @@ For each position, the pipeline computes:
 
 $\Delta u_i = u_i^{(\text{alt})} - u_i^{(\text{ref})}$
 
-- **Positive $\Delta u$** -> base becomes more accessible (region opens).
-- **Negative $\Delta u$** -> base becomes more paired (region closes).
-- $\Delta u \approx 0$ -> no local structural change.
+- **Positive $\Delta u$** $\rightarrow$ base becomes more accessible (region opens).
+- **Negative $\Delta u$** $\rightarrow$ base becomes more paired (region closes).
+- $\Delta u \approx 0$ $\rightarrow$ no local structural change.
 
 The parameter **$\tau$ (tau)** is a *magnitude threshold* applied to $\lvert\Delta u\rvert$ to define significant changes.  
 By default, $\tau = 0.05$ ($\geq 5\%$ change in unpaired probability).  
