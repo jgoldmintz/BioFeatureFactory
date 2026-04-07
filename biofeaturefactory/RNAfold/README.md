@@ -107,7 +107,7 @@ Each row represents a single nucleotide position within the analyzed window.
 | `change_flag` | 1 if $\lvert\Delta u\rvert \geq \tau$ ($\tau = 0.05$ default) else 0. Marks positions with meaningful shifts.                              | 0/1 |
 | `direction` | Sign of $\Delta u$: 1 = increased unpaired probability, -1 = decreased, 0 = unchanged. Indicates direction of accessibility change.        | -1/0/1 |
 | `mfe_change_flag` | 1 if base-pairing status differs between Ref/Alt MFE structures (paired $\leftrightarrow$ unpaired).                                       | 0/1 |
-| `mfe_change_dir` | Encodes the type of base-pairing change: 0 = unpaired$\rightarrow$paired, 1 = paired$\rightarrow$unpaired. Indicates structural opening or closing at that base. | 0/1 |
+| `mfe_change_dir` | Encodes the type of base-pairing change: 0 = unpaired $\rightarrow$ paired, 1 = paired $\rightarrow$ unpaired. Indicates structural opening or closing at that base. | 0/1 |
 
 ---
 

@@ -99,7 +99,7 @@ Output is written per gene to:
 | `max_abs_delta`, `sum_abs_delta`                                                     | Maximum change in potential and sum of absolute changes.                                     | probability (0-1) |
 | `top_event_type`                                                                     | Text label of dominant event.                                                                | categorical       |
 | `top_event_classification_code`                                                      | Numeric encoding of dominant event (`gained=2`, `lost=-2`, etc.).                            | integer           |
-| `top_event_delta`                                                                    | $\Delta$potential for the dominant event.                                                    | probability (0-1) |
+| `top_event_delta`                                                                    | $\Delta$ potential for the dominant event.                                                    | probability (0-1) |
 | `top_event_position`                                                                 | Amino-acid index of dominant event.                                                          | residue index     |
 | `wt_signalp_has_signal`, `mut_signalp_has_signal`                                    | 1 if SignalP predicts a signal peptide, else 0.                                              | boolean (0/1)     |
 | `wt_signalp_probability`, `mut_signalp_probability`                                  | SignalP cleavage probability.                                                                | probability (0-1) |

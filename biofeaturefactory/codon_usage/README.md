@@ -199,7 +199,7 @@ Where:
 
 ### CPS (Codon Pair Score)
 
-$CPS_{ij} = \ln(\frac{f_{ij}}{(f_i \cdot f_j)})$
+$CPS_{ij} = \ln(\frac{f_{ij}}{f_i \cdot f_j})$
 
 Where:
 - $f_{ij}$ = observed frequency of codon pair

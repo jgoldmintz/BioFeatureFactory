@@ -197,7 +197,7 @@ python rare_codon_pipeline.py \
 A codon is "rare" if its relative usage frequency is below threshold:
 
 ```
-rare = 1  if f_codon < $\tau$
+rare = 1  if f_codon < τ
        0  otherwise
 ```
 

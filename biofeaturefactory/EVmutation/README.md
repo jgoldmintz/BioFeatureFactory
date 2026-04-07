@@ -351,9 +351,9 @@ From SMN2 ($N_{eff}=113$, $L=294$ -- low $N_{eff}$ regime; primary score is `pre
 
 | Mutation                    | indep | epi | contrib | concordance | freq | Notes |
 |-----------------------------|-------|-----|---------|-------------|------|-------|
-| F280F (TTT$\rightarrow$TTC) | +2.09 | +1.50 | -0.59 | CONCORDANT | 0.387 | TTC favored; 39% of MSA use TTC; couplings slightly oppose but agree in sign |
-| S292S (TCC$\rightarrow$TCG)            | -8.03 | -6.75 | +1.28 | CONCORDANT | 0.000 | TCG never observed; strongly disfavored; couplings partially rescue but both remain negative |
-| Q27Q (CAG$\rightarrow$CAA)             | -2.85 | -5.46 | -2.61 | CONCORDANT | 0.052 | Site penalizes CAA; couplings amplify the deleterious signal |
+| F280F (TTT $\rightarrow$ TTC) | +2.09 | +1.50 | -0.59 | CONCORDANT | 0.387 | TTC favored; 39% of MSA use TTC; couplings slightly oppose but agree in sign |
+| S292S (TCC $\rightarrow$ TCG)            | -8.03 | -6.75 | +1.28 | CONCORDANT | 0.000 | TCG never observed; strongly disfavored; couplings partially rescue but both remain negative |
+| Q27Q (CAG $\rightarrow$ CAA)             | -2.85 | -5.46 | -2.61 | CONCORDANT | 0.052 | Site penalizes CAA; couplings amplify the deleterious signal |
 
 For a well-characterized gene with a deep MSA (e.g., TP53, F9), DISCORDANT cases would indicate genuine epistatic conflict between local codon preference and genome-wide codon usage context.
 

@@ -1,4 +1,4 @@
-# GeneSplicer Pipeline: WT<->ALT Ensemble Delta Caller
+# GeneSplicer Pipeline: WT $\leftrightarrow$ ALT Ensemble Delta Caller
 
 ## Overview
 
@@ -11,7 +11,7 @@ Run GeneSplicer on full genomic context (or configurable context), compare WT vs
 ## Capabilities
 - Full-context scan with absolute genomic positions
 - Optional local marking with `--report-radius`
-- Proximity clustering, WT<->ALT pairing, event calling, priority scoring
+- Proximity clustering, WT $\leftrightarrow$ ALT pairing, event calling, priority scoring
 - Deterministic, append-safe summary; auditable detail tables
 
 ## Dependencies
@@ -80,7 +80,7 @@ Each row represents a single SNV comparison (`pkey = GENE-mutation`). Global vie
 | `local_count_gained_high`   | As above, restricted to $\text{distance} \leq \text{--report-radius}$                                  | count                           |
 | `local_count_lost_high`     | As above, restricted local                                                                             | count                           |
 | `local_count_shifted`       | As above, restricted local                                                                             | count                           |
-| `local_max_abs_deltascore`  | Max abs $\Delta$score within local radius                                                              | dimensionless                   |
+| `local_max_abs_deltascore`  | Max abs $\Delta$ score within local radius                                                              | dimensionless                   |
 | `nearest_event_bp_local`    | Nearest event within local radius                                                                      | bp                              |
 | `frac_effect_in_radius`     | $\dfrac{\sum \lvert\Delta\rvert_{radius}}{\sum \lvert\Delta\rvert_{global}}$                           | 0-1                             |
 | `top_event_type`            | Event class of highest-priority cluster (`gained/lost/shifted/strengthened/weakened/none`)             | enum                            |
@@ -92,7 +92,7 @@ Each row represents a single SNV comparison (`pkey = GENE-mutation`). Global vie
 **Interpretation**
 - Local impact: `local_max_abs_deltascore` and local gained/lost counts.
 - Distant cryptic promotion: `global_count_gained_high > 0` with large `nearest_event_bp_any`.
-- Clean negatives: `n_clusters=0` or `global_max_abs_deltascore$\approx$0` and `frac_effect_in_radius$\approx$0`.
+- Clean negatives: `n_clusters=0` or `global_max_abs_deltascore` $\approx$ 0 and `frac_effect_in_radius` $\approx$ 0.
 
 ---
 
@@ -125,8 +125,8 @@ Each row represents a donor/acceptor **cluster** (merged nearby sites) and compa
 **Event taxonomy**
 - `gained`: WT absent, MUT visible ($\geq$ visibility threshold).
 - `lost`: MUT absent, WT visible.
-- `shifted`: both visible and `|dpos| $\geq$ --shift-bp`.
-- `strengthened / weakened`: same/near position with `|dscore| $\geq$ 1.0`.
+- `shifted`: both visible and $\lvert \text{dpos} \rvert \geq \text{--shift-bp}$.
+- `strengthened / weakened`: same/near position with $\lvert \text{dscore} \rvert \geq 1.0$.
 - `none`: otherwise.
 
 ---
@@ -143,7 +143,7 @@ Per-allele per-site audit rows used to build clusters and events.
 | `score`           | GeneSplicer score                                              | dimensionless                   |
 | `confidence`      | Confidence weight (`low/med/high` -> `0.5/0.75/1.0`)           | numeric                         |
 | `rank`            | Rank within allelextype (1=strongest)                          | integer                         |
-| `distance_to_snv` | $\lvert \text{site_pos} - \text{snv_pos} \rvert$               | bp                              |
+| `distance_to_snv` | $\lvert \text{site}_{pos} - \text{snv}_{pos} \rvert$               | bp                              |
 | `visible_flag`    | 1 if $\text{score} \geq \text{--visibility-threshold}$ else 0 | 0/1                             |
 | `cluster_id`      | Cluster tag that links to `events`                             | string                          |
 | `in_radius`       | Inside local triage radius                                     | 0/1                             |
@@ -312,7 +312,7 @@ Site is **visible** if $\text{score} \ge V$. Cluster class depends on visibility
 ## Sites Table fields
 
 ### distance_to_snv
-- **Definition**: $\text{distance} = \lvert \text{site_pos} - \text{snv_pos} \rvert$
+- **Definition**: $\text{distance} = \lvert \text{site}_{pos} - \text{snv}_{pos} \rvert$
 - **Interpretation**: feeds distance kernel $w = e^{- d / k}$ used by weighted metrics and `priority` (Tobler, 1970; Cressie, 1993).
 
 ### visible_flag

@@ -145,7 +145,7 @@ Each row represents a single RBP binding comparison for one mutation.
 | **mut_interface_contacts** | Number of cross-chain contacts $< 8 Å$ (MUT). | count |
 | **delta_interface_contacts** | Change in interface contacts. | count |
 | **cls** | Event classification: `gained`, `lost`, `strengthened`, `weakened`, `unchanged`, `no_binding`. | enum |
-| **priority** | Ranking score: $\lvert\Delta_{\text{PAE}}\rvert \cdot \frac{1}{1+d/k}$. | numeric |
+| **priority** | Ranking score: $\lvert\Delta_{\text{PAE}}\rvert \cdot \frac{1}{1+d/k}$ | numeric |
 | **n_samples_wt** | Number of AF3 samples parsed for WT (ensemble mode). | count |
 | **n_samples_mut** | Number of AF3 samples parsed for MUT (ensemble mode). | count |
 | **std_pae_wt** | Standard deviation of chain-pair PAE across WT samples. | Å |

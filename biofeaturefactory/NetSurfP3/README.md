@@ -319,7 +319,7 @@ python netsurfp3_pipeline.py \
 # 4. Analyze outputs (example for BRCA1)
 # results/BRCA1/NetSurfP3/BRCA1.netsurfp3.summary.tsv   - Per-mutation structural summary
 # results/BRCA1/NetSurfP3/BRCA1.netsurfp3.residues.tsv  - Per-residue predictions
-# results/BRCA1/NetSurfP3/BRCA1.netsurfp3.local.tsv     - Local context changes ($\pm$5 residues)
+# results/BRCA1/NetSurfP3/BRCA1.netsurfp3.local.tsv     - Local context changes (±5 residues)
 
 # 5. Filter for significant structural changes
 # Look for:

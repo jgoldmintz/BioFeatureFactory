@@ -130,7 +130,7 @@ Output is written per gene to:
 | **conf_weighted_delta** | Confidence-weighted $\Delta_{score}$ ($C_{mut}S_{mut} - C_{wt}S_{wt}$). | dimensionless |
 | **cls** | Event class: `gained`, `lost`, `shifted`, `strengthened`, `weakened`, `none`. | enum |
 | **is_high_impact** | Binary flag: 1 if event exceeds high-impact threshold. | 0/1 |
-| **priority** | Weighted $\Delta_{score}$ with distance decay: $\lvert\Delta\rvert e^{-d/k} + bonus_{class}$. | numeric |
+| **priority** | Weighted $\Delta_{score}$ with distance decay: $\lvert\Delta\rvert e^{-d/k} + b_{class}$. | numeric |
 | **in_radius** | Indicates whether event lies within local analysis radius ($d \leq r$). | 0/1 |
 
 ---
@@ -159,7 +159,7 @@ Output is written per gene to:
 
 ## Key Quantitative Features
 
-### $\Delta$score (Mutational Effect Size)
+### $\Delta$ score (Mutational Effect Size)
 
 $ \Delta_{score} = S_{mut} - S_{wt} $
 
@@ -169,7 +169,7 @@ This direct differential scoring mirrors approaches in miRNASNP and related vari
 
 ---
 
-### Weighted $\Delta$score (Distance-Scaled Perturbation)
+### Weighted $\Delta$ score (Distance-Scaled Perturbation)
 
 $ \text{Weighted } \Delta = |\Delta_{score}| \cdot e^{-d / k} $
 
@@ -209,7 +209,7 @@ Inspired by splicing impact prioritization in SpliceAI (Jaganathan *et al.*, 201
 
 ### Global Max Absolute Delta
 
-$ \text{global_max_abs_delta_score} = \max_{i \in [1, N]} \left\lvert \Delta_i \right\rvert $
+$ \text{global max abs delta score} = \max_{i \in [1, N]} \left\lvert \Delta_i \right\rvert $
 
 Single largest per-event perturbation magnitude across all miRNA-binding loci for the variant.  
 Highlights the strongest site-level change regardless of distance; use alongside distance or radius filters to distinguish local versus distal spikes (Bartel, 2009; Wang *et al.*, 2019).
@@ -218,7 +218,7 @@ Highlights the strongest site-level change regardless of distance; use alongside
 
 ### Global Sum Weighted Absolute Delta
 
-$ \text{global_sum_weighted_abs_delta} = \sum_{i=1}^{N} \left\lvert \Delta_i \right\rvert \, e^{-d_i/k} $
+$ \text{global sum weighted abs delta} = \sum_{i=1}^{N} \left\lvert \Delta_i \right\rvert \, e^{-d_i/k} $
 
 Total perturbation mass, down-weighted by site-SNV distance ($d_i$) with exponential decay constant $k$ (`--distance-k`).  
 Emphasizes nearby effects consistent with stronger functional consequences of proximal/seed-adjacent disruptions (Bartel, 2009; Halpern *et al.*, 2015; Kertesz *et al.*, 2007).  

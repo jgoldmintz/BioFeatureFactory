@@ -183,9 +183,9 @@ If `--alleles` is not specified, the pipeline defaults to `HLA-A0201` (NetMHC 4.
 |---------------|---------|-------------------|
 | **Gained** | New strong binder in mutant (WT was non-binder) | Potential neoantigen - may trigger immune response |
 | **Lost** | Strong binder in WT becomes non-binder in mutant | Immune escape - tumor may evade detection |
-| **Strengthened** | Both bind, but mutant binds stronger ($\Delta$rank $> 5\%$) | Enhanced immunogenicity |
-| **Weakened** | Both bind, but mutant binds weaker ($\Delta$rank $> 5\%$) | Reduced immunogenicity |
-| **Stable** | Both bind with minimal change ($\Delta$rank $\leq 5\%$) | No significant immune impact |
+| **Strengthened** | Both bind, but mutant binds stronger ($\Delta$ rank $> 5\%$) | Enhanced immunogenicity |
+| **Weakened** | Both bind, but mutant binds weaker ($\Delta$ rank $> 5\%$) | Reduced immunogenicity |
+| **Stable** | Both bind with minimal change ($\Delta$ rank $\leq 5\%$) | No significant immune impact |
 
 ### Binding Thresholds
 
