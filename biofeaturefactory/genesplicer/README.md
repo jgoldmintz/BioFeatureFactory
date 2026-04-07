@@ -84,7 +84,7 @@ Each row represents a single SNV comparison (`pkey = GENE-mutation`). Global vie
 | `nearest_event_bp_local`    | Nearest event within local radius                                                                      | bp                              |
 | `frac_effect_in_radius`     | $\dfrac{\sum \lvert\Delta\rvert_{radius}}{\sum \lvert\Delta\rvert_{global}}$                           | 0-1                             |
 | `top_event_type`            | Event class of highest-priority cluster (`gained/lost/shifted/strengthened/weakened/none`)             | enum                            |
-| `top_event_deltascore`      | $\Delta$score of the highest-priority event                                                            | dimensionless                   |
+| `top_event_deltascore`      | $\Delta$ score of the highest-priority event                                                            | dimensionless                   |
 | `top_event_pos`             | Representative position of top event (MUT if present else WT)                                          | bp (absolute) or index (window) |
 | `dominant_boundary`         | Boundary with largest $\sum \lvert\Delta\rvert$ (`donor` or `acceptor`)                                | enum                            |
 | `qc_flags`                  | Semicolon-separated flags: `no_sites; far_event>2kb; low_signal_only`                                  | --                               |

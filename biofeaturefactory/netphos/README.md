@@ -7,7 +7,7 @@
   | Component | Notes |
   |-----------|-------|
   | NetPhos 3.1 + APE | Download from [DTU Health Tech](https://services.healthtech.dtu.dk/services/NetPhos-3.1/) (academic license). Requires `tcsh`. Set path via `--native-ape-path` or `NETPHOS_APE_PATH`/`NETPHOS_HOME` env var. |
-  | Python $\geq$3.9 | With dependencies in `../utils/`. |
+  | Python $\geq$ 3.9 | With dependencies in `../utils/`. |
   | Mutation mapping CSVs | `{GENE}`-specific CSVs used for pkey generation (`mutations/combined/aa/` style). |
   | FASTA inputs | WT and/or mutant AA FASTAs, one gene per file. Extensions: `.fasta`, `.fa`, `.fas`, `.fna`. |
 
@@ -83,7 +83,7 @@
   | `max_abs_delta`, `sum_abs_delta` | Maximum and sum of absolute score changes | probability (0-1) |
   | `n_kinases_affected` | Number of kinases with any event | count |
   | `top_event_type` | Dominant event (`gained`, `lost`, etc.) | categorical |
-  | `top_event_delta` | $\Delta$score for dominant event | probability (0-1) |
+  | `top_event_delta` | $\Delta$ score for dominant event | probability (0-1) |
   | `top_event_position` | Amino-acid index of dominant event | residue index |
   | `top_event_kinase` | Kinase for dominant event | string |
   | `top_event_classification_code` | Numeric encoding of dominant event | integer |
@@ -101,7 +101,7 @@
   | `amino_acid_wt`, `amino_acid_mut` | WT and MUT residues | single-letter |
   | `kinase` | Kinase motif classifier | string |
   | `wt_score`, `mut_score` | NetPhos phosphorylation propensity | probability (0-1) |
-  | `delta` | $\Delta$score ($\text{MUT} - \text{WT}$) | probability (0-1) |
+  | `delta` | $\Delta$ score ($\text{MUT} - \text{WT}$) | probability (0-1) |
   | `wt_answer`, `mut_answer` | NetPhos YES/NO flag | categorical |
   | `classification` | gained/lost/strengthened/weakened/stable/subthreshold | categorical |
   | `classification_code` | Numeric encoding (gained=2, lost=-2, strengthened=1, weakened=-1, stable=0, subthreshold=-3) | integer |

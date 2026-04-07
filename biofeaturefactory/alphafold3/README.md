@@ -12,7 +12,7 @@ AlphaFold3 (Abramson *et al.*, 2024) provides the structural prediction engine; 
 
 ## Capabilities
 
-- **Unified WT$\leftrightarrow$MUT execution** -- WT predictions cached and reused across mutations in the same gene.
+- **Unified WT $\leftrightarrow$ MUT execution** -- WT predictions cached and reused across mutations in the same gene.
 - **RBP discovery** -- Automatic query of POSTAR3/ENCODE eCLIP binding sites within configurable window (±50 bp).
 - **Multi-mode execution** -- Local GPU, SLURM batch, or GCP cloud submission.
 - **$\Delta$-based comparison** -- Per-RBP delta metrics quantify mutation-driven perturbation.
@@ -175,7 +175,7 @@ Each row represents a single interface residue (RNA or protein) within the AF3 p
 
 ## Key Quantitative Features
 
-### $\Delta$chain_pair_pae_min (Primary Binding Proxy)
+### $\Delta$ chain_pair_pae_min (Primary Binding Proxy)
 
 $$\Delta_{PAE} = PAE_{mut} - PAE_{wt}$$
 
@@ -420,7 +420,7 @@ alphafold3/
     |-- af3_runner.py           # AF3 execution (local/batch/cloud)
     |-- af3_parser.py           # Parse mmCIF + JSON outputs
     |-- rbp_database.py         # POSTAR3 tabix query interface
-    |-- rbp_sequence_mapper.py  # RBP name $\rightarrow$ UniProt $\rightarrow$ sequence
+    |-- rbp_sequence_mapper.py  # RBP name -> UniProt -> sequence
     `-- binding_metrics.py      # Delta computation and classification
 ```
 

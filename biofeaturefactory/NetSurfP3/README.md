@@ -89,7 +89,7 @@ Output is written per gene to:
     NetSurfP3/
       {GENE}.netsurfp3.summary.tsv   -- per-mutation structural summary
       {GENE}.netsurfp3.residues.tsv  -- per-residue predictions
-      {GENE}.netsurfp3.local.tsv     -- local context changes ($\pm$5 residues)
+      {GENE}.netsurfp3.local.tsv     -- local context changes (±5 residues)
 ```
 
 ### 4.1 Summary TSV (`{GENE}.netsurfp3.summary.tsv`)
@@ -130,7 +130,7 @@ Raw predictions for all residues:
 
 ### 4.3 Local Changes TSV (`{GENE}.netsurfp3.local.tsv`)
 
-Changes in the $\pm$5 residue window around each mutation (14 columns):
+Changes in the ±5 residue window around each mutation (14 columns):
 
 | Column | Description | Units |
 |--------|-------------|-------|

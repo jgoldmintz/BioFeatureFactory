@@ -339,7 +339,7 @@ NEUTRAL     -- |contrib| <= threshold  OR  std == 0  OR  contrib is NaN
 - **DISCORDANT**: couplings oppose the site-specific preference; the two scores disagree on direction; inspect $N_{eff}$ before interpreting
 - **NEUTRAL**: the epistatic contribution is within the noise floor; the epistatic score adds no reliable information beyond the independent score
 
-In low-$N_{eff}$ models, nearly all positions will be CONCORDANT or NEUTRAL because regularisation drives $J_{ij} \approx 0$. DISCORDANT cases become meaningful only at high $N_{eff}$.
+In low $N_{eff}$ models, nearly all positions will be CONCORDANT or NEUTRAL because regularisation drives $J_{ij} \approx 0$. DISCORDANT cases become meaningful only at high $N_{eff}$.
 
 ### `codon_frequency`
 
