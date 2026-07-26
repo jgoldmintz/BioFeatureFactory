@@ -25,13 +25,31 @@ evmutation = ["numba>=0.53"]
 rare-codon = ["networkx>=2.6", "prody>=2.0"]
 # adabmDCA pulls in torch, matplotlib, pandas>=2.2, tqdm, wandb, biopython, seaborn
 # transitively (see adabmDCApy setup.py). Requires Python >= 3.10.
-adabmdca = ["adabmDCA>=0.7.5"]
+# torch listed explicitly because adabmdca_pipeline.py imports it directly.
+adabmdca = ["adabmDCA>=0.7.5", "torch>=2.0.0"]
+# NetSurfP3 wrapper deps. torch is a DIRECT import in netsurfp3_pipeline.py; the
+# other five are nsp3's own runtime deps (also pulled by `pip install -e nsp3/nsp3`),
+# listed here so `pip install .[all]` / `.[netsurfp3]` is self-sufficient.
+netsurfp3 = [
+    "torch>=2.0.0",
+    "optuna>=4.8.0",
+    "matplotlib>=3.10.8",
+    "fair-esm>=2.0.0",
+    "h5py>=3.16.0",
+    "click>=8.3.1",
+]
 all = [
     "ViennaRNA",
     "numba>=0.53",
     "networkx>=2.6",
     "prody>=2.0",
     "adabmDCA>=0.7.5",
+    "torch>=2.0.0",
+    "optuna>=4.8.0",
+    "matplotlib>=3.10.8",
+    "fair-esm>=2.0.0",
+    "h5py>=3.16.0",
+    "click>=8.3.1",
 ]
 dev = ["pytest>=7.0", "pytest-cov>=4.0"]
 
