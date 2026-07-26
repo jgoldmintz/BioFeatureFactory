@@ -69,6 +69,7 @@ CLONE_AF3=1
 DOWNLOAD_UNIREF90=1
 DOWNLOAD_IDMAPPING=1
 RUN_BUILD_DB=1
+INSTALL_EDITABLE_REPOS=1
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)"
 
 # apply_plmc_patch <patch_file> <human_label>
@@ -133,6 +134,7 @@ case "$SUBCOMMAND" in
   db-only)
     PIP_INSTALL=0
     INSTALL_BUILD_TOOLS=0
+    INSTALL_EDITABLE_REPOS=0
     CLONE_EVMUTATION=0; BUILD_PLMC=0; CLONE_ADABMDCA=0; DOWNLOAD_CG_COTRANS=0
     CLONE_NETSURFP3=0; INSTALL_SIGNALP=0; INSTALL_MIRANDA=0
     BUILD_GENESPLICER=0; INSTALL_NEXTFLOW=0; CLONE_AF3=0
@@ -372,30 +374,10 @@ if [[ "$CLONE_ADABMDCA" -eq 1 ]]; then
   (
     cd "$BFF_DIR/mutation_effects"
     git clone https://github.com/spqb/adabmDCApy.git
-    cd adabmDCApy
-    if [[ "$PIP_INSTALL" -eq 1 ]]; then
-      echo "  PIP install adabmDCApy"
-      pip install .
-    fi
   )
-
-  # Post-install version verification (warn-only).
-  installed_ver="$(python -m pip show adabmDCA 2>/dev/null | awk -F': ' '/^Version:/ {print $2}')"
-  if [[ -n "$installed_ver" ]]; then
-    if version_at_least "$installed_ver" "$ADABMDCA_MIN"; then
-      echo "  OK adabmDCA $installed_ver (>= $ADABMDCA_MIN)"
-    else
-      echo "  WARN installed adabmDCA $installed_ver is below floor ($ADABMDCA_MIN)"
-    fi
-  else
-    echo "  WARN adabmDCA package not detected via pip show — install may have failed"
-  fi
-
-  if command -v adabmDCA >/dev/null 2>&1; then
-    echo "  OK adabmDCA CLI on PATH: $(command -v adabmDCA)"
-  else
-    echo "  WARN adabmDCA CLI not on PATH after install (env activation issue?)"
-  fi
+  # Editable install (pip install -e) + adabmDCA version verification are handled
+  # centrally in step [8b], so that env-only (which does not clone here) and
+  # git-only (which does not run the core pip install) both install it.
 fi
 
 if [[ "$DOWNLOAD_CG_COTRANS" -eq 1 ]]; then
@@ -411,10 +393,7 @@ fi
 echo "[4/12] NetSurfP3 module dependency..."
 if [[ "$CLONE_NETSURFP3" -eq 1 ]]; then
   clone_or_update "https://github.com/Eryk96/NetSurfP-3.0.git" "$BFF_DIR/NetSurfP3/nsp3"
-  if [[ "$PIP_INSTALL" -eq 1 ]] && [[ -f "$BFF_DIR/NetSurfP3/nsp3/nsp3/setup.py" ]]; then
-    echo "  PIP install nsp3 package (editable)"
-    python -m pip install -e "$BFF_DIR/NetSurfP3/nsp3/nsp3"
-  fi
+  # Editable install (pip install -e nsp3/nsp3) is handled centrally in step [8b].
 fi
 
 # ── Step 5: SignalP 6.0 ─────────────────────────────────────────────────
@@ -678,6 +657,63 @@ fi
 echo "[8/12] AlphaFold3 upstream (optional clone)..."
 if [[ "$CLONE_AF3" -eq 1 ]]; then
   clone_or_update "https://github.com/google-deepmind/alphafold3.git" "$BFF_DIR/alphafold3/alphafold3"
+fi
+
+# ── Step 8b: Editable installs of python-based cloned repos ─────────────
+# Runs in full / env-only / git-only (not db-only). Decoupled from the core
+# `pip install -e .[all]` (PIP_INSTALL) and from the per-repo CLONE_* flags so:
+#   - env-only installs whatever python repos are already cloned, and warns for
+#     any repo that is absent (nothing was cloned this run);
+#   - git-only installs the repos it just cloned, and warns if the core BFF env
+#     was never set up.
+# EVmutation is intentionally NOT here: it ships no setup.py/pyproject and is
+# imported via sys.path from its clone, so it cannot be `pip install -e`'d.
+echo "[8b/12] Editable installs of python-based cloned repos..."
+if [[ "$INSTALL_EDITABLE_REPOS" -eq 1 ]]; then
+  # Each entry: label|relpath-under-BFF_DIR|install-subdir-suffix|setup-marker
+  EDITABLE_REPOS=(
+    "nsp3|NetSurfP3/nsp3|/nsp3|setup.py"
+    "adabmDCApy|mutation_effects/adabmDCApy||pyproject.toml"
+  )
+
+  # git-only (or any mode that skipped the core pip install): the BFF package and
+  # its dependencies may be missing. Warn but still attempt the editable installs.
+  if [[ "$PIP_INSTALL" -eq 0 ]] && ! python -c "import biofeaturefactory" >/dev/null 2>&1; then
+    echo "  WARN BioFeatureFactory core env not detected ('import biofeaturefactory' failed)."
+    echo "       Run './bootstrap.sh env-only' or the full bootstrap to install python dependencies."
+  fi
+
+  for entry in "${EDITABLE_REPOS[@]}"; do
+    IFS='|' read -r er_label er_rel er_suffix er_marker <<< "$entry"
+    er_repo_dir="$BFF_DIR/$er_rel"
+    er_install_dir="$er_repo_dir$er_suffix"
+    if [[ -d "$er_repo_dir" && -f "$er_install_dir/$er_marker" ]]; then
+      echo "  PIP install -e $er_label ($er_install_dir)"
+      python -m pip install -e "$er_install_dir"
+    else
+      echo "  WARN $er_label repo not present at $er_repo_dir"
+      echo "       Run the full bootstrap, or './bootstrap.sh git-only', to install the proper repos."
+    fi
+  done
+
+  # adabmDCA version + CLI verification (warn-only), after the editable install above.
+  if [[ "$CLONE_ADABMDCA" -eq 1 || -d "$BFF_DIR/mutation_effects/adabmDCApy" ]]; then
+    installed_ver="$(python -m pip show adabmDCA 2>/dev/null | awk -F': ' '/^Version:/ {print $2}')"
+    if [[ -n "$installed_ver" ]]; then
+      if version_at_least "$installed_ver" "$ADABMDCA_MIN"; then
+        echo "  OK adabmDCA $installed_ver (>= $ADABMDCA_MIN)"
+      else
+        echo "  WARN installed adabmDCA $installed_ver is below floor ($ADABMDCA_MIN)"
+      fi
+    else
+      echo "  WARN adabmDCA package not detected via pip show — install may have failed"
+    fi
+    if command -v adabmDCA >/dev/null 2>&1; then
+      echo "  OK adabmDCA CLI on PATH: $(command -v adabmDCA)"
+    else
+      echo "  WARN adabmDCA CLI not on PATH after install (env activation issue?)"
+    fi
+  fi
 fi
 
 # ── Step 9: FTP datasets ────────────────────────────────────────────────
