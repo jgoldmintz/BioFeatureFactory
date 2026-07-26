@@ -567,9 +567,13 @@ def map_orf_mutations_to_transcript_and_genome(orf_mutations: list[str], tx_map:
         gdna_pos = gpos - tx_map["tx_start"] + 1
         gdna_rows.append((mut, f"{g_wt}{gdna_pos}{g_alt}"))
 
-        # Amino-acid mapping via shared helper (handles validation/warnings)
+        # Amino-acid mapping via shared helper (handles validation/warnings).
+        # get_mutant_aa expects a 1-based position (it subtracts 1 internally),
+        # so feed get_mutation_data_bioAccurate (1-based), matching the correct
+        # sibling path in utility.infer_aamutation_from_nt. Using the 0-based
+        # get_mutation_data here double-subtracted and shifted every AA call.
         try:
-            nt_mut = get_mutation_data(mut)
+            nt_mut = get_mutation_data_bioAccurate(mut)
             aa_info = get_mutant_aa(nt_mut, orf_seq, aaseq=None, index=0)
             if aa_info:
                 (aa_pos, (wt_aa, mut_aa)), _ = aa_info

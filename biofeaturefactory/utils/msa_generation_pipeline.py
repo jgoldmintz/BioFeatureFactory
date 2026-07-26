@@ -34,7 +34,7 @@ import numpy as np
 from Bio import SeqIO
 from Bio.Seq import Seq
 
-from utility import (
+from biofeaturefactory.utils.utility import (
     prepare_protein_query, extract_gene_from_filename,
     run_jackhmmer, parse_stockholm, stockholm_to_a2m,
     filter_msa_by_gaps, compute_sequence_weights, compute_neff,

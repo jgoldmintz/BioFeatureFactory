@@ -133,7 +133,12 @@ class AF3Job:
 
 @dataclass
 class AF3RunnerConfig:
-    """Configuration for structure prediction runner."""
+    """Configuration for structure prediction runner.
+
+    LOCAL/Docker is the only execution mode wired through this runner. SLURM
+    and cloud bursts are handled by biofeaturefactory.alphafold3.burst, which
+    has its own argparse for cluster-specific options.
+    """
     output_base_dir: str = "./af3_outputs"
     execution_mode: ExecutionMode = ExecutionMode.LOCAL
 
@@ -143,19 +148,8 @@ class AF3RunnerConfig:
     docker_image: str = "alphafold3"
     docker_gpu_flag: str = "--gpus all"
 
-    # Batch/SLURM config
-    slurm_partition: str = "gpu"
-    slurm_time: str = "4:00:00"
-    slurm_gpus: int = 1
-    slurm_mem: str = "64G"
-
     # Parallelism
     max_gpus: Optional[int] = None  # None = auto-detect
-
-    # Cloud/GCP config
-    gcp_project: Optional[str] = None
-    gcp_region: str = "us-central1"
-    gcp_machine_type: str = "a2-highgpu-1g"
 
 
 class AF3Runner:
@@ -284,9 +278,18 @@ class AF3Runner:
         if self.config.execution_mode == ExecutionMode.LOCAL:
             self._run_local(job)
         elif self.config.execution_mode == ExecutionMode.BATCH:
-            self._generate_slurm_script(job)
+            raise RuntimeError(
+                "ExecutionMode.BATCH is no longer supported in af3_runner. "
+                "The prior stub generated a broken script and never ingested "
+                "results. Use the burst driver instead: "
+                "`python -m biofeaturefactory.alphafold3.burst submit ...`"
+            )
         elif self.config.execution_mode == ExecutionMode.CLOUD:
-            self._generate_cloud_config(job)
+            raise RuntimeError(
+                "ExecutionMode.CLOUD is not implemented; the prior stub "
+                "never ingested results. A cloud-burst driver (AWS Batch / "
+                "GCP Batch) is out of scope."
+            )
 
         self._job_cache[job_id] = job
         return job
@@ -340,16 +343,21 @@ class AF3Runner:
 
         if self.config.execution_mode == ExecutionMode.LOCAL:
             return self._executor.submit(self._run_local_with_gpu, job)
+        elif self.config.execution_mode == ExecutionMode.BATCH:
+            raise RuntimeError(
+                "ExecutionMode.BATCH is no longer supported in af3_runner. "
+                "The prior stub generated a broken script and never ingested "
+                "results. Use the burst driver instead: "
+                "`python -m biofeaturefactory.alphafold3.burst submit ...`"
+            )
+        elif self.config.execution_mode == ExecutionMode.CLOUD:
+            raise RuntimeError(
+                "ExecutionMode.CLOUD is not implemented; the prior stub "
+                "never ingested results. A cloud-burst driver (AWS Batch / "
+                "GCP Batch) is out of scope."
+            )
         else:
-            # Batch/cloud: generate scripts synchronously, return resolved future
-            if self.config.execution_mode == ExecutionMode.BATCH:
-                self._generate_slurm_script(job)
-            elif self.config.execution_mode == ExecutionMode.CLOUD:
-                self._generate_cloud_config(job)
-            self._job_cache[job_id] = job
-            f = Future()
-            f.set_result(job)
-            return f
+            raise ValueError(f"Unknown execution mode: {self.config.execution_mode}")
 
     def _run_local_with_gpu(self, job: AF3Job) -> AF3Job:
         """Acquire a GPU, run Docker pinned to it, release. Called from thread pool."""
@@ -486,94 +494,11 @@ class AF3Runner:
             job.status = "failed"
             print("Docker not found. Install Docker to run AF3.", file=sys.stderr)
 
-    def _generate_slurm_script(self, job: AF3Job):
-        """Generate SLURM submission script for batch execution."""
-        script_path = job.output_dir / "submit.slurm"
-
-        script_content = f"""#!/bin/bash
-#SBATCH --job-name=af3_{job.job_id}
-#SBATCH --partition={self.config.slurm_partition}
-#SBATCH --time={self.config.slurm_time}
-#SBATCH --gpus={self.config.slurm_gpus}
-#SBATCH --mem={self.config.slurm_mem}
-#SBATCH --output={job.output_dir}/slurm_%j.out
-#SBATCH --error={job.output_dir}/slurm_%j.err
-
-# Load required modules (adjust for your cluster)
-# module load cuda/12.0
-# module load alphafold3
-
-cd {job.output_dir}
-
-{self.config.af3_binary} \\
-    --json_path={job.input_json_path} \\
-    --output_dir={job.output_dir}
-"""
-        if self.config.model_dir:
-            script_content = script_content.rstrip() + f" \\\n    --model_dir={self.config.model_dir}\n"
-
-        with open(script_path, 'w') as f:
-            f.write(script_content)
-
-        job.status = "script_generated"
-        print(f"SLURM script written to: {script_path}", file=sys.stderr)
-        print(f"Submit with: sbatch {script_path}", file=sys.stderr)
-
-    def _generate_cloud_config(self, job: AF3Job):
-        """Generate GCP Batch configuration."""
-        config_path = job.output_dir / "gcp_batch.json"
-
-        gcp_config = {
-            "taskGroups": [{
-                "taskSpec": {
-                    "runnables": [{
-                        "container": {
-                            "imageUri": "gcr.io/deepmind-alphafold/alphafold3:latest",
-                            "commands": [
-                                f"--json_path=/input/{job.input_json_path.name}",
-                                f"--output_dir=/output"
-                            ]
-                        }
-                    }],
-                    "computeResource": {
-                        "cpuMilli": 8000,
-                        "memoryMib": 65536
-                    },
-                    "volumes": [{
-                        "gcs": {"remotePath": f"gs://{self.config.gcp_project}/af3_jobs/{job.job_id}/input"},
-                        "mountPath": "/input"
-                    }, {
-                        "gcs": {"remotePath": f"gs://{self.config.gcp_project}/af3_jobs/{job.job_id}/output"},
-                        "mountPath": "/output"
-                    }]
-                },
-                "taskCount": 1
-            }],
-            "allocationPolicy": {
-                "instances": [{
-                    "policy": {
-                        "machineType": self.config.gcp_machine_type,
-                        "accelerators": [{
-                            "type": "nvidia-tesla-a100",
-                            "count": 1
-                        }]
-                    }
-                }],
-                "location": {
-                    "allowedLocations": [f"regions/{self.config.gcp_region}"]
-                }
-            },
-            "logsPolicy": {
-                "destination": "CLOUD_LOGGING"
-            }
-        }
-
-        with open(config_path, 'w') as f:
-            json.dump(gcp_config, f, indent=2)
-
-        job.status = "config_generated"
-        print(f"GCP Batch config written to: {config_path}", file=sys.stderr)
-        print(f"Upload input and submit with: gcloud batch jobs submit {job.job_id} --config={config_path}", file=sys.stderr)
+    # SLURM/BATCH and GCP/CLOUD script generators were removed; both produced
+    # broken artifacts and had no result-ingestion path. SLURM is now handled
+    # by biofeaturefactory.alphafold3.burst (separate submit + ingest driver
+    # with a manifest-driven SLURM array). Cloud-burst (AWS Batch / GCP Batch)
+    # is out of scope.
 
     def shutdown(self):
         """Shut down the thread pool. Call after all jobs complete."""

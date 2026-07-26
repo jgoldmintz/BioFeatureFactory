@@ -17,3 +17,4 @@ work/
 # Credentials
 config.json
 *.env
+.gitnexus

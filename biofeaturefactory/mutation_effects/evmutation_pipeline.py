@@ -130,7 +130,13 @@ CODON_FIELDNAMES = [
 def run_plmc(fasta, focus, model_params, plmc_binary, ec_file=None,
              eij_lambda=16.2, hi_lambda=0.01, iterations=500, stepsize=0.2,
              alphabet="-ACDEFGHIKLMNPQRSTVWY", quiet=False):
-    """Run plmc to generate model parameters."""
+    """Run plmc to generate model parameters.
+
+    -g (--gapignore) excludes the gap (first alphabet symbol) from the model:
+    the standard EVmutation/plmc residue-level workflow. Applied to BOTH the AA
+    and codon Potts models (both are residue-level alphabets where a symbol is
+    an amino acid / a codon); it is NOT the nucleotide workflow.
+    """
     if not os.path.exists(plmc_binary):
         raise RuntimeError(f"PLMC binary not found at: {plmc_binary}")
 
@@ -151,6 +157,8 @@ def run_plmc(fasta, focus, model_params, plmc_binary, ec_file=None,
         "-lh", str(hi_lambda),
         "-m", str(iterations),
         "-t", str(stepsize),
+        # -g/--gapignore excludes the gap (first alphabet symbol) from the
+        # model; no-argument flag, so fasta stays plmc's positional last arg.
         "-g", fasta,
     ]
     proc = subprocess.Popen(cmd, stdin=subprocess.PIPE,
@@ -172,10 +180,11 @@ def run_plmc(fasta, focus, model_params, plmc_binary, ec_file=None,
 def compute_position_features(model):
     """Compute per-position conservation and entropy from model frequencies."""
     features = {}
-    gap_index = model.alphabet_map.get("-", model.alphabet_map.get(".", 0))
+    gap_index = model.alphabet_map.get("-", model.alphabet_map.get("."))
     for i, pos in enumerate(model.index_list):
         freqs = model.f_i[i].copy()
-        freqs[gap_index] = 0
+        if gap_index is not None:
+            freqs[gap_index] = 0
         conservation = float(np.max(freqs))
         total = freqs.sum()
         if total > 0:
@@ -329,14 +338,22 @@ def aa_symbol(aa):
 
 
 
-def score_nt_mutations(nt_mutations, gene, orf_seq, aa_lookup, failure_map=None, codon_lookup=None):
+def score_nt_mutations(nt_mutations, gene, orf_seq, aa_lookup, failure_map=None,
+                       codon_lookup=None, skip_codon=False):
     """
     Map and score NT mutations.
 
     Returns:
         tuple: (protein_rows, codon_rows)
           protein_rows  missense, stop, unknown, invalid
-          codon_rows    synonymous
+                        (also synonymous + stop when skip_codon=True)
+          codon_rows    synonymous (empty when skip_codon=True)
+
+    When skip_codon=True:
+      synonymous variants land in the protein TSV with all scores set to 0
+        (h_i(M) - h_i(M) = 0 by construction; flagged SYNONYMOUS_PROTEIN_LEVEL).
+      stop_gain / stop_loss land in the protein TSV with empty scores
+        (model lacks '*' symbol).
     """
     failure_map = failure_map or {}
     nt_re = re.compile(r"^([ACGT])(\d+)([ACGT])$")
@@ -394,34 +411,57 @@ def score_nt_mutations(nt_mutations, gene, orf_seq, aa_lookup, failure_map=None,
         }
 
         if mclass == "SYNONYMOUS":
-            crow = {f: "" for f in CODON_FIELDNAMES}
-            crow.update({"pkey": pkey, "nt_mutant": nt_mut})
-            crow.update(shared)
-            if codon_lookup is not None:
-                scored = codon_lookup.get((aa_pos, mut_codon))
-                if scored is None:
-                    qc_flags.append("SYNONYMOUS_NOT_IN_CODON_MODEL")
-                else:
-                    crow.update({
-                        "prediction_codon_epistatic":   scored["prediction_codon_epistatic"],
-                        "prediction_codon_independent": scored["prediction_codon_independent"],
-                        "codon_epistatic_contribution": scored["codon_epistatic_contribution"],
-                        "codon_epistatic_concordance":  scored["codon_epistatic_concordance"],
-                        "codon_frequency":              scored["codon_frequency"],
-                    })
-                    qc_flags.append("SYNONYMOUS_SCORED")
+            if skip_codon:
+                prow = {f: "" for f in PROTEIN_FIELDNAMES}
+                prow.update({"pkey": pkey, "nt_mutant": nt_mut})
+                prow.update(shared)
+                prow["subs"] = aa_symbol(mut_aa)
+                prow.update({
+                    "prediction_epistatic":   0.0,
+                    "prediction_independent": 0.0,
+                    "epistatic_contribution": 0.0,
+                })
+                qc_flags.append("SYNONYMOUS_PROTEIN_LEVEL")
+                prow["qc_flags"] = ";".join(qc_flags) if qc_flags else "SYNONYMOUS_PROTEIN_LEVEL"
+                protein_rows.append(prow)
             else:
-                qc_flags.append("SYNONYMOUS_UNSCORED")
-            crow["qc_flags"] = ";".join(qc_flags)
-            codon_rows.append(crow)
+                crow = {f: "" for f in CODON_FIELDNAMES}
+                crow.update({"pkey": pkey, "nt_mutant": nt_mut})
+                crow.update(shared)
+                if codon_lookup is not None:
+                    scored = codon_lookup.get((aa_pos, mut_codon))
+                    if scored is None:
+                        qc_flags.append("SYNONYMOUS_NOT_IN_CODON_MODEL")
+                    else:
+                        crow.update({
+                            "prediction_codon_epistatic":   scored["prediction_codon_epistatic"],
+                            "prediction_codon_independent": scored["prediction_codon_independent"],
+                            "codon_epistatic_contribution": scored["codon_epistatic_contribution"],
+                            "codon_epistatic_concordance":  scored["codon_epistatic_concordance"],
+                            "codon_frequency":              scored["codon_frequency"],
+                        })
+                        qc_flags.append("SYNONYMOUS_SCORED")
+                else:
+                    qc_flags.append("SYNONYMOUS_UNSCORED")
+                crow["qc_flags"] = ";".join(qc_flags)
+                codon_rows.append(crow)
 
         elif mclass in {"STOP_GAIN", "STOP_LOSS"}:
-            crow = {f: "" for f in CODON_FIELDNAMES}
-            crow.update({"pkey": pkey, "nt_mutant": nt_mut})
-            crow.update(shared)
-            qc_flags.append(mclass)
-            crow["qc_flags"] = ";".join(qc_flags)
-            codon_rows.append(crow)
+            if skip_codon:
+                prow = {f: "" for f in PROTEIN_FIELDNAMES}
+                prow.update({"pkey": pkey, "nt_mutant": nt_mut})
+                prow.update(shared)
+                prow["subs"] = aa_symbol(mut_aa)
+                qc_flags.append(mclass)
+                prow["qc_flags"] = ";".join(qc_flags)
+                protein_rows.append(prow)
+            else:
+                crow = {f: "" for f in CODON_FIELDNAMES}
+                crow.update({"pkey": pkey, "nt_mutant": nt_mut})
+                crow.update(shared)
+                qc_flags.append(mclass)
+                crow["qc_flags"] = ";".join(qc_flags)
+                codon_rows.append(crow)
 
         else:
             prow = {f: "" for f in PROTEIN_FIELDNAMES}
@@ -658,7 +698,8 @@ def _process_gene(gene, fasta_file, mutations_file, model_params_path,
 
     # Codon model
     codon_lookup = None
-    if codon_model_params_path:
+    skip_codon = getattr(args, "skip_codon", False)
+    if codon_model_params_path and not skip_codon:
         if not _CODON_ENCODING_AVAILABLE:
             print("  Warning: codon_encoding module not available; synonymous unscored",
                   file=sys.stderr)
@@ -677,12 +718,14 @@ def _process_gene(gene, fasta_file, mutations_file, model_params_path,
     protein_rows, codon_rows = score_nt_mutations(
         nt_mutations, gene, orf_seq, aa_lookup,
         failure_map=failure_map, codon_lookup=codon_lookup,
+        skip_codon=getattr(args, "skip_codon", False),
     )
 
     gene_dir = Path(output_dir) / gene / "EVmutation"
     gene_dir.mkdir(parents=True, exist_ok=True)
     write_protein_output(protein_rows, str(gene_dir / f"{gene}.protein.tsv"))
-    write_codon_output(codon_rows,   str(gene_dir / f"{gene}.codon.tsv"))
+    if not getattr(args, "skip_codon", False):
+        write_codon_output(codon_rows, str(gene_dir / f"{gene}.codon.tsv"))
 
     n_pass       = sum(1 for r in protein_rows if "PASS" in (r.get("qc_flags") or ""))
     n_syn_scored = sum(1 for r in codon_rows   if "SYNONYMOUS_SCORED" in (r.get("qc_flags") or ""))
@@ -786,6 +829,9 @@ Examples:
                         help="h_i regularisation strength (default: 0.01)")
     parser.add_argument("--skip-plmc", action="store_true",
                         help="Skip plmc inference (encoding still runs for codon MSAs)")
+    parser.add_argument("--skip-codon", action="store_true",
+                        help="Skip codon-level scoring; route synonymous + stop variants to the protein TSV "
+                             "(synonymous score is 0 by construction; stop has no AA-level score)")
     parser.add_argument("--validation-log",
                         help="Validation log from exon_aware_mapping for mutation filtering")
     parser.add_argument("--output", "-o", default=".",

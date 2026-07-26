@@ -14,7 +14,7 @@ AlphaFold3 (Abramson *et al.*, 2024) provides the structural prediction engine; 
 
 - **Unified WT $\leftrightarrow$ MUT execution** -- WT predictions cached and reused across mutations in the same gene.
 - **RBP discovery** -- Automatic query of POSTAR3/ENCODE eCLIP binding sites within configurable window (±50 bp).
-- **Multi-mode execution** -- Local GPU, SLURM batch, or GCP cloud submission.
+- **Multi-mode execution** -- Local GPU/Docker via `alphafold3_pipeline.py`, SLURM burst via `burst.py` (separate submit + ingest driver, manifest-driven SLURM array, cache-based result resume).
 - **$\Delta$-based comparison** -- Per-RBP delta metrics quantify mutation-driven perturbation.
 - **Event classification** -- Gained, lost, strengthened, weakened binding states.
 - **Distance-weighted impact modeling** -- Effects scaled by proximity to SNV using inverse distance weighting (Shepard, 1968).
@@ -74,7 +74,7 @@ One of:
 
 | Argument | Default | Description |
 |----------|---------|-------------|
-| `--execution-mode` | `local` | Execution mode: `local`, `batch`, or `cloud` |
+| `--execution-mode` | `local` | Execution mode: `local` only (for SLURM use `python -m biofeaturefactory.alphafold3.burst submit`) |
 | `--af3-binary` | `alphafold3` | Path to AF3 executable |
 | `--docker-image` | `alphafold3` | Docker image name for AF3 |
 | `--model-dir` | -- | Path to AF3 model weights directory (required for local mode) |
@@ -308,21 +308,37 @@ python alphafold3_pipeline.py \
     --output af3_results/
 ```
 
-### Batch Execution (SLURM)
+### Batch Execution (SLURM burst)
+
+SLURM execution is handled by a dedicated two-phase driver, `burst.py` (separate from `alphafold3_pipeline.py` which is local/Docker only). Submit phase generates input JSONs, dedupes by `AF3Input.get_hash()`, writes a manifest, renders a SLURM array script (faithful to AF3's documented Docker invocation), and `sbatch`'s it. The orchestrator exits while the cluster runs. Ingest phase walks the L1 cache, computes deltas, writes the per-gene 3-tier TSVs.
 
 ```bash
-python alphafold3_pipeline.py \
-    --fasta transcripts/SMN2.fasta \
-    --mutations mutations/SMN2.csv \
-    --chrom chr5 --tx-start 70220768 \
+# Phase 1: submit
+python -m biofeaturefactory.alphafold3.burst submit \
+    --fasta transcripts/ \
+    --chromosome-mapping mappings/ \
+    --vcf vcf_files/ \
     --postar-db RBP_db/human-POSTAR3.sorted.bed.gz \
-    --rbp-mapping human_uniprot_genes.tsv \
-    --rbp-sequences rbp_sequences.fasta \
+    --rbp-mapping rbp_uniprot_ids.txt \
+    --msa-dir msa_files/ \
     --output af3_results/ \
-    --execution-mode batch
+    --model-dir /path/to/af3_weights \
+    --slurm-partition gpu --slurm-time 01:00:00 --slurm-mem 64G \
+    --array-throttle 256
+
+# After SLURM completes (sacct -j $JOB_ID shows COMPLETED/FAILED for all tasks):
+# Phase 2: ingest
+python -m biofeaturefactory.alphafold3.burst ingest \
+    --output af3_results/ \
+    --fasta transcripts/ \
+    --chromosome-mapping mappings/ \
+    --vcf vcf_files/ \
+    --postar-db RBP_db/human-POSTAR3.sorted.bed.gz \
+    --rbp-mapping rbp_uniprot_ids.txt \
+    --msa-dir msa_files/
 ```
 
-Generates SLURM scripts in output directory. Submit with `sbatch af3_results/<job_id>/submit.slurm`.
+`--execution-mode batch` and `--execution-mode cloud` on `alphafold3_pipeline.py` were removed; the prior stub generated broken artifacts and never ingested results. Use the burst driver for SLURM. Cloud bursts (AWS/GCP Batch) are out of scope.
 
 ---
 

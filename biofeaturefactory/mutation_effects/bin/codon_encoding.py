@@ -35,7 +35,7 @@ _CHARS = (
     [chr(c) for c in range(ord('A'), ord('Z') + 1)] +  # A-Z: 26
     [chr(c) for c in range(ord('a'), ord('z') + 1)] +  # a-z: 26
     [str(d) for d in range(10)] +                       # 0-9: 10
-    ['!', '@']                                          # !@:   2  → total 64
+    ['!', '@']                                          # !@:   2  -> total 64
 )
 
 assert len(_ALL_CODONS) == 64

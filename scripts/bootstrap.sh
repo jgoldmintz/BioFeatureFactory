@@ -38,8 +38,11 @@ set -euo pipefail
 #
 # Exclude flags (fine-grained control within any mode):
 #   --exclude-pip-install     Skip pip install.
+#   --exclude-build-tools     Skip apt/yum install of build-essential (gcc, g++, make).
 #   --exclude-evmutation      Skip cloning EVmutation and plmc.
 #   --exclude-build-plmc      Skip compiling plmc (clone still happens).
+#   --exclude-adabmdca        Skip cloning + installing adabmDCApy (GPU Boltzmann backend).
+#   --exclude-nextflow        Skip installing Nextflow + OpenJDK.
 #   --exclude-cg-cotrans      Skip downloading cg_cotrans.
 #   --exclude-netsurfp3       Skip cloning NetSurfP-3.0.
 #   --exclude-signalp         Skip cloning SignalP 6.0.
@@ -52,18 +55,58 @@ set -euo pipefail
 
 # --- Defaults: everything on ---
 PIP_INSTALL=1
+INSTALL_BUILD_TOOLS=1
 CLONE_EVMUTATION=1
 BUILD_PLMC=1
+CLONE_ADABMDCA=1
 DOWNLOAD_CG_COTRANS=1
 CLONE_NETSURFP3=1
 INSTALL_SIGNALP=1
 INSTALL_MIRANDA=1
 BUILD_GENESPLICER=1
+INSTALL_NEXTFLOW=1
 CLONE_AF3=1
 DOWNLOAD_UNIREF90=1
 DOWNLOAD_IDMAPPING=1
 RUN_BUILD_DB=1
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)"
 
+# apply_plmc_patch <patch_file> <human_label>
+#   Applies a patch to plmc with explicit success/already-applied/rejected
+#   reporting. Uses --dry-run probes to distinguish "already applied" (reverse
+#   patch would succeed) from "broken" (neither forward nor reverse applies).
+#   Returns 0 on success or already-applied, 1 on hunk rejection or missing
+#   source. The caller decides whether a rejected patch should abort the
+#   bootstrap (currently it does, since these patches are critical for q=64
+#   codon Potts correctness).
+apply_plmc_patch() {
+  local patch_file="$1"
+  local label="$2"
+  local plmc_dir="$BFF_DIR/mutation_effects/plmc"
+  if [[ ! -f "$patch_file" ]]; then
+    echo "    NOTE plmc patch '$label' not found at $patch_file; skipping"
+    return 0
+  fi
+  if [[ ! -d "$plmc_dir" ]]; then
+    echo "    ERROR plmc source dir missing at $plmc_dir; cannot apply '$label'"
+    return 1
+  fi
+  if (cd "$plmc_dir" && patch -p1 --dry-run < "$patch_file" >/dev/null 2>&1); then
+    if (cd "$plmc_dir" && patch -p1 < "$patch_file" >/dev/null 2>&1); then
+      echo "    APPLIED plmc patch: $label"
+      return 0
+    fi
+    echo "    ERROR plmc patch '$label' dry-run succeeded but apply failed"
+    return 1
+  fi
+  if (cd "$plmc_dir" && patch -p1 -R --dry-run < "$patch_file" >/dev/null 2>&1); then
+    echo "    SKIP plmc patch (already applied): $label"
+    return 0
+  fi
+  echo "    WARN plmc patch '$label' did not apply (hunks rejected)"
+  echo "         Diagnose with: cd $plmc_dir && patch -p1 < $patch_file"
+  return 1
+}
 # --- Parse subcommand ---
 SUBCOMMAND=""
 ARGS=()
@@ -77,9 +120,11 @@ done
 # Apply subcommand: disable groups not selected
 case "$SUBCOMMAND" in
   env-only)
-    CLONE_EVMUTATION=0; BUILD_PLMC=0; DOWNLOAD_CG_COTRANS=0
+    INSTALL_BUILD_TOOLS=0
+    CLONE_EVMUTATION=0; BUILD_PLMC=0; CLONE_ADABMDCA=0; DOWNLOAD_CG_COTRANS=0
     CLONE_NETSURFP3=0; INSTALL_SIGNALP=0; CLONE_AF3=0
     DOWNLOAD_UNIREF90=0; DOWNLOAD_IDMAPPING=0; RUN_BUILD_DB=0
+    # INSTALL_NEXTFLOW stays on (env-only still wants nextflow + OpenJDK present)
     ;;
   git-only)
     PIP_INSTALL=0
@@ -87,9 +132,10 @@ case "$SUBCOMMAND" in
     ;;
   db-only)
     PIP_INSTALL=0
-    CLONE_EVMUTATION=0; BUILD_PLMC=0; DOWNLOAD_CG_COTRANS=0
+    INSTALL_BUILD_TOOLS=0
+    CLONE_EVMUTATION=0; BUILD_PLMC=0; CLONE_ADABMDCA=0; DOWNLOAD_CG_COTRANS=0
     CLONE_NETSURFP3=0; INSTALL_SIGNALP=0; INSTALL_MIRANDA=0
-    BUILD_GENESPLICER=0; CLONE_AF3=0
+    BUILD_GENESPLICER=0; INSTALL_NEXTFLOW=0; CLONE_AF3=0
     ;;
 esac
 
@@ -98,8 +144,11 @@ set -- "${ARGS[@]+"${ARGS[@]}"}"
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --exclude-pip-install)   PIP_INSTALL=0 ;;
+    --exclude-build-tools)   INSTALL_BUILD_TOOLS=0 ;;
     --exclude-evmutation)    CLONE_EVMUTATION=0 ;;
     --exclude-build-plmc)    BUILD_PLMC=0 ;;
+    --exclude-adabmdca)      CLONE_ADABMDCA=0 ;;
+    --exclude-nextflow)      INSTALL_NEXTFLOW=0 ;;
     --exclude-cg-cotrans)    DOWNLOAD_CG_COTRANS=0 ;;
     --exclude-netsurfp3)     CLONE_NETSURFP3=0 ;;
     --exclude-signalp)       INSTALL_SIGNALP=0 ;;
@@ -132,7 +181,7 @@ if [[ "$SUBCOMMAND" == "db-only" && "$DOWNLOAD_UNIREF90" -eq 0 && "$DOWNLOAD_IDM
   echo "ERROR: db-only with all database steps excluded leaves nothing to do." >&2
   exit 1
 fi
-if [[ "$SUBCOMMAND" == "git-only" && "$CLONE_EVMUTATION" -eq 0 && "$BUILD_PLMC" -eq 0 && "$DOWNLOAD_CG_COTRANS" -eq 0 && "$CLONE_NETSURFP3" -eq 0 && "$INSTALL_SIGNALP" -eq 0 && "$INSTALL_MIRANDA" -eq 0 && "$BUILD_GENESPLICER" -eq 0 && "$CLONE_AF3" -eq 0 ]]; then
+if [[ "$SUBCOMMAND" == "git-only" && "$INSTALL_BUILD_TOOLS" -eq 0 && "$CLONE_EVMUTATION" -eq 0 && "$BUILD_PLMC" -eq 0 && "$CLONE_ADABMDCA" -eq 0 && "$DOWNLOAD_CG_COTRANS" -eq 0 && "$CLONE_NETSURFP3" -eq 0 && "$INSTALL_SIGNALP" -eq 0 && "$INSTALL_MIRANDA" -eq 0 && "$BUILD_GENESPLICER" -eq 0 && "$INSTALL_NEXTFLOW" -eq 0 && "$CLONE_AF3" -eq 0 ]]; then
   echo "ERROR: git-only with all git/build steps excluded leaves nothing to do." >&2
   exit 1
 fi
@@ -149,6 +198,29 @@ require_cmd() {
     echo "ERROR: required command not found: $1" >&2
     exit 1
   }
+}
+
+# version_at_least <current> <required>
+#   Returns 0 if 'current' is >= 'required' under natural version ordering,
+#   1 otherwise. Driver: `sort -V`. Tolerates trailing build suffixes
+#   (e.g. "11.0.21+9-LTS") by stripping at the first non-[0-9.] character.
+version_at_least() {
+  local current="$1" required="$2"
+  current="${current%%[^0-9.]*}"
+  required="${required%%[^0-9.]*}"
+  [[ -z "$current" ]] && return 1
+  [[ "$(printf '%s\n%s\n' "$required" "$current" | sort -V | head -n1)" == "$required" ]]
+}
+
+# java_major <version-string> -> echoes integer major version
+#   Java prints either "1.8.0_321" (Java 8) or "11.0.21" (Java 9+). Handle both.
+java_major() {
+  local v="$1"
+  if [[ "$v" == 1.* ]]; then
+    echo "$v" | awk -F. '{print $2}'
+  else
+    echo "$v" | awk -F. '{print $1}'
+  fi
 }
 
 download_file() {
@@ -199,6 +271,63 @@ echo "[1/12] Validating core tools..."
 require_cmd git
 require_cmd tar
 
+# pkg_install <package_list...>
+#   Linux system package installer (apt-get / yum / dnf). Routes through
+#   sudo when not running as root. BFF is Linux-only end-to-end (the GPU
+#   pipelines and most cluster tooling assume Linux); macOS branches were
+#   removed deliberately. Prints WARN if no supported package manager is
+#   found.
+pkg_install() {
+  local sudo_cmd=""
+  if [[ "$EUID" -ne 0 ]] && command -v sudo >/dev/null 2>&1; then
+    sudo_cmd="sudo"
+  fi
+  if command -v apt-get >/dev/null 2>&1; then
+    echo "  APT install $*"
+    $sudo_cmd apt-get update -qq
+    $sudo_cmd apt-get install -y "$@"
+    return $?
+  elif command -v yum >/dev/null 2>&1; then
+    echo "  YUM install $*"
+    $sudo_cmd yum install -y "$@"
+    return $?
+  elif command -v dnf >/dev/null 2>&1; then
+    echo "  DNF install $*"
+    $sudo_cmd dnf install -y "$@"
+    return $?
+  fi
+  echo "  WARN no apt-get/yum/dnf found; install manually: $*" >&2
+  return 1
+}
+
+# ── Step 1b: Build toolchain (gcc, g++, make) ───────────────────────────
+# Required for compiling plmc and (potentially) GeneSplicer + native Python
+# extensions during pip install. Skipped in env-only / db-only.
+# Policy: verify presence; do NOT change/upgrade if already installed.
+echo "[1b/12] Build toolchain..."
+if [[ "$INSTALL_BUILD_TOOLS" -eq 1 ]]; then
+  have_gcc=0; have_gxx=0; have_make=0
+  command -v gcc  >/dev/null 2>&1 && have_gcc=1
+  command -v g++  >/dev/null 2>&1 && have_gxx=1
+  command -v make >/dev/null 2>&1 && have_make=1
+  if [[ "$have_gcc" -eq 1 && "$have_gxx" -eq 1 && "$have_make" -eq 1 ]]; then
+    gcc_ver="$(gcc -dumpversion 2>/dev/null || echo unknown)"
+    make_ver="$(make --version 2>/dev/null | head -n1)"
+    echo "  OK gcc $gcc_ver, g++ $(g++ -dumpversion 2>/dev/null || echo unknown), $make_ver — no install needed"
+  else
+    missing=()
+    [[ "$have_gcc"  -eq 0 ]] && missing+=("gcc")
+    [[ "$have_gxx"  -eq 0 ]] && missing+=("g++")
+    [[ "$have_make" -eq 0 ]] && missing+=("make")
+    echo "  MISSING: ${missing[*]}"
+    if command -v apt-get >/dev/null 2>&1; then
+      pkg_install build-essential
+    else
+      pkg_install gcc gcc-c++ make
+    fi
+  fi
+fi
+
 # ── Step 2: Pip install ──────────────────────────────────────────────────
 echo "[2/12] Core Python requirements..."
 if [[ "$PIP_INSTALL" -eq 1 ]]; then
@@ -208,25 +337,64 @@ if [[ "$PIP_INSTALL" -eq 1 ]]; then
   python -m pip install pyarrow --force-reinstall --quiet
 fi
 
-# ── Step 3: EVmutation + plmc + cg_cotrans ───────────────────────────────
-echo "[3/12] EVmutation module dependencies..."
+# ── Step 3: mutation_effects (EVmutation + plmc) + adabmDCApy + cg_cotrans ──
+echo "[3/12] mutation_effects module dependencies..."
 if [[ "$CLONE_EVMUTATION" -eq 1 ]]; then
-  clone_or_update "https://github.com/debbiemarkslab/EVmutation.git" "$BFF_DIR/EVmutation/EVmutation"
-  clone_or_update "https://github.com/debbiemarkslab/plmc.git" "$BFF_DIR/EVmutation/plmc"
-
+  clone_or_update "https://github.com/debbiemarkslab/EVmutation.git" "$BFF_DIR/mutation_effects/EVmutation"
+  clone_or_update "https://github.com/debbiemarkslab/plmc.git" "$BFF_DIR/mutation_effects/plmc"
+  echo "  PATCH plmc"
+  apply_plmc_patch "$SCRIPT_DIR/patches/plmc_proximal_group_lasso.patch" \
+                   "proximal-group-lasso"
+  apply_plmc_patch "$SCRIPT_DIR/patches/plmc_case_sensitive_custom_alphabet.patch" \
+                   "case-sensitive-custom-alphabet (q=64 codon Potts)"
   if [[ "$BUILD_PLMC" -eq 1 ]]; then
     echo "  BUILD plmc"
     (
-      cd "$BFF_DIR/EVmutation/plmc"
-      if [[ "$(uname -s)" == "Darwin" ]]; then
-        if command -v brew >/dev/null 2>&1; then
-          brew list libomp >/dev/null 2>&1 || brew install libomp
-        fi
-        make all-mac-openmp || make all-mac || make all
-      else
-        make all-openmp || make all
-      fi
+      cd "$BFF_DIR/mutation_effects/plmc"
+      make all-openmp || make all
     )
+  fi
+fi
+
+# adabmDCApy: PyTorch implementation of adabmDCA. adabmdca_pipeline.py imports
+# it IN-PROCESS (`from adabmDCA.training import ...`) to train/score — the
+# `adabmDCA` console script is never invoked, so the package must be IMPORTABLE
+# (CLI on PATH is irrelevant). Used by Nextflow processes run_protein_adabmdca /
+# run_codon_adabmdca. Repo: spqb/adabmDCApy (NOT spqb/adabmDCA — a different package).
+ADABMDCA_MIN="0.7.5"
+if [[ "$CLONE_ADABMDCA" -eq 1 ]]; then
+  ADABM_DIR="$BFF_DIR/mutation_effects/adabmDCApy"
+
+  # Fresh clone every run. Remove any prior state (partial clone, stale checkout)
+  # so `git clone` has a clean target.
+  rm -rf "$ADABM_DIR"
+
+  (
+    cd "$BFF_DIR/mutation_effects"
+    git clone https://github.com/spqb/adabmDCApy.git
+    cd adabmDCApy
+    if [[ "$PIP_INSTALL" -eq 1 ]]; then
+      echo "  PIP install adabmDCApy"
+      pip install .
+    fi
+  )
+
+  # Post-install version verification (warn-only).
+  installed_ver="$(python -m pip show adabmDCA 2>/dev/null | awk -F': ' '/^Version:/ {print $2}')"
+  if [[ -n "$installed_ver" ]]; then
+    if version_at_least "$installed_ver" "$ADABMDCA_MIN"; then
+      echo "  OK adabmDCA $installed_ver (>= $ADABMDCA_MIN)"
+    else
+      echo "  WARN installed adabmDCA $installed_ver is below floor ($ADABMDCA_MIN)"
+    fi
+  else
+    echo "  WARN adabmDCA package not detected via pip show — install may have failed"
+  fi
+
+  if command -v adabmDCA >/dev/null 2>&1; then
+    echo "  OK adabmDCA CLI on PATH: $(command -v adabmDCA)"
+  else
+    echo "  WARN adabmDCA CLI not on PATH after install (env activation issue?)"
   fi
 fi
 
@@ -336,21 +504,174 @@ if [[ "$BUILD_GENESPLICER" -eq 1 ]]; then
   fi
 fi
 
-# ── Step 7b: Nextflow (optional, recommended for multi-gene runs) ───────
-echo "[7b/12] Nextflow..."
-if command -v nextflow >/dev/null 2>&1; then
-  echo "  OK nextflow already on PATH"
-elif command -v mamba >/dev/null 2>&1; then
-  echo "  MAMBA install nextflow"
-  mamba install -y -c bioconda nextflow
-elif command -v conda >/dev/null 2>&1; then
-  echo "  CONDA install nextflow"
-  conda install -y -c bioconda nextflow
-else
-  echo "  Installing nextflow via curl"
-  curl -s https://get.nextflow.io | bash
-  chmod +x nextflow
-  mv nextflow /usr/local/bin/ 2>/dev/null || echo "  WARN: move nextflow to a directory on PATH"
+# ── Step 7b: Nextflow + OpenJDK ──────────────────────────────────────────
+# Floors:
+#   Java 17  — Nextflow 24+ requires it.
+#   Nextflow 22.10.0 — minimum where the DSL2 operators used here are stable.
+# Policy: verify version; if at/above the floor, skip install (no version
+# change). If below, WARN with the manual upgrade command rather than
+# silently replacing — system Java affects unrelated tooling.
+JAVA_MIN_MAJOR=17
+NEXTFLOW_MIN="22.10.0"
+echo "[7b/12] Nextflow + OpenJDK..."
+if [[ "$INSTALL_NEXTFLOW" -eq 1 ]]; then
+  # ---- OpenJDK ----
+  # Nextflow 24+ requires Java 17+. Earlier policy was warn-and-continue,
+  # but the official Nextflow installer fails immediately when Java is below
+  # the floor — leaving the user with a broken nextflow shim. Now: when Java
+  # is too old, install OpenJDK 17 alongside (apt/yum don't replace the older
+  # JVM) and re-point `update-alternatives` so `/usr/bin/java` resolves to
+  # the new one. The older Java remains on disk for anything that needs it.
+  needs_java_install=0
+  if command -v java >/dev/null 2>&1; then
+    java_raw="$(java -version 2>&1 | head -n 1 | awk -F\" '{print $2}')"
+    jmaj="$(java_major "$java_raw")"
+    if [[ -n "$jmaj" && "$jmaj" -ge "$JAVA_MIN_MAJOR" ]]; then
+      echo "  OK java $java_raw (>= $JAVA_MIN_MAJOR) — no install needed"
+    else
+      echo "  java $java_raw is below the required floor (Java $JAVA_MIN_MAJOR+ for Nextflow 24+)."
+      echo "  Installing OpenJDK $JAVA_MIN_MAJOR alongside; switching default java -> 17."
+      needs_java_install=1
+    fi
+  else
+    echo "  java not found — installing OpenJDK $JAVA_MIN_MAJOR"
+    needs_java_install=1
+  fi
+
+  if [[ "$needs_java_install" -eq 1 ]]; then
+    if command -v apt-get >/dev/null 2>&1; then
+      pkg_install openjdk-17-jdk
+    else
+      pkg_install java-17-openjdk-devel
+    fi
+
+    # Locate the Java 17 binary and switch update-alternatives so subsequent
+    # `java` invocations (including `nextflow`'s installer) pick it up.
+    arch="$(dpkg --print-architecture 2>/dev/null || uname -m)"
+    JAVA_17_BIN=""
+    for candidate in \
+        "/usr/lib/jvm/java-17-openjdk-${arch}/bin/java" \
+        "/usr/lib/jvm/java-17-openjdk-amd64/bin/java" \
+        "/usr/lib/jvm/java-17-openjdk-arm64/bin/java" \
+        "/usr/lib/jvm/java-1.17.0-openjdk/bin/java" \
+        "/usr/lib/jvm/jre-17-openjdk/bin/java"
+    do
+      [[ -x "$candidate" ]] && JAVA_17_BIN="$candidate" && break
+    done
+    if [[ -z "$JAVA_17_BIN" ]]; then
+      JAVA_17_BIN="$(find /usr/lib/jvm -maxdepth 3 -name java -path '*java-17*' -type f 2>/dev/null | head -1)"
+    fi
+
+    if [[ -x "$JAVA_17_BIN" ]]; then
+      sudo_cmd=""
+      [[ "$EUID" -ne 0 ]] && command -v sudo >/dev/null 2>&1 && sudo_cmd="sudo"
+      $sudo_cmd update-alternatives --set java "$JAVA_17_BIN" 2>/dev/null || true
+      export JAVA_HOME="$(dirname "$(dirname "$JAVA_17_BIN")")"
+      export JAVA_CMD="$JAVA_17_BIN"
+      echo "  Java 17 active: $JAVA_17_BIN"
+      echo "  JAVA_HOME=$JAVA_HOME (exported for this bootstrap session + nextflow installer)"
+      echo "  NOTE: this updates the system default. To persist for your shell, add to ~/.bashrc:"
+      echo "         export JAVA_HOME=$JAVA_HOME"
+    else
+      echo "  ERROR: installed openjdk-17 but could not locate the Java 17 binary." >&2
+      echo "         Looked under /usr/lib/jvm/java-17-openjdk-*. Nextflow install will likely fail." >&2
+      exit 1
+    fi
+  fi
+
+  # ---- Nextflow ----
+  if command -v nextflow >/dev/null 2>&1; then
+    # Nextflow prints "      version 25.10.4 build 11173" — $1=version, $2=25.10.4.
+    nf_ver="$(nextflow -version 2>&1 | awk '$1=="version" {print $2; exit}')"
+    if [[ -n "$nf_ver" ]] && version_at_least "$nf_ver" "$NEXTFLOW_MIN"; then
+      echo "  OK nextflow $nf_ver (>= $NEXTFLOW_MIN) — no install needed"
+    else
+      echo "  WARN nextflow ${nf_ver:-unknown} is below the required floor ($NEXTFLOW_MIN)."
+      echo "       Not auto-upgrading. Upgrade manually:"
+      echo "         self-update:  nextflow self-update"
+      echo "         conda:        conda install -y -c bioconda 'nextflow>=$NEXTFLOW_MIN'"
+    fi
+  else
+    echo "  nextflow not found — installing"
+    if command -v mamba >/dev/null 2>&1; then
+      echo "  MAMBA install nextflow"
+      mamba install -y -c bioconda "nextflow>=${NEXTFLOW_MIN}"
+    elif command -v conda >/dev/null 2>&1; then
+      echo "  CONDA install nextflow"
+      conda install -y -c bioconda "nextflow>=${NEXTFLOW_MIN}"
+    else
+      # Fallback: official installer at https://get.nextflow.io writes the
+      # launcher to $PWD/nextflow and chmods +rx. It does NOT place it on
+      # PATH; that's our job. Steps:
+      #   1) Run installer in a clean tmp dir so we don't pollute scripts/.
+      #   2) Try destinations in order: ~/.local/bin (if on PATH and
+      #      writable), then /usr/local/bin (sudo-or-root), then leave it
+      #      in tmp and surface the absolute path.
+      #   3) Verify `nextflow` resolves on PATH after install.
+      echo "  Installing nextflow via official installer (https://get.nextflow.io)"
+      nf_tmp="$(mktemp -d)"
+      (
+        cd "$nf_tmp"
+        # -fsSL: fail on HTTP errors, silent body, show errors, follow redirects.
+        # set -o pipefail (already enabled) propagates curl failure through the pipe.
+        curl -fsSL https://get.nextflow.io | bash
+      )
+      nf_bin="$nf_tmp/nextflow"
+      if [[ ! -x "$nf_bin" ]]; then
+        echo "  ERROR: installer ran but $nf_bin is missing or not executable" >&2
+        rm -rf "$nf_tmp"
+        exit 1
+      fi
+
+      # Pick a destination.
+      install_dest=""
+      # Candidate 1: ~/.local/bin (user-owned, no sudo). Only if on PATH.
+      local_bin="$HOME/.local/bin"
+      case ":$PATH:" in
+        *":$local_bin:"*)
+          mkdir -p "$local_bin"
+          if [[ -w "$local_bin" ]]; then
+            install_dest="$local_bin/nextflow"
+          fi
+          ;;
+      esac
+      # Candidate 2: /usr/local/bin, sudo if non-root.
+      if [[ -z "$install_dest" ]]; then
+        if [[ -w "/usr/local/bin" ]]; then
+          install_dest="/usr/local/bin/nextflow"
+          mv "$nf_bin" "$install_dest"
+        elif [[ "$EUID" -ne 0 ]] && command -v sudo >/dev/null 2>&1; then
+          echo "  Requesting sudo to install to /usr/local/bin"
+          if sudo mv "$nf_bin" "/usr/local/bin/nextflow"; then
+            install_dest="/usr/local/bin/nextflow"
+          fi
+        fi
+      else
+        mv "$nf_bin" "$install_dest"
+      fi
+
+      # Candidate 3 (fallback): leave in a stable location and tell the user.
+      if [[ -z "$install_dest" ]]; then
+        install_dest="$ROOT_DIR/nextflow"
+        mv "$nf_bin" "$install_dest"
+        echo "  WARN nextflow installed at $install_dest but no PATH-writable"
+        echo "       destination was found. Add it to PATH manually, e.g.:"
+        echo "         mkdir -p \$HOME/.local/bin && mv \"$install_dest\" \$HOME/.local/bin/"
+        echo "         # then ensure \$HOME/.local/bin is on \$PATH"
+      else
+        echo "  Installed nextflow -> $install_dest"
+      fi
+      rm -rf "$nf_tmp"
+
+      # Verify
+      if command -v nextflow >/dev/null 2>&1; then
+        echo "  OK nextflow on PATH: $(command -v nextflow)"
+      else
+        echo "  WARN nextflow installed at $install_dest but not yet on PATH"
+        echo "       (open a new shell, or 'export PATH=\"$(dirname "$install_dest"):\$PATH\"')"
+      fi
+    fi
+  fi
 fi
 
 # ── Step 8: AlphaFold3 ──────────────────────────────────────────────────
@@ -403,14 +724,16 @@ Manual installs required (cannot be auto-downloaded):
 EOF
 
   echo "[12/12] Summary checks..."
-  [[ -d "$BFF_DIR/EVmutation/EVmutation" ]]     && echo "  OK EVmutation clone"
-  [[ -d "$BFF_DIR/EVmutation/plmc" ]]           && echo "  OK plmc clone"
-  [[ -d "$BFF_DIR/rare_codon/cg_cotrans" ]]     && echo "  OK cg_cotrans"
-  [[ -d "$BFF_DIR/NetSurfP3/nsp3" ]]            && echo "  OK NetSurfP3 clone"
-  [[ -d "$BFF_DIR/netNglyc/signalp-6.0" ]]      && echo "  OK SignalP 6.0 clone"
-  command -v miranda >/dev/null 2>&1             && echo "  OK miranda on PATH"
-  command -v genesplicer >/dev/null 2>&1             && echo "  OK genesplicer on PATH"
-  [[ -d "$BFF_DIR/alphafold3/alphafold3" ]]     && echo "  OK AlphaFold3 clone"
+  [[ -d "$BFF_DIR/mutation_effects/EVmutation" ]]   && echo "  OK EVmutation clone"
+  [[ -d "$BFF_DIR/mutation_effects/plmc" ]]         && echo "  OK plmc clone"
+  [[ -d "$BFF_DIR/mutation_effects/adabmDCApy" ]]   && echo "  OK adabmDCApy clone"
+  command -v adabmDCA >/dev/null 2>&1                 && echo "  OK adabmDCA CLI on PATH"
+  [[ -d "$BFF_DIR/rare_codon/cg_cotrans" ]]         && echo "  OK cg_cotrans"
+  [[ -d "$BFF_DIR/NetSurfP3/nsp3" ]]                && echo "  OK NetSurfP3 clone"
+  [[ -d "$BFF_DIR/netNglyc/signalp-6.0" ]]          && echo "  OK SignalP 6.0 clone"
+  command -v miranda >/dev/null 2>&1                  && echo "  OK miranda on PATH"
+  command -v genesplicer >/dev/null 2>&1              && echo "  OK genesplicer on PATH"
+  [[ -d "$BFF_DIR/alphafold3/alphafold3" ]]         && echo "  OK AlphaFold3 clone"
 fi
 
 if [[ "$RUN_BUILD_DB" -eq 1 ]]; then

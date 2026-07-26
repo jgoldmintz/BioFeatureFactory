@@ -753,8 +753,9 @@ def main():
 
     # Execution
     parser.add_argument('--execution-mode', default='local',
-                       choices=['local', 'batch', 'cloud'],
-                       help='AF3 execution mode')
+                       choices=['local'],
+                       help='AF3 execution mode (only local is supported here; '
+                            'for SLURM use `python -m biofeaturefactory.alphafold3.burst submit`)')
     parser.add_argument('--af3-binary', default='alphafold3',
                        help='Path to AF3 executable')
     parser.add_argument('--docker-image', default='alphafold3',

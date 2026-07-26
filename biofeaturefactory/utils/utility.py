@@ -2254,7 +2254,27 @@ def filter_msa_by_gaps(msa, max_seq_gaps=0.4, max_col_gaps=0.6, a2m_format=False
     return final_msa
 
 
-def compute_sequence_weights(msa, identity_threshold=0.8):
+def _chunk_codons(seq):
+    """Split a nucleotide sequence into codon triplets.
+
+    Any triplet containing a gap character ('-' or '.') is normalized to '---'
+    so the gap_tokens filter in compute_sequence_weights treats partial-gap
+    codons as gaps rather than as informative residues. Without this, a column
+    drop in filter_msa_by_gaps that breaks codon alignment leaks partial-gap
+    codons (e.g. 'A-G') into the identity calculation, inflating both the
+    match and aligned counts and skewing N_eff.
+
+    Trailing 1-2 nt that don't complete a codon are dropped (codon MSAs are
+    expected to have lengths that are multiples of 3).
+    """
+    codons = []
+    for i in range(0, len(seq) - len(seq) % 3, 3):
+        c = seq[i:i+3]
+        codons.append('---' if any(ch in '-.' for ch in c) else c)
+    return codons
+
+
+def compute_sequence_weights(msa, identity_threshold=0.8, codon_mode=False):
     """
     Compute sequence weights based on clustering at identity threshold.
 
@@ -2263,6 +2283,8 @@ def compute_sequence_weights(msa, identity_threshold=0.8):
     Args:
         msa: dict {seq_id: sequence}
         identity_threshold: Clustering threshold (0.8 = 80% identity)
+        codon_mode: If True, compare codon triplets instead of single characters.
+                    Use for codon MSAs where each unit is a 3-nt codon.
 
     Returns:
         dict: {seq_id: weight}
@@ -2273,15 +2295,21 @@ def compute_sequence_weights(msa, identity_threshold=0.8):
     if n_seqs == 0:
         return {}
 
-    seqs = [msa[sid] for sid in seq_ids]
+    if codon_mode:
+        seqs = [_chunk_codons(msa[sid]) for sid in seq_ids]
+        gap_tokens = {'---', '...'}
+    else:
+        seqs = [msa[sid] for sid in seq_ids]
+        gap_tokens = {'-', '.'}
+
     neighbor_counts = [1] * n_seqs
 
     for i in range(n_seqs):
         for j in range(i + 1, n_seqs):
             matches = sum(1 for a, b in zip(seqs[i], seqs[j])
-                         if a == b and a not in '-.')
+                         if a == b and a not in gap_tokens)
             aligned = sum(1 for a, b in zip(seqs[i], seqs[j])
-                         if a not in '-.' and b not in '-.')
+                         if a not in gap_tokens and b not in gap_tokens)
             if aligned > 0:
                 identity = matches / aligned
                 if identity >= identity_threshold:
@@ -2292,7 +2320,7 @@ def compute_sequence_weights(msa, identity_threshold=0.8):
     return weights
 
 
-def compute_neff(msa, identity_threshold=0.8):
+def compute_neff(msa, identity_threshold=0.8, codon_mode=False):
     """
     Compute effective number of sequences (N_eff).
 
@@ -2302,11 +2330,12 @@ def compute_neff(msa, identity_threshold=0.8):
     Args:
         msa: dict {seq_id: sequence}
         identity_threshold: Clustering threshold
+        codon_mode: If True, compare codon triplets instead of single characters.
 
     Returns:
         float: N_eff value
     """
-    weights = compute_sequence_weights(msa, identity_threshold)
+    weights = compute_sequence_weights(msa, identity_threshold, codon_mode=codon_mode)
     return sum(weights.values())
 
 

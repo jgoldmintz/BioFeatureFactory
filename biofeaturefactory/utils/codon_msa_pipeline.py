@@ -41,7 +41,7 @@ import sys
 import tempfile
 import json
 from pathlib import Path
-
+import numpy as np
 from biofeaturefactory.utils.utility import (
     read_fasta,
     write_fasta,
@@ -983,25 +983,28 @@ def generate_codon_msa_from_focus(
     _write_manifest(manifest_rows, str(manifest_path))
 
     # Compute and write stats JSON (mirrors msa_generation_pipeline.py output)
-    focus_id = gene
+    focus_id = focus_seq_id
     query_length = len(focus_nt_seq) // 3  # codon positions
     n_seqs = len(codon_msa)
-    neff = compute_neff(codon_msa, identity_threshold=0.8)
+    neff = compute_neff(codon_msa, identity_threshold=0.8, codon_mode=True)
     neff_ratio = neff / query_length if query_length > 0 else 0.0
 
-    # Mean identity to focus
+    # Mean identity to focus (codon-level: compare triplets, not single nucleotides)
     focus_seq = codon_msa.get(focus_id, '')
+    focus_codons = [focus_seq[i:i+3] for i in range(0, len(focus_seq) - len(focus_seq) % 3, 3)]
+    gap_codons = {'---', '...'}
     identities = []
     for seq_id, seq in codon_msa.items():
         if seq_id != focus_id and len(seq) == len(focus_seq):
-            matches = sum(1 for a, b in zip(seq, focus_seq) if a == b and a not in '-.')
-            aligned = sum(1 for a, b in zip(seq, focus_seq) if a not in '-.' and b not in '-.')
+            codons = [seq[i:i+3] for i in range(0, len(seq) - len(seq) % 3, 3)]
+            matches = sum(1 for a, b in zip(codons, focus_codons) if a == b and a not in gap_codons)
+            aligned = sum(1 for a, b in zip(codons, focus_codons) if a not in gap_codons and b not in gap_codons)
             if aligned > 0:
                 identities.append(matches / aligned)
     mean_identity = float(np.mean(identities)) if identities else 0.0
 
     stats = {
-        'query_id': focus_id,
+        'query_id': gene,
         'query_length_codons': query_length,
         'n_sequences': n_seqs,
         'n_eff': float(round(neff, 1)),
