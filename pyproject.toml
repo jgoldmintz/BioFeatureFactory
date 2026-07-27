@@ -32,6 +32,7 @@ adabmdca = ["adabmDCA>=0.7.5", "torch>=2.0.0"]
 # listed here so `pip install .[all]` / `.[netsurfp3]` is self-sufficient.
 netsurfp3 = [
     "torch>=2.0.0",
+    "torchvision>=0.15.0",
     "optuna>=4.8.0",
     "matplotlib>=3.10.8",
     "fair-esm>=2.0.0",
@@ -45,6 +46,7 @@ all = [
     "prody>=2.0",
     "adabmDCA>=0.7.5",
     "torch>=2.0.0",
+    "torchvision>=0.15.0",
     "optuna>=4.8.0",
     "matplotlib>=3.10.8",
     "fair-esm>=2.0.0",

@@ -1982,15 +1982,52 @@ def extract_codon_with_bicodons(ntposnt, seq):
 # MSA Generation and Processing Utilities
 # =============================================================================
 
-def detect_alphabet(sequence):
-    """Return 'nucleotide' or 'protein' based on character composition.
+# Single-character codon-encoded alphabet. MUST stay in lockstep with
+# mutation_effects/bin/codon_encoding.py: 64 codons -> A-Z (26) + a-z (26) +
+# 0-9 (10) + '!' '@' (2), plus '-' gap = 65 symbols. Case-sensitive by design
+# ('A' encodes codon AAA, 'a' a different codon), which is why the codon check
+# below runs BEFORE any upper-casing.
+_CODON_ENCODE_CHARS = (
+    [chr(c) for c in range(ord('A'), ord('Z') + 1)]
+    + [chr(c) for c in range(ord('a'), ord('z') + 1)]
+    + [str(d) for d in range(10)]
+    + ['!', '@']
+)
+CODON_ENCODED_ALPHABET = '-' + ''.join(_CODON_ENCODE_CHARS)
+# Symbols that occur ONLY in the codon-encoded alphabet — never in nucleotide
+# (ACGTU/IUPAC) or standard protein (20 aa + BXZUO*) sequences. Their presence
+# is an unambiguous codon-encoding signal.
+_CODON_ONLY_MARKERS = frozenset('0123456789!@')
 
-    Treats a sequence as nucleotide when >=90% of non-gap characters are
-    unambiguous or IUPAC nucleotide codes (ACGTNURYWSKMBDHV).
+
+def detect_alphabet(sequence):
+    """Return 'codon', 'nucleotide', or 'protein' based on character composition.
+
+    - 'codon'     : single-character codon-encoded sequence (see
+                    mutation_effects/bin/codon_encoding.py). Reported only when
+                    the sequence carries a codon-only marker (a digit, '!' or
+                    '@') AND every non-gap character lies in the codon alphabet.
+                    Evaluated case-sensitively and BEFORE the nt/protein test,
+                    because the codon alphabet is case-sensitive and its digits
+                    would otherwise be counted as non-nucleotide.
+                    Limitation: a codon-encoded sequence that happens to use only
+                    upper-case-letter codons (no digit/'!'/'@') is
+                    indistinguishable from protein by composition and is reported
+                    as 'protein'. A hard limit of composition-only detection.
+    - 'nucleotide': >=90% of non-gap characters are IUPAC nucleotide codes
+                    (ACGTNURYWSKMBDHV).
+    - 'protein'   : otherwise.
     """
-    seq = sequence.upper().replace('-', '').replace('.', '').replace('*', '')
-    if not seq:
+    raw = sequence.replace('-', '').replace('.', '')
+    if not raw.replace('*', ''):
         raise ValueError("Empty sequence.")
+
+    # Codon-encoded check first, case-sensitive.
+    codon_alpha = set(CODON_ENCODED_ALPHABET)
+    if any(c in _CODON_ONLY_MARKERS for c in raw) and all(c in codon_alpha for c in raw):
+        return 'codon'
+
+    seq = raw.upper().replace('*', '')
     nt_chars = set('ACGTNURYWSKMBDHV')
     nt_count = sum(1 for c in seq if c in nt_chars)
     return 'nucleotide' if nt_count / len(seq) >= 0.90 else 'protein'

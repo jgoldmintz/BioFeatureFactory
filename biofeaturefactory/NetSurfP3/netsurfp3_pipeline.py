@@ -50,6 +50,7 @@ from biofeaturefactory.utils.utility import (
     discover_fasta_files,
     translate_orf_sequence,
     build_mutant_sequences_for_gene,
+    detect_alphabet,
     write_tsv,
 )
 
@@ -76,8 +77,13 @@ try:
         import torch as _torch
         super(_base_predict.BasePredict, self).__init__()
         self.model = model
-        print("Loading model... \n")
-        data = _torch.load(model_data, map_location='cpu')
+        # Load the checkpoint onto the available device: CUDA if present, else
+        # CPU. (Inference device itself is governed by nsp3's setup_device /
+        # SecondaryFeatures.inference; this just avoids a needless CPU->GPU copy
+        # on GPU hosts and keeps deserialization device-aware.)
+        _device = _torch.device('cuda' if _torch.cuda.is_available() else 'cpu')
+        print(f"Loading model onto {_device.type}... \n")
+        data = _torch.load(model_data, map_location=_device)
         self.model.load_state_dict(data['state_dict'], strict=False)
         self.model.eval()
 
@@ -664,8 +670,9 @@ def main():
                         help='Output base directory')
 
     # Input type
-    parser.add_argument('--input-type', choices=['nt', 'aa'], default='nt',
-                        help='Input sequence type: "nt" for nucleotide (will translate), "aa" for amino acid (default: nt)')
+    parser.add_argument('--input-type', choices=['nt', 'aa'], default=None,
+                        help='Input sequence type: "nt" for nucleotide (will translate), "aa" for amino acid. '
+                             'Optional — when omitted, auto-detected from the WT sequence via detect_alphabet.')
 
     # Processing options
     parser.add_argument('--mutation-dir', required=True,
@@ -693,7 +700,7 @@ def main():
     if args.verbose:
         print("NetSurfP-3.0 Pipeline - Delta-based structural analysis")
         print(f"Input: {args.input}")
-        print(f"Input type: {args.input_type} ({'nucleotide - will translate' if args.input_type == 'nt' else 'amino acid - no translation'})")
+        print(f"Input type: {args.input_type or 'auto-detect'}")
         print(f"Output: {args.output}")
         print(f"Model: {args.model}")
         print(f"Config: {args.config}")
@@ -743,8 +750,27 @@ def main():
         else:
             wt_header, wt_seq = next(iter(wt_sequences.items()))
 
-        # Handle based on input type
-        if args.input_type == 'nt':
+        # Resolve input alphabet: an explicit --input-type overrides; otherwise
+        # auto-detect from the WT sequence. NetSurfP3 is a protein tool, so only
+        # nt (translated) and aa are valid; codon-encoded input is skipped.
+        if args.input_type is not None:
+            seq_type = args.input_type
+        else:
+            try:
+                detected = detect_alphabet(wt_seq)
+            except ValueError:
+                print(f"Warning: {gene_name} WT sequence is empty, skipping")
+                continue
+            if detected == 'nucleotide':
+                seq_type = 'nt'
+            elif detected == 'protein':
+                seq_type = 'aa'
+            else:  # codon-encoded
+                print(f"Warning: {gene_name} WT looks codon-encoded; NetSurfP3 needs nt or aa, skipping")
+                continue
+
+        # Handle based on resolved input type
+        if seq_type == 'nt':
             # Nucleotide input - translate to amino acids
             wt_nt_seq = wt_seq
             wt_aa_seq = translate_orf_sequence(wt_nt_seq)
@@ -772,7 +798,7 @@ def main():
 
         mutant_seqs = build_mutant_sequences_for_gene(
             gene_name, wt_nt_seq, wt_aa_seq, mutation_file, args.log, failure_map,
-            input_type=args.input_type
+            input_type=seq_type
         )
 
         if args.verbose:
@@ -830,7 +856,14 @@ def main():
                 if nt_info[0] is None:
                     continue
 
-                aa_info = get_mutant_aa(nt_info, wt_nt_seq)
+                if wt_nt_seq is None:
+                    # aa mode: the mutation token IS the amino-acid change, so
+                    # get_mutation_data_bioAccurate already yields (aa_pos, (wt_aa, mut_aa)).
+                    # get_mutant_aa is an nt->aa helper and cannot run without an nt sequence
+                    # (passing None crashes at len(None) — the HIGH-1 defect).
+                    aa_info = ((nt_info[0], nt_info[1]), None)
+                else:
+                    aa_info = get_mutant_aa(nt_info, wt_nt_seq)
                 if not aa_info:
                     continue
 
