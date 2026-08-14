@@ -91,20 +91,32 @@ def build_manifest(genes: List[str], args: argparse.Namespace) -> Dict[str, List
     # --msa / --codon-msa / --model-params / --codon-model-params can override
     # the MSA/params locations; final TSVs always come from output dir.
 
+    # (path, globs, excludes). A gene may only be manifested as covered when the
+    # artifact is BOTH scoreable by the pipeline resolvers (_resolve_per_gene_models,
+    # _resolve_per_gene_adabm_params) AND resolvable by main.nf's resolveMsaFile
+    # (:167 ['.a2m','.msa.a2m','.fasta'], :180 ['.codon.msa.fasta','.codon.fasta','.fasta']);
+    # a glob wider than either side turns a generated-MSA gene into a null-file abort.
     artifact_checks = {
-        "msa": (args.msa or out_dir / "MSA", ["*.a2m", "*.msa.a2m"]),
-        "codon_msa": (args.codon_msa or out_dir / "CodonMSA", ["*.codon.msa.fasta"]),
-        "model_params": (args.model_params or out_dir / "model_params", ["*.model_params"]),
-        "codon_model_params": (args.codon_model_params or out_dir / "codon_model_params", ["*.codon_model_params"]),
+        "msa": (args.msa or out_dir / "MSA",
+                ["*.a2m", "*.fasta"],
+                ["*.codon.*", "*.encoded.fasta"]),
+        "codon_msa": (args.codon_msa or out_dir / "CodonMSA",
+                      ["*.codon.msa.fasta", "*.codon.fasta", "*.fasta"],
+                      ["*.encoded.fasta"]),
+        "model_params": (args.model_params or out_dir / "model_params", ["*.model_params"], None),
+        "codon_model_params": (args.codon_model_params or out_dir / "codon_model_params",
+                               ["*.codon_model_params"], None),
         # adabmDCA params (opt-in via --run-adabmdca; manifest entries always tracked
         # so resume works regardless of which run produced the artifact)
         "adabmdca_protein_params": (
             args.adabmdca_protein_params or out_dir / "adabmdca_protein_params",
             ["*.protein_adabm_params", "*.protein.dat", "*.dat"],
+            ["*.codon.dat", "*.codon_adabm_params"],
         ),
         "adabmdca_codon_params": (
             args.adabmdca_codon_params or out_dir / "adabmdca_codon_params",
             ["*.codon_adabm_params", "*.codon.dat", "*.dat"],
+            ["*.protein.dat", "*.protein_adabm_params"],
         ),
     }
 
@@ -121,8 +133,8 @@ def build_manifest(genes: List[str], args: argparse.Namespace) -> Dict[str, List
     manifest = {key: [] for key in list(artifact_checks) + list(tsv_checks)}
 
     for gene in genes:
-        for artifact, (path, patterns) in artifact_checks.items():
-            if Path(str(path)).exists() and _find_file_for_gene(gene, str(path), patterns):
+        for artifact, (path, patterns, excludes) in artifact_checks.items():
+            if Path(str(path)).exists() and _find_file_for_gene(gene, str(path), patterns, excludes):
                 manifest[artifact].append(gene)
 
         for tsv_key, (subdir, suffix) in tsv_checks.items():

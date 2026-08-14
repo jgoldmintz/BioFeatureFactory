@@ -100,36 +100,37 @@ class TestExtractCodonWithBicodons:
     SEQ = "ATGAAAGAATGG"
 
     def test_middle_codon_has_both_bicodons(self):
-        # codon 2 = AAA (positions 4-6), middle codon
+        # codon 2 = AAA (positions 4-6), middle codon; A4G mutates it to GAA (F46:
+        # the returned codon is the MUTANT codon, not the WT one)
         codon, fwd, rev, pos_in_codon, pos, codon_num = extract_codon_with_bicodons("A4G", self.SEQ)
-        assert codon == "AAA"
+        assert codon == "GAA"
         assert fwd != ""   # forward bicodon available
         assert rev != ""   # reverse bicodon available
         assert codon_num == 2
 
     def test_first_codon_has_forward_only(self):
-        # codon 1 = ATG (positions 1-3)
+        # codon 1 = ATG (positions 1-3); A1T mutates it to TTG
         codon, fwd, rev, pos_in_codon, pos, codon_num = extract_codon_with_bicodons("A1T", self.SEQ)
-        assert codon == "ATG"
+        assert codon == "TTG"
         assert fwd != ""   # forward bicodon (ATG + AAA)
         assert rev == ""   # no reverse (no preceding codon)
         assert codon_num == 1
 
     def test_last_codon_has_reverse_only(self):
-        # codon 4 = TGG (positions 10-12)
+        # codon 4 = TGG (positions 10-12); T10A mutates it to AGG
         codon, fwd, rev, pos_in_codon, pos, codon_num = extract_codon_with_bicodons("T10A", self.SEQ)
-        assert codon == "TGG"
+        assert codon == "AGG"
         assert fwd == ""   # no forward (last codon)
         assert rev != ""   # reverse bicodon (GAA + TGG)
         assert codon_num == 4
 
     def test_forward_bicodon_correct_sequence(self):
         codon, fwd, rev, _, _, _ = extract_codon_with_bicodons("A4G", self.SEQ)
-        assert fwd == "AAAGAA"   # AAA + GAA
+        assert fwd == "GAAGAA"   # mutated codon GAA + following GAA
 
     def test_reverse_bicodon_correct_sequence(self):
         codon, fwd, rev, _, _, _ = extract_codon_with_bicodons("A4G", self.SEQ)
-        assert rev == "ATGAAA"   # ATG + AAA
+        assert rev == "ATGGAA"   # preceding ATG + mutated codon GAA
 
     def test_pos_in_codon_first_position(self):
         _, _, _, pos_in_codon, _, _ = extract_codon_with_bicodons("A4G", self.SEQ)

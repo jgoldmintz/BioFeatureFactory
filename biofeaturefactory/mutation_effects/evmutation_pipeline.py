@@ -122,6 +122,9 @@ CODON_FIELDNAMES = [
     "qc_flags",
 ]
 
+# One-letter symbols accepted in an amino-acid mutation token ('*' = stop).
+AA_SYMBOLS = {aa for aa in codon_to_aa.values() if aa not in {"Stop", "-"}} | {"*"}
+
 
 # ---------------------------------------------------------------------------
 # plmc runner
@@ -203,6 +206,12 @@ def build_aa_prediction_lookup(model):
     independent_df = ev_tools.single_mutant_matrix(independent_model, output_column="prediction_independent")
     pos_features = compute_position_features(model)
 
+    # index_list entries are TRUE residue numbers, not alignment ranks: plmc writes
+    # `offsets[ix] = i + 1 + leftOffset` (plmc/src/plm.c:300) with leftOffset taken
+    # from a NAME/START-END focus header, so a model built from '>GENE/143-535'
+    # numbers its first column 143. They therefore already agree with the ORF
+    # positions score_nt_mutations queries with; remapping to rank would shift every
+    # key by leftOffset.
     indep_index = {}
     for _, row in independent_df.iterrows():
         indep_index[(int(row["pos"]), row["subs"])] = row["prediction_independent"]
@@ -218,17 +227,18 @@ def build_aa_prediction_lookup(model):
 
     lookup = {}
     for _, row in epistatic_df.iterrows():
-        mutant = row["mutant"]
-        pos = int(row["pos"])
+        col_pos = int(row["pos"])
+        seq_pos = col_pos
         subs = row["subs"]
-        indep_pred = indep_index.get((pos, subs), np.nan)
+        mutant = f"{row['wt']}{seq_pos}{subs}"
+        indep_pred = indep_index.get((col_pos, subs), np.nan)
         epi_score = float(row["prediction_epistatic"])
         ec = epi_score - indep_pred if not np.isnan(indep_pred) else np.nan
-        mean_epi = pos_stats[pos]["mean"]
-        std_epi = pos_stats[pos]["std"]
-        pf = pos_features.get(pos, {})
+        mean_epi = pos_stats[col_pos]["mean"]
+        std_epi = pos_stats[col_pos]["std"]
+        pf = pos_features.get(col_pos, {})
         lookup[mutant] = {
-            "mutant": mutant, "pos": pos, "wt": row["wt"], "subs": subs,
+            "mutant": mutant, "pos": seq_pos, "wt": row["wt"], "subs": subs,
             "prediction_epistatic": epi_score,
             "prediction_independent": indep_pred,
             "epistatic_contribution": ec,
@@ -255,10 +265,11 @@ def build_codon_lookup(codon_model):
     independent_model = codon_model.to_independent_model()
     independent_df = ev_tools.single_mutant_matrix(independent_model, output_column="prediction_codon_independent")
 
-    # plmc stores positions as alignment column indices (e.g. 143..857), not
-    # sequential 1..L. Map each column index to its rank in index_list so that
-    # the lookup keys match the sequential CDS positions (1..L) used by
-    # score_nt_mutations: aa_pos = (codon_start // 3) + 1.
+    # plmc reports positions as index_list entries (alignment column indices),
+    # which coincide with sequential 1..L only when the focus sequence covers
+    # every modelled column. Map each column index to its rank so the lookup
+    # keys match the sequential CDS positions used by score_nt_mutations:
+    # aa_pos = (codon_start // 3) + 1.
     col_to_seq = {int(col): (i + 1) for i, col in enumerate(codon_model.index_list)}
 
     indep_index = {}
@@ -336,6 +347,9 @@ def read_orf_sequence(fasta_path):
 def aa_symbol(aa):
     return "*" if aa == "Stop" else aa
 
+
+def aa_name(symbol):
+    return "Stop" if symbol == "*" else symbol
 
 
 def score_nt_mutations(nt_mutations, gene, orf_seq, aa_lookup, failure_map=None,
@@ -493,6 +507,95 @@ def score_nt_mutations(nt_mutations, gene, orf_seq, aa_lookup, failure_map=None,
     return protein_rows, codon_rows
 
 
+def score_aa_mutations(aa_mutations, gene, orf_seq, aa_lookup, failure_map=None):
+    """
+    Score amino-acid mutations (--mutation-level aa), e.g. A123T = Ala123Thr.
+
+    Returns:
+        list: protein_rows (all classes; there is no codon table because an AA
+              substitution does not identify a codon)
+
+    The token supplies position and substituted residue; the wild-type residue
+    of record is the translated ORF codon, as in score_nt_mutations. A token
+    whose wild-type disagrees with the ORF is flagged REF_MISMATCH and still
+    scored. Synonymous tokens score 0 by construction (SYNONYMOUS_PROTEIN_LEVEL)
+    and stop tokens are left unscored (model lacks '*').
+    """
+    failure_map = failure_map or {}
+    aa_re = re.compile(r"^([A-Z*])(\d+)([A-Z*])$")
+    protein_rows = []
+
+    for aa_mut in aa_mutations:
+        if should_skip_mutation(gene, aa_mut, failure_map):
+            continue
+
+        pkey = f"{gene}-{aa_mut}"
+        qc_flags = []
+        prow = {f: "" for f in PROTEIN_FIELDNAMES}
+        prow.update({"pkey": pkey, "nt_mutant": aa_mut})
+
+        m = aa_re.match(aa_mut)
+        if not m or m.group(1) not in AA_SYMBOLS or m.group(3) not in AA_SYMBOLS:
+            prow["qc_flags"] = "INVALID_MUTATION"
+            protein_rows.append(prow)
+            continue
+
+        ref_sym, pos_str, alt_sym = m.groups()
+        aa_pos = int(pos_str)
+        codon_start = (aa_pos - 1) * 3
+        if aa_pos < 1 or codon_start + 3 > len(orf_seq):
+            prow["qc_flags"] = "OUT_OF_RANGE"
+            protein_rows.append(prow)
+            continue
+
+        wt_codon = orf_seq[codon_start:codon_start + 3]
+        wt_aa = codon_to_aa.get(wt_codon, "X")
+        if aa_symbol(wt_aa) != ref_sym:
+            qc_flags.append("REF_MISMATCH")
+
+        aa_mutant = f"{aa_symbol(wt_aa)}{aa_pos}{alt_sym}"
+        mclass = mutation_class(wt_aa, aa_name(alt_sym))
+        prow.update({
+            "codon_position": aa_pos, "wt_codon": wt_codon,
+            "mutant": aa_mutant, "pos": aa_pos, "wt": aa_symbol(wt_aa),
+            "subs": alt_sym, "mutation_class": mclass,
+        })
+
+        if mclass == "UNKNOWN":
+            qc_flags.append("UNKNOWN_CODON")
+        elif mclass == "SYNONYMOUS":
+            prow.update({
+                "prediction_epistatic":   0.0,
+                "prediction_independent": 0.0,
+                "epistatic_contribution": 0.0,
+            })
+            qc_flags.append("SYNONYMOUS_PROTEIN_LEVEL")
+        elif mclass in {"STOP_GAIN", "STOP_LOSS"}:
+            qc_flags.append(mclass)
+        else:
+            scored = aa_lookup.get(aa_mutant)
+            if scored is None:
+                qc_flags.append("NOT_IN_MODEL")
+            else:
+                prow.update({
+                    "prediction_epistatic":      scored["prediction_epistatic"],
+                    "prediction_independent":    scored["prediction_independent"],
+                    "epistatic_contribution":    scored["epistatic_contribution"],
+                    "site_entropy":              scored["site_entropy"],
+                    "mean_epistatic_at_pos":     scored["mean_epistatic_at_pos"],
+                    "std_epistatic_at_pos":      scored["std_epistatic_at_pos"],
+                    "z_score_epistatic":         scored["z_score_epistatic"],
+                    "frequency":                 scored["frequency"],
+                    "column_conservation":       scored["column_conservation"],
+                })
+                qc_flags.append("PASS")
+
+        prow["qc_flags"] = ";".join(qc_flags)
+        protein_rows.append(prow)
+
+    return protein_rows
+
+
 # ---------------------------------------------------------------------------
 # Output writers
 # ---------------------------------------------------------------------------
@@ -511,13 +614,14 @@ def write_codon_output(results, output_path):
 # Discovery / resolution helpers
 # ---------------------------------------------------------------------------
 
-def _find_file_for_gene(gene, path_arg, glob_patterns):
+def _find_file_for_gene(gene, path_arg, glob_patterns, exclude_patterns=None):
     """
     Resolve a per-gene file from a direct path or directory.
 
     Direct file: returned as-is.
     Directory: returns the first file matching any glob pattern whose filename
-               extracts to the given gene name.
+               extracts to the given gene name. Filenames matching any
+               exclude_patterns are dropped from the candidate set first.
     """
     if not path_arg:
         return None
@@ -527,6 +631,8 @@ def _find_file_for_gene(gene, path_arg, glob_patterns):
     if p.is_dir():
         for pattern in glob_patterns:
             for f in sorted(p.glob(pattern)):
+                if exclude_patterns and any(f.match(ex) for ex in exclude_patterns):
+                    continue
                 if extract_gene_from_filename(f.name).upper() == gene.upper():
                     return str(f)
     return None
@@ -619,7 +725,8 @@ def _resolve_per_gene_models(gene, args):
     model_params = None
     if args.msa:
         msa_file = _find_file_for_gene(
-            gene, args.msa, ["*.a2m", "*.msa.fasta", "*.msa.fa", "*.fasta", "*.fa", "*.fas"]
+            gene, args.msa, ["*.a2m", "*.msa.fasta", "*.msa.fa", "*.fasta", "*.fa", "*.fas"],
+            exclude_patterns=["*.codon.*", "*.encoded.fasta"],
         )
         if msa_file:
             focus = args.focus or gene
@@ -675,12 +782,13 @@ def _process_gene(gene, fasta_file, mutations_file, model_params_path,
     Returns (n_protein_rows, n_codon_rows, n_pass, n_syn_scored).
     """
     _, orf_seq = read_orf_sequence(fasta_file)
+    mutation_level = getattr(args, "mutation_level", "nt")
 
-    nt_mutations = trim_muts(mutations_file, log=args.validation_log, gene_name=gene)
-    if not nt_mutations:
+    mutations = trim_muts(mutations_file, log=args.validation_log, gene_name=gene)
+    if not mutations:
         print("  (no mutations) -> skipping")
         return 0, 0, 0, 0
-    print(f"  Loaded {len(nt_mutations)} NT mutations")
+    print(f"  Loaded {len(mutations)} {mutation_level.upper()} mutations")
 
     # Protein model
     aa_lookup = {}
@@ -698,7 +806,7 @@ def _process_gene(gene, fasta_file, mutations_file, model_params_path,
 
     # Codon model
     codon_lookup = None
-    skip_codon = getattr(args, "skip_codon", False)
+    skip_codon = getattr(args, "skip_codon", False) or mutation_level == "aa"
     if codon_model_params_path and not skip_codon:
         if not _CODON_ENCODING_AVAILABLE:
             print("  Warning: codon_encoding module not available; synonymous unscored",
@@ -715,16 +823,22 @@ def _process_gene(gene, fasta_file, mutations_file, model_params_path,
                   file=sys.stderr)
 
     failure_map = load_validation_failures(args.validation_log) if args.validation_log else {}
-    protein_rows, codon_rows = score_nt_mutations(
-        nt_mutations, gene, orf_seq, aa_lookup,
-        failure_map=failure_map, codon_lookup=codon_lookup,
-        skip_codon=getattr(args, "skip_codon", False),
-    )
+    if mutation_level == "aa":
+        protein_rows = score_aa_mutations(
+            mutations, gene, orf_seq, aa_lookup, failure_map=failure_map,
+        )
+        codon_rows = []
+    else:
+        protein_rows, codon_rows = score_nt_mutations(
+            mutations, gene, orf_seq, aa_lookup,
+            failure_map=failure_map, codon_lookup=codon_lookup,
+            skip_codon=skip_codon,
+        )
 
     gene_dir = Path(output_dir) / gene / "EVmutation"
     gene_dir.mkdir(parents=True, exist_ok=True)
     write_protein_output(protein_rows, str(gene_dir / f"{gene}.protein.tsv"))
-    if not getattr(args, "skip_codon", False):
+    if not skip_codon:
         write_codon_output(codon_rows, str(gene_dir / f"{gene}.codon.tsv"))
 
     n_pass       = sum(1 for r in protein_rows if "PASS" in (r.get("qc_flags") or ""))
@@ -755,6 +869,11 @@ def main():
 Output structure (per gene):
   <output>/<GENE>/EVmutation/<GENE>.protein.tsv
   <output>/<GENE>/EVmutation/<GENE>.codon.tsv
+
+Mutation level (--mutation-level):
+  - nt (default): CDS nucleotide tokens; both tables are written.
+  - aa: protein tokens scored against the protein model; protein table only
+    (an AA substitution does not identify a codon).
 
 Model params resolution (--model-params / --codon-model-params):
   - File: used directly.
@@ -795,6 +914,11 @@ Examples:
                         help="ORF FASTA file (single gene) or directory (multi-gene)")
     parser.add_argument("--mutations", required=True,
                         help="Mutations CSV file or directory of per-gene CSVs")
+    parser.add_argument("--mutation-level", choices=["nt", "aa"], default="nt",
+                        help="Level of the tokens in --mutations: nt = CDS nucleotide "
+                             "substitution (G123A, default), aa = protein substitution "
+                             "(A123T means Ala123Thr). Tokens such as A123T are valid at "
+                             "both levels, so the level is never inferred")
 
     # Model params (file or directory; optional)
     parser.add_argument("--model-params",

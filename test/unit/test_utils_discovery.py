@@ -235,10 +235,18 @@ class TestLoadWtSequences:
         result = load_wt_sequences(str(tmp_path), wt_header="ORF")
         assert result["TP53"] == "CCCC"
 
-    def test_fallback_to_longest(self, tmp_path):
+    def test_skips_ambiguous_multirecord(self, tmp_path):
+        # F39: with >1 record and no header match there is no defensible way to pick
+        # the WT isoform, so the file is skipped (loud absence) instead of silently
+        # seeding every downstream metric from the longest record.
         _write(tmp_path / "GENE.fasta", ">short\nAA\n>long\nACGTACGTACGT\n")
         result = load_wt_sequences(str(tmp_path), wt_header="nonexistent")
-        assert "GENE" in result
+        assert "GENE" not in result
+
+    def test_single_record_used_without_header_match(self, tmp_path):
+        # A lone record is unambiguous, so it is still used even if the header differs.
+        _write(tmp_path / "GENE.fasta", ">whatever\nACGTACGTACGT\n")
+        result = load_wt_sequences(str(tmp_path), wt_header="nonexistent")
         assert result["GENE"] == "ACGTACGTACGT"
 
     def test_single_file(self, tmp_path):

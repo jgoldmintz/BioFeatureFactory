@@ -86,17 +86,17 @@ class TestShouldSkipMutation:
 class TestGetMutationDataBioAccurate:
 
     def test_normal_mutation(self):
-        pos, (orig, mut) = get_mutation_data_bioAccurate("Y110F")
+        pos, (orig, mut) = get_mutation_data_bioAccurate("Y110F", is_nt=False)
         assert pos == 110
         assert orig == "Y"
         assert mut == "F"
 
     def test_stop_codon_returns_none(self):
-        pos, _ = get_mutation_data_bioAccurate("Y110Stop")
+        pos, _ = get_mutation_data_bioAccurate("Y110Stop", is_nt=False)
         assert pos is None
 
     def test_position_one(self):
-        pos, (orig, mut) = get_mutation_data_bioAccurate("M1V")
+        pos, (orig, mut) = get_mutation_data_bioAccurate("M1V", is_nt=False)
         assert pos == 1
 
 

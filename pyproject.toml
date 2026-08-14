@@ -16,6 +16,21 @@ dependencies = [
     "scipy>=1.7.0",
 ]
 
+[project.scripts]
+bff-rnafold      = "biofeaturefactory.RNAfold.run_viennaRNA_pipeline:main"
+bff-genesplicer  = "biofeaturefactory.genesplicer.genesplicer_ensemble:main"
+bff-netphos      = "biofeaturefactory.netphos.netphos_pipeline:main"
+bff-netmhc       = "biofeaturefactory.netMHC.netmhc_pipeline:main"
+bff-netnglyc     = "biofeaturefactory.netNglyc.netnglyc_pipeline:main"
+bff-netsurfp3    = "biofeaturefactory.NetSurfP3.netsurfp3_pipeline:main"
+bff-miranda      = "biofeaturefactory.miranda.miranda_ensemble:main"
+bff-codon-usage  = "biofeaturefactory.codon_usage.codon_usage_pipeline:main"
+bff-rare-codon   = "biofeaturefactory.rare_codon.rare_codon_pipeline:main"
+bff-evmutation   = "biofeaturefactory.mutation_effects.evmutation_pipeline:main"
+bff-adabmdca     = "biofeaturefactory.mutation_effects.adabmdca_pipeline:main"
+bff-alphafold3   = "biofeaturefactory.alphafold3.alphafold3_pipeline:main"
+bff-spliceai     = "biofeaturefactory.spliceai.annot_to_spliceai:main"
+
 [tool.setuptools.packages.find]
 include = ["biofeaturefactory*"]
 
@@ -23,10 +38,12 @@ include = ["biofeaturefactory*"]
 rnafold = ["ViennaRNA"]
 evmutation = ["numba>=0.53"]
 rare-codon = ["networkx>=2.6", "prody>=2.0"]
-# adabmDCA pulls in torch, matplotlib, pandas>=2.2, tqdm, wandb, biopython, seaborn
-# transitively (see adabmDCApy setup.py). Requires Python >= 3.10.
-# torch listed explicitly because adabmdca_pipeline.py imports it directly.
-adabmdca = ["adabmDCA>=0.7.5", "torch>=2.0.0"]
+# adabmDCA itself is installed EDITABLE from the spqb/adabmDCApy clone by
+# bootstrap step 8b — NOT from PyPI (the PyPI 'adabmDCA' is a different package).
+# This extra provides only the torch runtime dep that adabmdca_pipeline.py
+# imports directly; adabmDCA pulls in matplotlib, pandas>=2.2, tqdm, wandb,
+# biopython, seaborn transitively (see adabmDCApy setup.py). Requires Python >= 3.10.
+adabmdca = ["torch>=2.0.0"]
 # NetSurfP3 wrapper deps. torch is a DIRECT import in netsurfp3_pipeline.py; the
 # other five are nsp3's own runtime deps (also pulled by `pip install -e nsp3/nsp3`),
 # listed here so `pip install .[all]` / `.[netsurfp3]` is self-sufficient.
@@ -44,7 +61,6 @@ all = [
     "numba>=0.53",
     "networkx>=2.6",
     "prody>=2.0",
-    "adabmDCA>=0.7.5",
     "torch>=2.0.0",
     "torchvision>=0.15.0",
     "optuna>=4.8.0",
