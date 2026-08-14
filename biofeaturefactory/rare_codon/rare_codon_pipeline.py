@@ -133,16 +133,40 @@ def run_rare_codon_analysis(gene, msa_path, usage_path, wt_gi, window_size=15,
     """
     # Load and clean MSA; sanitize ambiguous codons before clean_sequences
     seqs = rc_read_fasta(msa_path)
-    seqs = {gi: ''.join(c if (c == '---' or c in codon_to_aa) else '---'
+    # F54: codon_to_aa is uppercase-only (utility.py), so a soft-masked lowercase
+    # codon ('atg') failed the membership test and was silently blanked to '---',
+    # deleting real codons from the analysis; a fully lowercase WT collapsed to
+    # wt_len=0. Upper-case before the test and store the upper-cased codon.
+    seqs = {gi: ''.join(c.upper() if (c == '---' or c.upper() in codon_to_aa) else '---'
                         for c in (seq[i:i+3] for i in range(0, len(seq), 3)))
             for gi, seq in seqs.items()}
     seqs = clean_sequences(seqs)
 
     if wt_gi not in seqs:
-        #raise ValueError(f"WT sequence '{wt_gi}' not found in MSA")
-        wt_gi = next(iter(seqs))
+        # F53: do NOT silently fall back to next(iter(seqs)). wt_gi anchors wt_len,
+        # the overlap/identity filters, sorted_gis and aa_identity, so an arbitrary
+        # homolog re-bases the entire enrichment analysis with no diagnostic.
+        # The original raise was removed in e97c9e37 ("add directory input mode")
+        # because one --wt-gi cannot match every gene and the raise aborted the run.
+        # That is no longer a problem: _run_single_gene wraps this call in
+        # try/except Exception and returns, so raising skips ONE gene loudly and
+        # directory mode continues with the rest.
+        raise ValueError(
+            f"WT sequence '{wt_gi}' not found in MSA {msa_path} "
+            f"({len(seqs)} records; first: {next(iter(seqs), 'none')}). "
+            f"Pass --wt-gi matching the MSA header for this gene."
+        )
     # Filter sequences by length
     wt_len = len(seqs[wt_gi]) - seqs[wt_gi].count('-')
+    if wt_len == 0:
+        # F56: every 3-mer was blanked to '---' above, i.e. this is not a codon MSA
+        # (a protein MSA does exactly this). Previously surfaced as an opaque
+        # ZeroDivisionError at the `gi_len / wt_len` length filter below.
+        raise ValueError(
+            f"{gene}: WT '{wt_gi}' has 0 valid codons after sanitization — "
+            f"{msa_path} does not look like a codon-aware nucleotide MSA "
+            f"(a protein MSA produces this)."
+        )
     for gi in list(seqs.keys()):
         if gi == wt_gi:
             continue
@@ -209,12 +233,19 @@ def run_rare_codon_analysis(gene, msa_path, usage_path, wt_gi, window_size=15,
 
 def process_mutations(mutations_list, gene, orf_sequence, rc_results, window_size, failure_map=None):
     """
-    Map mutations to rare codon enrichment statistics.
+    Annotate mutations with the rare codon enrichment of the window they fall in.
+
+    SCOPE: the reported enrichment is a windowed WILD-TYPE property, derived from
+    the WT sequence and its ortholog MSA. It is NOT allele-specific: only the
+    codon position of the mutation is used, the mutant allele is not. Every
+    mutation mapping to the same codon window therefore receives identical
+    p_enriched/p_depleted/f_enriched_wt/n_rare values, and no WT-vs-MUT delta is
+    computed or implied by these columns.
 
     Args:
         mutations_list: List of mutation strings
         gene: Gene symbol
-        orf_sequence: ORF nucleotide sequence
+        orf_sequence: ORF nucleotide sequence (unused; enrichment is MSA-derived)
         rc_results: Dict from run_rare_codon_analysis
         window_size: Window size used in analysis
         failure_map: Optional validation failure map
@@ -224,6 +255,7 @@ def process_mutations(mutations_list, gene, orf_sequence, rc_results, window_siz
     """
     results = []
     failure_map = failure_map or {}
+    warned_missing = False
 
     for ntposnt in mutations_list:
         if should_skip_mutation(gene, ntposnt, failure_map):
@@ -233,7 +265,7 @@ def process_mutations(mutations_list, gene, orf_sequence, rc_results, window_siz
         pkey = f"{gene}-{ntposnt}"
 
         # Get mutation position
-        pos_data = get_mutation_data_bioAccurate(ntposnt)
+        pos_data = get_mutation_data_bioAccurate(ntposnt, is_nt=True)
         if pos_data[0] is None:
             qc_flags.append('INVALID_MUTATION')
             results.append({
@@ -259,6 +291,16 @@ def process_mutations(mutations_list, gene, orf_sequence, rc_results, window_siz
 
         if rc_data is None:
             # Position may be near edges (not covered by window)
+            if not warned_missing:
+                keys = sorted(rc_results)
+                observed = f"{keys[0]}..{keys[-1]}" if keys else "none"
+                print(f"{gene}: codon_position {codon_pos} absent from rare codon "
+                      f"results (observed keys {observed}, n={len(rc_results)}). "
+                      f"Expected keys are 1-based window-centre codon positions; "
+                      f"if most mutations miss, the cg_cotrans key convention "
+                      f"(0- vs 1-based, centre vs start) does not match.",
+                      file=sys.stderr)
+                warned_missing = True
             qc_flags.append('POSITION_NOT_IN_WINDOW')
             results.append({
                 'pkey': pkey,
@@ -437,7 +479,7 @@ def _build_usage_pgz_from_msa(msa_inputs, usage_path, pseudocount=1.0):
         for gi, seq in seqs.items():
             sanitized = []
             for i in range(0, len(seq), 3):
-                codon = seq[i:i+3]
+                codon = seq[i:i+3].upper()
                 sanitized.append(codon if (codon == '---' or codon in codon_to_aa) else '---')
             out[gi] = ''.join(sanitized)
         return out
@@ -535,8 +577,12 @@ def _run_single_gene(gene, fasta_file, msa_file, mut_file, args, wt_gi, output_d
     write_output(results, str(out_dir / f"{gene}.rare_codon.tsv"))
 
     if results:
-        n_enriched = sum(1 for r in results if r.get('p_enriched') and float(r['p_enriched']) < 0.05)
-        n_depleted = sum(1 for r in results if r.get('p_depleted') and float(r['p_depleted']) < 0.05)
+        n_enriched = sum(1 for r in results
+                         if r.get('p_enriched') not in (None, '')
+                         and float(r['p_enriched']) < 0.05)
+        n_depleted = sum(1 for r in results
+                         if r.get('p_depleted') not in (None, '')
+                         and float(r['p_depleted']) < 0.05)
         print(f"\nSummary for {gene}:")
         print(f"  Total mutations: {len(results)}")
         print(f"  In enriched regions (p<0.05): {n_enriched}")

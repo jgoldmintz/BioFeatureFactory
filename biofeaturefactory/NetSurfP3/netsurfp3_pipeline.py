@@ -781,10 +781,14 @@ def main():
             # Amino acid input - use directly
             wt_nt_seq = None
             wt_aa_seq = wt_seq
-            # Basic validation - check for non-AA characters
-            valid_aa = set('ACDEFGHIKLMNPQRSTVWY*')
-            if not all(c.upper() in valid_aa for c in wt_aa_seq):
-                print(f"Warning: {gene_name} contains non-amino acid characters, skipping")
+            # Basic validation - check for non-AA characters. U/O are real residues
+            # and X/B/Z are IUPAC ambiguity codes; ESM-1b has a learned token for each,
+            # so NSP3 scores them normally and one ambiguous residue no longer costs
+            # the gene every one of its mutations.
+            valid_aa = set('ACDEFGHIKLMNPQRSTVWYUOXBZ*')
+            invalid_chars = sorted({c.upper() for c in wt_aa_seq if c.upper() not in valid_aa})
+            if invalid_chars:
+                print(f"Warning: {gene_name} contains non-amino acid characters ({''.join(invalid_chars)}), skipping")
                 continue
 
         if args.verbose:
@@ -851,8 +855,11 @@ def main():
                 mut_pred = all_predictions[mut_id]
 
                 # Extract mutation info from ID (e.g., "ABCB1-A1002T")
-                mutation_str = mut_id.split('-', 1)[1] if '-' in mut_id else mut_id
-                nt_info = get_mutation_data_bioAccurate(mutation_str)
+                # Key is built as f"{gene_name}-{mutant_clean}" (utility.py:1544);
+                # strip the exact gene-name prefix so hyphenated genes (NKX2-1,
+                # HLA-A, MT-CO1) parse correctly instead of split('-',1) breaking them.
+                mutation_str = mut_id[len(gene_name) + 1:] if mut_id.startswith(f"{gene_name}-") else mut_id
+                nt_info = get_mutation_data_bioAccurate(mutation_str, is_nt=(wt_nt_seq is not None))
                 if nt_info[0] is None:
                     continue
 

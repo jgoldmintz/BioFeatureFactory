@@ -59,7 +59,40 @@ DEFAULT_MAX_WORKERS = 8
 # helpers: run genesplicer
 # ---------------------------------------------------------------------------
 
-def _run_genesplicer_on_seq(seq_name: str, seq: str, genesplicer_dir: str | None, model_rel: str = "../human") -> pd.DataFrame:
+def _resolve_model_dir(model_dir_arg: str | None, genesplicer_dir: str | None) -> str:
+    """Return an absolute GeneSplicer model directory (one containing config_file).
+
+    Precedence:
+      1. explicit --model-dir;
+      2. source-build layout: {genesplicer_dir}/../human (binary in .../sources);
+      3. PATH/conda layout: probed relative to the resolved `genesplicer` binary —
+         {bindir}/human (conda share layout, model beside the binary) or
+         {bindir}/../human (source layout).
+    Exits with a clear message if none contains config_file, rather than letting
+    a missing model surface as silent empty GeneSplicer output.
+    """
+    candidates = []
+    if model_dir_arg:
+        candidates.append(model_dir_arg)
+    elif genesplicer_dir:
+        candidates.append(os.path.join(genesplicer_dir, "..", "human"))
+    else:
+        gs = shutil.which("genesplicer")
+        if gs:
+            bindir = os.path.dirname(os.path.realpath(gs))
+            candidates.append(os.path.join(bindir, "human"))         # conda share layout
+            candidates.append(os.path.join(bindir, "..", "human"))   # source-build layout
+    tried = []
+    for c in candidates:
+        c_abs = os.path.abspath(c)
+        tried.append(c_abs)
+        if os.path.isfile(os.path.join(c_abs, "config_file")):
+            return c_abs
+    sys.exit(f"GeneSplicer human model not found (need a directory containing config_file). "
+             f"Tried: {tried or 'none'}. Pass --model-dir with an absolute path.")
+
+
+def _run_genesplicer_on_seq(seq_name: str, seq: str, genesplicer_dir: str | None, model_dir: str) -> pd.DataFrame:
     """
     Run GeneSplicer on a single in-memory sequence.
     Returns a DataFrame with columns:
@@ -79,18 +112,29 @@ def _run_genesplicer_on_seq(seq_name: str, seq: str, genesplicer_dir: str | None
         tmp_path = tmpf.name
 
     out = None
+    rc = None
+    err = ""
+    cmd = ""
     try:
         if genesplicer_dir:
-            cmd = f"cd {genesplicer_dir} && ./genesplicer {tmp_name} {model_rel}"
+            cmd = f"cd {genesplicer_dir} && ./genesplicer {tmp_name} {model_dir}"
         else:
-            cmd = f"genesplicer {tmp_path} {model_rel}"
+            cmd = f"genesplicer {tmp_path} {model_dir}"
         result = subprocess.run(cmd, shell=True, capture_output=True, text=True)
         out = result.stdout.strip()
+        rc = result.returncode
+        err = (result.stderr or "").strip()
     finally:
         try:
             os.remove(tmp_path)
         except OSError:
             pass
+
+    # F28: a nonzero exit returns empty stdout that is otherwise indistinguishable
+    # from "no splice sites". Raise so the caller records a failure instead of
+    # silently classifying every counterpart allele's sites as gained/lost.
+    if rc != 0:
+        raise RuntimeError(f"GeneSplicer failed for {seq_name} (rc={rc}): {err or 'no stderr'}")
 
     if not out:
         return pd.DataFrame(columns=["End5", "End3", "Score", "confidence", "splice_site_type"])
@@ -195,7 +239,12 @@ def _build_sites_for_allele(pkey: str,
         else:
             site_pos = int(r["End3"])
 
-        dist = abs(site_pos - snv_pos)
+        # site_pos is GeneSplicer 1-based (End5/End3); snv_pos is 0-based
+        # (get_mutation_data returns pos-1). Shift the SNV into GeneSplicer's
+        # 1-based frame so a site on the mutated base reports dist=0. bioAccurate
+        # returns the same 1-based value but costs a second token parse + a
+        # Stop-token None branch, so (snv_pos + 1) is preferred (F31).
+        dist = abs(site_pos - (snv_pos + 1))
         in_radius = 0
         if report_radius is not None:
             in_radius = 1 if dist <= report_radius else 0
@@ -213,17 +262,18 @@ def _build_sites_for_allele(pkey: str,
             "in_radius": in_radius,
         })
 
-    # rank within allelextype by score
+    # rank within allele×type by score (F33). The old sort/reset/set_index chain
+    # reattached score-ordered rank values onto position-ordered index labels, so
+    # rank tracked row position, not score. pd.Series.rank does it directly;
+    # method="first" breaks ties by order to keep ranks distinct 1..n.
     df_sites = pd.DataFrame(rows)
     if not df_sites.empty:
         for t in ("donor", "acceptor"):
             mask = df_sites["type"] == t
             df_sites.loc[mask, "rank"] = (
-                df_sites[mask]
-                .sort_values("score", ascending=False)
-                .reset_index(drop=True)
-                .reset_index()
-                .set_index(df_sites[mask].index)["index"] + 1
+                df_sites.loc[mask, "score"]
+                .rank(ascending=False, method="first")
+                .astype(int)
             )
     else:
         df_sites["rank"] = pd.NA
@@ -235,10 +285,21 @@ def _build_sites_for_allele(pkey: str,
 # clustering and event detection
 # ---------------------------------------------------------------------------
 
-def _cluster_sites(sites_df: pd.DataFrame, cluster_radius: int) -> pd.DataFrame:
+def _cluster_sites(sites_df: pd.DataFrame, cluster_radius: int, max_cluster_span: int = 0) -> pd.DataFrame:
     """
     Assign cluster_id per (pkey, allele, type) using single-linkage by position.
     cluster_id is the same across alleles later when we merge WT and MUT.
+
+    max_cluster_span is accepted but INERT (0 = unbounded), and must stay that way
+    until a non-fabricating bound exists. Single linkage is unbounded — 101 sites
+    3 bp apart at radius 3 weld into one 300 bp cluster — but a left-anchored fixed
+    window is not the fix: it cuts at an absolute boundary rather than at a gap, so
+    a genuine 1 bp WT/MUT register pair straddling the boundary is split into
+    separate clusters. The orphaned WT site then pairs with a bystander present in
+    both alleles and a high-magnitude 'shifted'/'gained' event is fabricated
+    (measured: bystanders at 100/103/106/109, WT 112 -> MUT 113, span 12).
+    A correct bound must cut at the largest gap and never separate a cross-allele
+    pair. See PIPELINE_ERROR_AUDIT.md finding 30(c).
     """
     if sites_df is None or sites_df.empty:
         return sites_df
@@ -249,6 +310,7 @@ def _cluster_sites(sites_df: pd.DataFrame, cluster_radius: int) -> pd.DataFrame:
     current_key = None
     current_cluster = 0
     last_pos = None
+    cluster_start = None
 
     for idx, row in sites_df.iterrows():
         key = (row["pkey"], row["type"])
@@ -257,15 +319,18 @@ def _cluster_sites(sites_df: pd.DataFrame, cluster_radius: int) -> pd.DataFrame:
             current_key = key
             current_cluster = 1
             last_pos = pos
+            cluster_start = pos
             cluster_ids.append(f"{row['type'][0]}{current_cluster}")
             continue
 
         # same key
-        if abs(pos - last_pos) <= cluster_radius:
+        if abs(pos - last_pos) <= cluster_radius and (
+                not max_cluster_span or abs(pos - cluster_start) <= max_cluster_span):
             # same cluster
             cluster_ids.append(f"{row['type'][0]}{current_cluster}")
         else:
             current_cluster += 1
+            cluster_start = pos
             cluster_ids.append(f"{row['type'][0]}{current_cluster}")
         last_pos = pos
 
@@ -275,13 +340,15 @@ def _cluster_sites(sites_df: pd.DataFrame, cluster_radius: int) -> pd.DataFrame:
 
 def _pair_clusters_to_events(sites_df: pd.DataFrame,
                              visibility_threshold: float,
-                             shift_bp: int) -> pd.DataFrame:
+                             shift_bp: int) -> tuple[pd.DataFrame, int]:
     """
     From per-site rows, produce per-cluster per-pkey events.
     For each (pkey, type, cluster_id):
         - take top WT (by score) and top MUT
         - compute deltas
         - classify
+    Returns the events frame and the number of non-top cluster members dropped
+    by the top-of-cluster selection.
     """
     if sites_df is None or sites_df.empty:
         return pd.DataFrame(columns=[
@@ -292,9 +359,10 @@ def _pair_clusters_to_events(sites_df: pd.DataFrame,
             "rank_wt", "rank_mut",
             "conf_wt", "conf_mut", "conf_weighted_delta",
             "cls", "is_high_impact", "priority", "in_radius",
-        ])
+        ]), 0
 
     events = []
+    n_discarded = 0
     grouped = sites_df.groupby(["pkey", "type", "cluster_id"], dropna=False)
 
     for (pkey, sstype, cluster_id), grp in grouped:
@@ -304,6 +372,7 @@ def _pair_clusters_to_events(sites_df: pd.DataFrame,
 
         wt_site = wt_grp.iloc[0] if not wt_grp.empty else None
         mut_site = mut_grp.iloc[0] if not mut_grp.empty else None
+        n_discarded += max(len(wt_grp) - 1, 0) + max(len(mut_grp) - 1, 0)
 
         wt_visible = wt_site is not None and float(wt_site["score"]) >= visibility_threshold
         mut_visible = mut_site is not None and float(mut_site["score"]) >= visibility_threshold
@@ -387,12 +456,103 @@ def _pair_clusters_to_events(sites_df: pd.DataFrame,
             "in_radius": in_radius,
         })
 
-    return pd.DataFrame(events)
+    return pd.DataFrame(events), n_discarded
 
 
 # ---------------------------------------------------------------------------
 # summarization with HARDENING
 # ---------------------------------------------------------------------------
+
+# ---------------------------------------------------------------------------
+# redirect reconciliation
+# ---------------------------------------------------------------------------
+
+DEFAULT_REDIRECT_MAX_BP = 100   # link a lost/gained pair within this distance
+DEFAULT_REGISTER_MAX_BP = 12    # <= this is a register shift, not a new site
+DEFAULT_REDIRECT_SNV_BP = 80    # variant must be this close to the lost site
+DEFAULT_CLUSTER_RADIUS = 3
+DEFAULT_MAX_CLUSTER_SPAN = 0    # 0 = unbounded; a fixed window splits real pairs (see _cluster_sites)
+
+
+def _reconcile_redirects(events_df: pd.DataFrame,
+                         max_bp: int = DEFAULT_REDIRECT_MAX_BP,
+                         register_bp: int = DEFAULT_REGISTER_MAX_BP,
+                         snv_max_bp: int = DEFAULT_REDIRECT_SNV_BP) -> pd.DataFrame:
+    """Link `lost` + `gained` event pairs that represent one redirected site.
+
+    A single physical redirection whose displacement exceeds the cluster radius
+    is emitted by _pair_clusters_to_events as two independent events, which
+    double-counts it in every summary metric. This pass identifies those pairs
+    and tags them with a shared redirect_id so the summariser can count them
+    once.
+
+    Rows are NEVER merged and dscore is NEVER rewritten. `cls` is preserved.
+    The relabel lives entirely in the added columns, so it is reversible and
+    auditable, and a downstream consumer can re-threshold on redirect_dpos or
+    score_transfer_ratio without re-running GeneSplicer.
+
+    Matching is type-matched, one-to-one, nearest-first (ties broken by the
+    stronger gained site, then by position for determinism).
+
+    Adds columns:
+        redirect_id           shared id for the two rows of a linked pair
+        redirect_dpos         mut_pos - wt_pos, signed
+        score_transfer_ratio  mut_score(gain) / wt_score(loss); diagnostic only
+        redirect_class        'shifted' (<= register_bp) or 'redirected'
+        cls_reconciled        e.g. 'lost_redirected', 'gained_shifted'
+    """
+    if events_df is None or events_df.empty:
+        return events_df
+
+    ev = events_df.copy()
+    for c in ("redirect_id", "redirect_dpos", "score_transfer_ratio", "redirect_class"):
+        if c not in ev.columns:
+            ev[c] = pd.NA
+    ev["cls_reconciled"] = ev["cls"]
+
+    for (pkey, sstype), grp in ev.groupby(["pkey", "type"], dropna=False):
+        losses = grp[(grp["cls"] == "lost") & grp["wt_pos"].notna()]
+        gains = grp[(grp["cls"] == "gained") & grp["mut_pos"].notna()]
+        if losses.empty or gains.empty:
+            continue
+
+        cands = []
+        for li, lrow in losses.iterrows():
+            d_snv = lrow["distance_to_snv"]
+            if pd.notna(d_snv) and float(d_snv) > snv_max_bp:
+                continue  # variant too far away to have plausibly caused the loss
+            wt_pos = int(lrow["wt_pos"])
+            wt_s = float(lrow["wt_score"]) if pd.notna(lrow["wt_score"]) else 0.0
+            for gi, grow in gains.iterrows():
+                mut_pos = int(grow["mut_pos"])
+                dpos = mut_pos - wt_pos
+                if abs(dpos) > max_bp:
+                    continue
+                mut_s = float(grow["mut_score"]) if pd.notna(grow["mut_score"]) else 0.0
+                ratio = (mut_s / wt_s) if wt_s > 1e-6 else float("nan")
+                # sort key: nearest, then strongest gain, then position (determinism)
+                cands.append((abs(dpos), -mut_s, wt_pos, mut_pos, li, gi, dpos, ratio))
+
+        cands.sort(key=lambda t: t[:4])
+        used_l, used_g = set(), set()
+        for _absd, _negs, wt_pos, mut_pos, li, gi, dpos, ratio in cands:
+            if li in used_l or gi in used_g:
+                continue
+            used_l.add(li)
+            used_g.add(gi)
+            # deterministic id: stable between the global run and the per-gene run
+            tag = f"{sstype[0]}:{wt_pos}>{mut_pos}"
+            rclass = "shifted" if abs(dpos) <= register_bp else "redirected"
+            for ix in (li, gi):
+                ev.at[ix, "redirect_id"] = tag
+                ev.at[ix, "redirect_dpos"] = dpos
+                ev.at[ix, "score_transfer_ratio"] = ratio
+                ev.at[ix, "redirect_class"] = rclass
+            ev.at[li, "cls_reconciled"] = f"lost_{rclass}"
+            ev.at[gi, "cls_reconciled"] = f"gained_{rclass}"
+
+    return ev
+
 
 def _summarize_variant(events_df: pd.DataFrame,
                        sites_df: pd.DataFrame,
@@ -417,12 +577,14 @@ def _summarize_variant(events_df: pd.DataFrame,
             "global_count_gained_high": 0,
             "global_count_lost_high": 0,
             "global_count_shifted": 0,
+            "global_count_redirected": 0,
             "global_max_abs_deltascore": 0.0,
             "global_sum_weighted_abs_delta": 0.0,
             "nearest_event_bp_any": None,
             "local_count_gained_high": 0,
             "local_count_lost_high": 0,
             "local_count_shifted": 0,
+            "local_count_redirected": 0,
             "local_max_abs_deltascore": 0.0,
             "nearest_event_bp_local": None,
             "frac_effect_in_radius": 0.0,
@@ -449,12 +611,14 @@ def _summarize_variant(events_df: pd.DataFrame,
             "global_count_gained_high": 0,
             "global_count_lost_high": 0,
             "global_count_shifted": 0,
+            "global_count_redirected": 0,
             "global_max_abs_deltascore": 0.0,
             "global_sum_weighted_abs_delta": 0.0,
             "nearest_event_bp_any": None,
             "local_count_gained_high": 0,
             "local_count_lost_high": 0,
             "local_count_shifted": 0,
+            "local_count_redirected": 0,
             "local_max_abs_deltascore": 0.0,
             "nearest_event_bp_local": None,
             "frac_effect_in_radius": 0.0,
@@ -476,11 +640,26 @@ def _summarize_variant(events_df: pd.DataFrame,
     n_clusters = len(sub_events)
 
     # global metrics
-    global_count_gained_high = len(sub_events[(sub_events["cls"] == "gained") &
-                                              (sub_events[["wt_score", "mut_score"]].max(axis=1) >= high_cutoff)])
-    global_count_lost_high = len(sub_events[(sub_events["cls"] == "lost") &
-                                            (sub_events[["wt_score", "mut_score"]].max(axis=1) >= high_cutoff)])
-    global_count_shifted = len(sub_events[sub_events["cls"] == "shifted"])
+    # rows that belong to a linked redirect pair are counted via redirect_id,
+    # not twice as an independent gain and an independent loss
+    if "redirect_id" in sub_events.columns:
+        linked = sub_events["redirect_id"].notna()
+    else:
+        linked = pd.Series(False, index=sub_events.index)
+    unlinked = sub_events[~linked]
+    linked_ev = sub_events[linked]
+
+    global_count_gained_high = len(unlinked[(unlinked["cls"] == "gained") &
+                                            (unlinked[["wt_score", "mut_score"]].max(axis=1) >= high_cutoff)])
+    global_count_lost_high = len(unlinked[(unlinked["cls"] == "lost") &
+                                          (unlinked[["wt_score", "mut_score"]].max(axis=1) >= high_cutoff)])
+    global_count_shifted = (
+        len(unlinked[unlinked["cls"] == "shifted"])
+        + linked_ev.loc[linked_ev["redirect_class"] == "shifted", "redirect_id"].nunique()
+    )
+    global_count_redirected = (
+        linked_ev.loc[linked_ev["redirect_class"] == "redirected", "redirect_id"].nunique()
+    )
 
     # max abs delta
     if not sub_events["dscore"].isna().all():
@@ -509,11 +688,24 @@ def _summarize_variant(events_df: pd.DataFrame,
         report_radius = 151  # fallback
 
     in_local = sub_events[(sub_events["distance_to_snv"] <= report_radius)]
-    local_count_gained_high = len(in_local[(in_local["cls"] == "gained") &
-                                           (in_local[["wt_score", "mut_score"]].max(axis=1) >= high_cutoff)])
-    local_count_lost_high = len(in_local[(in_local["cls"] == "lost") &
-                                         (in_local[["wt_score", "mut_score"]].max(axis=1) >= high_cutoff)])
-    local_count_shifted = len(in_local[in_local["cls"] == "shifted"])
+    if "redirect_id" in in_local.columns:
+        l_linked = in_local["redirect_id"].notna()
+    else:
+        l_linked = pd.Series(False, index=in_local.index)
+    l_unlinked = in_local[~l_linked]
+    l_linked_ev = in_local[l_linked]
+
+    local_count_gained_high = len(l_unlinked[(l_unlinked["cls"] == "gained") &
+                                             (l_unlinked[["wt_score", "mut_score"]].max(axis=1) >= high_cutoff)])
+    local_count_lost_high = len(l_unlinked[(l_unlinked["cls"] == "lost") &
+                                           (l_unlinked[["wt_score", "mut_score"]].max(axis=1) >= high_cutoff)])
+    local_count_shifted = (
+        len(l_unlinked[l_unlinked["cls"] == "shifted"])
+        + l_linked_ev.loc[l_linked_ev["redirect_class"] == "shifted", "redirect_id"].nunique()
+    )
+    local_count_redirected = (
+        l_linked_ev.loc[l_linked_ev["redirect_class"] == "redirected", "redirect_id"].nunique()
+    )
     if not in_local.empty and not in_local["dscore"].isna().all():
         local_max_abs_deltascore = float(in_local["dscore"].abs().max(skipna=True))
         nearest_event_bp_local = int(in_local["distance_to_snv"].min(skipna=True))
@@ -575,12 +767,14 @@ def _summarize_variant(events_df: pd.DataFrame,
         "global_count_gained_high": global_count_gained_high,
         "global_count_lost_high": global_count_lost_high,
         "global_count_shifted": global_count_shifted,
+        "global_count_redirected": global_count_redirected,
         "global_max_abs_deltascore": global_max_abs_deltascore,
         "global_sum_weighted_abs_delta": global_sum_weighted_abs_delta,
         "nearest_event_bp_any": nearest_event_bp_any,
         "local_count_gained_high": local_count_gained_high,
         "local_count_lost_high": local_count_lost_high,
         "local_count_shifted": local_count_shifted,
+        "local_count_redirected": local_count_redirected,
         "local_max_abs_deltascore": local_max_abs_deltascore,
         "nearest_event_bp_local": nearest_event_bp_local,
         "frac_effect_in_radius": frac_effect_in_radius,
@@ -599,6 +793,7 @@ def _summarize_variant(events_df: pd.DataFrame,
 def _process_gene(fasta_path: Path,
                   gene_mapping_df: pd.DataFrame,
                   genesplicer_dir: str,
+                  model_dir: str,
                   pipeline: str,
                   window: int,
                   report_radius: int,
@@ -606,6 +801,8 @@ def _process_gene(fasta_path: Path,
                   high_cutoff: float,
                   shift_bp: int,
                   distance_k: int,
+                  cluster_radius: int,
+                  max_cluster_span: int,
                   failure_map: dict):
     """
     Per-gene worker:
@@ -627,6 +824,7 @@ def _process_gene(fasta_path: Path,
         "skipped_invalid": 0,
         "skipped_out_of_range": 0,
         "skipped_runtime": 0,
+        "cluster_members_discarded": 0,
     }
     fa = read_fasta(str(fasta_path))
     if not fa:
@@ -640,7 +838,12 @@ def _process_gene(fasta_path: Path,
     wt_len = len(wt_seq)
 
     # run WT once (full)
-    wt_df = _run_genesplicer_on_seq(f"{gene_name}_WT", wt_seq, genesplicer_dir)
+    try:
+        wt_df = _run_genesplicer_on_seq(f"{gene_name}_WT", wt_seq, genesplicer_dir, model_dir)
+    except Exception as e:
+        # F28: a failed WT run must not fabricate "all gained" for the gene; skip it.
+        print(f"[SKIP] {gene_name}: WT GeneSplicer run failed ({e}); skipping gene", file=sys.stderr)
+        return [], [], [], stats
 
     # if mapping df is empty or missing, nothing to do
     if gene_mapping_df is None or gene_mapping_df.empty:
@@ -684,7 +887,7 @@ def _process_gene(fasta_path: Path,
             continue
 
         # build ALT sequence in memory
-        if snv_pos < 1 or snv_pos > wt_len:
+        if snv_pos < 0 or snv_pos >= wt_len:  # 0-based: allow first base (index 0); coupled with get_mutation_data pos-1 fix
             # out of range, skip
             stats["skipped_out_of_range"] += 1
             continue
@@ -692,7 +895,7 @@ def _process_gene(fasta_path: Path,
 
         # run GeneSplicer on ALT
         try:
-            mut_df = _run_genesplicer_on_seq(f"{gene_name}_{mutant_tok}", alt_seq, genesplicer_dir)
+            mut_df = _run_genesplicer_on_seq(f"{gene_name}_{mutant_tok}", alt_seq, genesplicer_dir, model_dir)
         except Exception:
             stats["skipped_runtime"] += 1
             continue
@@ -724,11 +927,14 @@ def _process_gene(fasta_path: Path,
         # merge sites
         sites_concat = pd.concat([wt_sites, mut_sites], ignore_index=True)
         # cluster
-        sites_clustered = _cluster_sites(sites_concat, cluster_radius=3)
+        sites_clustered = _cluster_sites(sites_concat,
+                                         cluster_radius=cluster_radius,
+                                         max_cluster_span=max_cluster_span)
         # pair
-        events_df = _pair_clusters_to_events(sites_clustered,
-                                             visibility_threshold=visibility_threshold,
-                                             shift_bp=shift_bp)
+        events_df, n_discarded = _pair_clusters_to_events(sites_clustered,
+                                                          visibility_threshold=visibility_threshold,
+                                                          shift_bp=shift_bp)
+        stats["cluster_members_discarded"] += n_discarded
 
         events_all.append(events_df)
         sites_all.append(sites_clustered)
@@ -747,6 +953,10 @@ def main():
     parser.add_argument("-g", "--genesplicer-dir", default=None,
                         help="Directory containing GeneSplicer binary; "
                              "omit to use genesplicer from PATH (e.g. after conda install)")
+    parser.add_argument("--model-dir", default=None,
+                        help="Absolute path to a GeneSplicer model directory (one containing config_file). "
+                             "If omitted, resolved from --genesplicer-dir or the genesplicer binary location "
+                             "(conda ships it beside the binary as share/genesplicer-*/human).")
     parser.add_argument("-o", "--output", required=True, help="Output base directory (writes {GENE}/GeneSplicer/{GENE}.tsv, .events.tsv, .sites.tsv)")
     parser.add_argument("--window", type=int, default=DEFAULT_WINDOW, help="Window/reporting size (default 151)")
     parser.add_argument("--report-radius", type=int, default=DEFAULT_REPORT_RADIUS,
@@ -759,6 +969,23 @@ def main():
                         help="High-confidence score cutoff (default 5.0)")
     parser.add_argument("--shift-bp", type=int, default=DEFAULT_SHIFT_BP,
                         help="Minimum bp difference to classify as a shifted site (default 3)")
+    parser.add_argument("--cluster-radius", type=int, default=DEFAULT_CLUSTER_RADIUS,
+                        help="Single-linkage radius (bp) for grouping sites into clusters (default 3)")
+    parser.add_argument("--max-cluster-span", type=int, default=DEFAULT_MAX_CLUSTER_SPAN,
+                        help="Max total span (bp) of one cluster; a site that would push the "
+                             "cluster past this starts a new one, so a chain of near-neighbour "
+                             "sites cannot weld into one cluster of unbounded span "
+                             "(default 12, = --register-max-bp)")
+    parser.add_argument("--redirect-max-bp", type=int, default=DEFAULT_REDIRECT_MAX_BP,
+                        help="Max bp between a lost and a gained site to link them as one "
+                             "redirected site (default 100)")
+    parser.add_argument("--register-max-bp", type=int, default=DEFAULT_REGISTER_MAX_BP,
+                        help="Linked pairs within this distance are labelled 'shifted' "
+                             "(register shift) rather than 'redirected' (default 12)")
+    parser.add_argument("--redirect-snv-max-bp", type=int, default=DEFAULT_REDIRECT_SNV_BP,
+                        help="Max distance from the SNV to the lost site for a redirect link "
+                             "to be considered variant-caused (default 80, = GeneSplicer's "
+                             "coding/non-coding context window)")
     parser.add_argument("--workers", type=int, default=None,
                         help="Max parallel workers (default: half cores, capped at 8)")
     parser.add_argument("--log", help="Validation log file/dir to skip failed mutations")
@@ -772,6 +999,10 @@ def main():
         parser.error("genesplicer not found on PATH. Install via conda (conda install -c bioconda genesplicer) "
                       "or provide --genesplicer-dir")
 
+    # F29: resolve the human model to an absolute path (fail fast if absent) so the
+    # PATH/conda default (no cd, model beside the binary) is not silently broken.
+    model_dir = _resolve_model_dir(args.model_dir, args.genesplicer_dir)
+
     input_path = Path(args.input)
     mapping_dir = args.mapping_dir
     genesplicer_dir = args.genesplicer_dir
@@ -782,6 +1013,8 @@ def main():
     visibility_threshold = args.visibility_threshold
     high_cutoff = args.high_cutoff
     shift_bp = args.shift_bp
+    cluster_radius = args.cluster_radius
+    max_cluster_span = args.max_cluster_span
 
     if report_radius is None:
         report_radius = window
@@ -830,6 +1063,7 @@ def main():
     total_skipped_invalid = 0
     total_skipped_out_of_range = 0
     total_skipped_runtime = 0
+    total_cluster_members_discarded = 0
 
     with concurrent.futures.ProcessPoolExecutor(max_workers=max_workers) as ex:
         futs = []
@@ -842,6 +1076,7 @@ def main():
                 fasta_path,
                 gene_map_df,
                 genesplicer_dir,
+                model_dir,
                 "full",
                 window,
                 report_radius,
@@ -849,6 +1084,8 @@ def main():
                 high_cutoff,
                 shift_bp,
                 distance_k,
+                cluster_radius,
+                max_cluster_span,
                 failure_map,
             )
             futs.append(fut)
@@ -867,6 +1104,7 @@ def main():
             total_skipped_invalid += gene_stats.get("skipped_invalid", 0)
             total_skipped_out_of_range += gene_stats.get("skipped_out_of_range", 0)
             total_skipped_runtime += gene_stats.get("skipped_runtime", 0)
+            total_cluster_members_discarded += gene_stats.get("cluster_members_discarded", 0)
 
             gene_name = gene_stats.get("gene") or fut_meta.get(fut, "unknown")
             events_by_gene[gene_name] = gene_events
@@ -890,18 +1128,13 @@ def main():
             )
             sys.stdout.flush()
 
-    # concat events/sites with hardening
-    if all_events:
-        events_df = pd.concat(all_events, ignore_index=True)
-    else:
-        events_df = pd.DataFrame()
-
-    if all_sites:
-        sites_df = pd.concat(all_sites, ignore_index=True)
-    else:
-        sites_df = pd.DataFrame()
-
-    # ensure columns exist
+    # F34: the former global events_df/sites_df/summary_df built here (concat +
+    # reconcile + priority + is_high_impact + per-pkey summarize across all genes)
+    # were never written — only the per-gene recomputation below ships — so that
+    # entire pass is removed. What the per-gene loop still needs is kept: the two
+    # column contracts and the two scorer closures (lifted out of the old
+    # `if not events_df.empty` block so they are always defined, even when a run
+    # produces zero events).
     events_required = [
         "pkey", "type", "cluster_id",
         "wt_pos", "mut_pos", "dpos",
@@ -910,26 +1143,14 @@ def main():
         "rank_wt", "rank_mut",
         "conf_wt", "conf_mut", "conf_weighted_delta",
         "cls", "is_high_impact", "priority", "in_radius",
+        "redirect_id", "redirect_dpos", "score_transfer_ratio",
+        "redirect_class", "cls_reconciled",
     ]
-    if events_df.empty:
-        events_df = pd.DataFrame(columns=events_required)
-    else:
-        for c in events_required:
-            if c not in events_df.columns:
-                events_df[c] = pd.NA
-
     sites_required = [
         "pkey", "allele", "type", "site_pos", "score", "confidence",
         "rank", "distance_to_snv", "visible_flag", "cluster_id", "in_radius",
     ]
-    if sites_df.empty:
-        sites_df = pd.DataFrame(columns=sites_required)
-    else:
-        for c in sites_required:
-            if c not in sites_df.columns:
-                sites_df[c] = pd.NA
 
-    # set event-level priority now that everything exists
     def _calc_priority(row):
         if pd.isna(row["dscore"]) or row["dscore"] is None:
             base = 0.0
@@ -949,44 +1170,27 @@ def main():
             )
             if m >= high_cutoff:
                 bonus += 2.0
-        if row["cls"] == "shifted" and row["dpos"] is not None and not pd.isna(row["dpos"]) and abs(int(row["dpos"])) >= shift_bp:
+        rc = row.get("redirect_class")
+        if (pd.notna(rc) and rc == "shifted") or (
+            row["cls"] == "shifted" and row["dpos"] is not None
+            and not pd.isna(row["dpos"]) and abs(int(row["dpos"])) >= shift_bp
+        ):
             bonus += 1.0
         return base * w + bonus
 
-    if not events_df.empty:
-        events_df["priority"] = events_df.apply(_calc_priority, axis=1)
-        # set is_high_impact
-        def _is_hi(row):
-            if pd.isna(row["dscore"]):
-                return 0
-            if abs(float(row["dscore"])) >= 5.0:
-                return 1
-            if row["cls"] in ("gained", "lost"):
-                m = max(
-                    float(row["wt_score"]) if not pd.isna(row["wt_score"]) else 0.0,
-                    float(row["mut_score"]) if not pd.isna(row["mut_score"]) else 0.0,
-                )
-                if m >= high_cutoff:
-                    return 1
+    def _is_hi(row):
+        if pd.isna(row["dscore"]):
             return 0
-        events_df["is_high_impact"] = events_df.apply(_is_hi, axis=1)
-
-    # summarize per pkey
-    summary_rows = []
-    # unique pkeys from run; if empty, derive from events_df
-    if not all_pkeys:
-        all_pkeys = list(events_df["pkey"].unique()) if "pkey" in events_df.columns else []
-    for pkey in all_pkeys:
-        summary_rows.append(
-            _summarize_variant(
-                events_df=events_df,
-                sites_df=sites_df,
-                pkey=pkey,
-                report_radius=report_radius,
-                policy=policy,
+        if abs(float(row["dscore"])) >= 5.0:
+            return 1
+        if row["cls"] in ("gained", "lost"):
+            m = max(
+                float(row["wt_score"]) if not pd.isna(row["wt_score"]) else 0.0,
+                float(row["mut_score"]) if not pd.isna(row["mut_score"]) else 0.0,
             )
-        )
-    summary_df = pd.DataFrame(summary_rows)
+            if m >= high_cutoff:
+                return 1
+        return 0
 
     # write per-gene outputs
     for gname in events_by_gene:
@@ -1002,6 +1206,15 @@ def main():
         for c in sites_required:
             if c not in g_sites_df.columns:
                 g_sites_df[c] = pd.NA
+
+        # F30: same reconciliation on the per-gene frame; redirect_id is
+        # position-derived so it matches the global run's ids exactly.
+        g_events_df = _reconcile_redirects(
+            g_events_df,
+            max_bp=args.redirect_max_bp,
+            register_bp=args.register_max_bp,
+            snv_max_bp=args.redirect_snv_max_bp,
+        )
 
         if not g_events_df.empty:
             g_events_df["priority"] = g_events_df.apply(_calc_priority, axis=1)
@@ -1034,7 +1247,8 @@ def main():
         f"skipped validation={total_skipped_validation}, "
         f"invalid={total_skipped_invalid}, "
         f"out_of_range={total_skipped_out_of_range}, "
-        f"runtime={total_skipped_runtime}."
+        f"runtime={total_skipped_runtime}; "
+        f"non-top cluster members discarded={total_cluster_members_discarded}."
     )
 
 

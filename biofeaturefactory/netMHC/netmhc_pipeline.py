@@ -35,14 +35,11 @@ import subprocess
 import tempfile
 import shutil
 from pathlib import Path
-import json
-import hashlib
 import sys
 import time
 import platform
-from datetime import datetime
 import logging
-from concurrent.futures import ProcessPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor
 from typing import Optional, Dict, List, Tuple
 
 
@@ -50,7 +47,6 @@ from typing import Optional, Dict, List, Tuple
 from biofeaturefactory.utils.utility import (
     write_fasta,
     write_tsv,
-    split_fasta_into_batches,
     combine_batch_outputs,
     discover_fasta_files,
     ExtractGeneFromFASTA,
@@ -63,6 +59,7 @@ from biofeaturefactory.utils.utility import (
     extract_mutation_from_sequence_name,
     translate_orf_sequence,
     build_mutant_sequences_for_gene,
+    detect_alphabet,
 )
 
 
@@ -71,7 +68,7 @@ def is_linux_host():
     return platform.system().lower() == "linux"
 
 
-def resolve_native_netmhc_path(user_path=None, tool_version="netMHCpan"):
+def resolve_native_netmhc_path(user_path=None, tool_version="netMHC"):
     """
     Resolve a usable native NetMHC executable when available.
 
@@ -82,7 +79,11 @@ def resolve_native_netmhc_path(user_path=None, tool_version="netMHCpan"):
 
     Args:
         user_path: User-specified path to NetMHC binary
-        tool_version: Which NetMHC tool to use (netMHCpan, netMHCII, netMHC)
+        tool_version: Which NetMHC tool to use. Only netMHC-4.0 is supported —
+            the invocation and the 15-column/'HLA'-header parser are hardcoded to
+            it (see --netmhc-tool, choices=['netMHC']). The default is 'netMHC' so
+            a programmatic caller that omits it cannot silently resolve netMHCpan,
+            whose output this parser reads as zero predictions (F5).
     """
     candidates = []
 
@@ -92,16 +93,16 @@ def resolve_native_netmhc_path(user_path=None, tool_version="netMHCpan"):
 
     _add(user_path)
     _add(os.environ.get("NETMHC_PATH"))
-    _add(os.environ.get("NETMHCPAN_PATH"))
 
     netmhc_home = os.environ.get("NETMHC_HOME")
     if netmhc_home:
         _add(os.path.join(netmhc_home, tool_version))
 
     home = Path.home()
+    # netMHC-4.0 only (see --netmhc-tool): do NOT auto-discover netMHCpan — its
+    # output format is unreadable by this parser and would silently yield zero
+    # predictions.
     common_roots = [
-        home / "netMHCpan-4.1" / "netMHCpan",
-        home / "netMHCpan" / "netMHCpan",
         home / "netMHC" / tool_version,
         Path(f"/opt/netMHC/{tool_version}"),
         Path(f"/usr/local/bin/{tool_version}"),
@@ -135,7 +136,7 @@ def build_netmhc_executor(args, parser):
     """
     native_netmhc = resolve_native_netmhc_path(
         getattr(args, "native_netmhc_path", None),
-        getattr(args, "netmhc_tool", "netMHCpan")
+        getattr(args, "netmhc_tool", "netMHC")   # F5: netMHC-4.0 is the only supported tool
     )
     if not native_netmhc:
         parser.error(
@@ -301,29 +302,6 @@ def parse_netmhc_output(output_file):
     return predictions
 
 
-def write_netmhc_tsv(predictions, output_file, include_pkey=False):
-    """
-    Write NetMHC predictions to TSV format.
-
-    Args:
-        predictions: List of prediction dictionaries
-        output_file: Output TSV file path
-        include_pkey: Whether to include pkey column
-    """
-    if not predictions:
-        print(f"Warning: No predictions to write to {output_file}")
-        with open(output_file, 'w') as f:
-            f.write("# No predictions generated\n")
-        return
-
-    fieldnames = ['Gene', 'pos', 'mhc_allele', 'peptide', 'core', 'score', 'rank', 'bind_level']
-    if include_pkey:
-        fieldnames.insert(0, 'pkey')
-
-    write_tsv(predictions, output_file, fieldnames, extrasaction='ignore')
-    print(f"Wrote {len(predictions)} NetMHC predictions to {output_file}")
-
-
 def compare_wt_mut_predictions(gene_name, mutation, wt_preds, mut_preds, threshold=0.5):
     """
     Compare WT and MUT predictions to classify epitope changes.
@@ -347,24 +325,31 @@ def compare_wt_mut_predictions(gene_name, mutation, wt_preds, mut_preds, thresho
     """
     events = []
 
-    # Build lookup maps: (peptide, allele, pos) -> prediction
+    # Build lookup maps keyed on the REGISTER (allele, pos) — NOT the peptide.
+    # A window covering the mutated residue has different WT vs MUT peptide
+    # strings by construction; keying on the sequence would give them different
+    # keys so they would never be paired (the delta would be computed against the
+    # non-binder sentinel instead of the matched register). pos aligns 1:1 because
+    # SNV/missense preserves length.
     wt_map = {}
     for pred in wt_preds:
-        key = (pred['peptide'], pred['mhc_allele'], pred['pos'])
+        key = (pred['mhc_allele'], pred['pos'])
         wt_map[key] = pred
 
     mut_map = {}
     for pred in mut_preds:
-        key = (pred['peptide'], pred['mhc_allele'], pred['pos'])
+        key = (pred['mhc_allele'], pred['pos'])
         mut_map[key] = pred
 
-    # Find all unique peptide/allele/position combinations
+    # Every (allele, pos) register seen in either allele.
     all_keys = set(wt_map.keys()) | set(mut_map.keys())
 
     for key in all_keys:
-        peptide, allele, pos = key
+        allele, pos = key
         wt_pred = wt_map.get(key)
         mut_pred = mut_map.get(key)
+        wt_peptide = wt_pred['peptide'] if wt_pred else ''
+        mut_peptide = mut_pred['peptide'] if mut_pred else ''
 
         # Skip if both missing (shouldn't happen)
         if not wt_pred and not mut_pred:
@@ -382,33 +367,39 @@ def compare_wt_mut_predictions(gene_name, mutation, wt_preds, mut_preds, thresho
         delta_rank = mut_rank - wt_rank
         delta_affinity = mut_affinity - wt_affinity
 
-        # Classify event
-        classification = "stable"
-        classification_code = 0
+        # Classify by NetMHC binding band (per the tool's own definitions):
+        #   2 = SB (strong binder, %Rank < threshold, default 0.5)
+        #   1 = WB (weak binder,   threshold <= %Rank < 2.0)
+        #   0 = NB (non-binder,    %Rank >= 2.0)
+        # Strength order SB(2) > WB(1) > NB(0). Classification is a band transition;
+        # delta_rank/delta_affinity are retained as reported magnitudes only.
+        # (The former delta_rank <>±5 test was dead: inside the both-bind branch
+        # delta_rank is bounded to [-2, 2] and could never reach ±5.)
+        wt_band = 2 if wt_rank < threshold else (1 if wt_rank < 2.0 else 0)
+        mut_band = 2 if mut_rank < threshold else (1 if mut_rank < 2.0 else 0)
 
-        if wt_rank > 2.0 and mut_rank <= threshold:
+        if wt_band == 0 and mut_band > 0:
             classification = "gained"
             classification_code = 2
-        elif wt_rank <= threshold and mut_rank > 2.0:
+        elif wt_band > 0 and mut_band == 0:
             classification = "lost"
             classification_code = -2
-        elif wt_rank <= 2.0 and mut_rank <= 2.0:
-            # Both are binders (weak or strong)
-            if delta_rank < -5:
-                classification = "strengthened"
-                classification_code = 1
-            elif delta_rank > 5:
-                classification = "weakened"
-                classification_code = -1
-            else:
-                classification = "stable"
-                classification_code = 0
+        elif mut_band > wt_band:
+            classification = "strengthened"
+            classification_code = 1
+        elif mut_band < wt_band:
+            classification = "weakened"
+            classification_code = -1
+        else:
+            classification = "stable"
+            classification_code = 0
 
         event = {
             'Gene': gene_name,
             'pkey': f"{gene_name}-{mutation}",
             'mutation': mutation,
-            'peptide': peptide,
+            'wt_peptide': wt_peptide,
+            'mut_peptide': mut_peptide,
             'pos': pos,
             'mhc_allele': allele,
             'wt_rank': wt_rank,
@@ -485,7 +476,8 @@ def summarize_epitope_changes(gene_name, mutation, events):
         'sum_abs_delta_rank': sum_abs_delta,
         'top_event_type': top_event['classification'] if top_event else '',
         'top_event_allele': top_event['mhc_allele'] if top_event else '',
-        'top_event_peptide': top_event['peptide'] if top_event else '',
+        'top_event_wt_peptide': top_event['wt_peptide'] if top_event else '',
+        'top_event_mut_peptide': top_event['mut_peptide'] if top_event else '',
         'top_event_delta_rank': top_event['delta_rank'] if top_event else 0.0,
         'qc_flags': ';'.join(qc_flags) if qc_flags else '',
     }
@@ -504,7 +496,7 @@ def write_summary_tsv(summary_rows, output_file):
         'n_epitopes_wt', 'n_epitopes_mut',
         'count_gained', 'count_lost', 'count_strengthened', 'count_weakened', 'count_stable',
         'max_abs_delta_rank', 'sum_abs_delta_rank',
-        'top_event_type', 'top_event_allele', 'top_event_peptide', 'top_event_delta_rank',
+        'top_event_type', 'top_event_allele', 'top_event_wt_peptide', 'top_event_mut_peptide', 'top_event_delta_rank',
         'qc_flags'
     ]
 
@@ -519,7 +511,7 @@ def write_events_tsv(events, output_file):
         return
 
     fieldnames = [
-        'pkey', 'Gene', 'mutation', 'peptide', 'pos', 'mhc_allele',
+        'pkey', 'Gene', 'mutation', 'wt_peptide', 'mut_peptide', 'pos', 'mhc_allele',
         'wt_rank', 'mut_rank', 'delta_rank',
         'wt_affinity', 'mut_affinity', 'delta_affinity',
         'bind_level_wt', 'bind_level_mut',
@@ -546,138 +538,6 @@ def write_sites_tsv(sites, output_file):
     print(f"Wrote {len(sites)} site predictions to {output_file}")
 
 
-# ============================================================================
-# Caching Functions
-# ============================================================================
-
-def get_file_cache_key(fasta_file, alleles=None):
-    """Generate cache key based on file content and alleles."""
-    try:
-        file_path = Path(fasta_file).resolve()
-        stat = file_path.stat()
-        # Include alleles in cache key since different alleles = different results
-        allele_str = ",".join(sorted(alleles)) if alleles else "default"
-        cache_data = f"{file_path}:{stat.st_size}:{stat.st_mtime}:{allele_str}"
-        return hashlib.md5(cache_data.encode()).hexdigest()
-    except Exception:
-        return None
-
-
-def get_cache_dir(custom_dir=None):
-    """Get or create cache directory."""
-    if custom_dir:
-        cache_dir = Path(custom_dir)
-    else:
-        cache_dir = Path.home() / ".netmhc_cache"
-    cache_dir.mkdir(parents=True, exist_ok=True)
-    return cache_dir
-
-
-def get_cached_result(fasta_file, alleles=None, cache_dir=None):
-    """Check if cached result exists for file and alleles."""
-    cache_key = get_file_cache_key(fasta_file, alleles)
-    if not cache_key:
-        return None, None
-
-    cache_dir = get_cache_dir(cache_dir)
-    cache_file = cache_dir / f"{cache_key}_netmhc.out"
-    metadata_file = cache_dir / f"{cache_key}_netmhc.json"
-
-    if cache_file.exists() and metadata_file.exists():
-        try:
-            with open(metadata_file) as f:
-                metadata = json.load(f)
-            return str(cache_file), metadata
-        except (json.JSONDecodeError, IOError):
-            # Remove corrupted cache files
-            for f in [cache_file, metadata_file]:
-                if f.exists():
-                    f.unlink()
-    return None, None
-
-
-def save_to_cache(fasta_file, output_file, alleles=None, cache_dir=None, metadata=None):
-    """Save result to cache."""
-    cache_key = get_file_cache_key(fasta_file, alleles)
-    if not cache_key or not os.path.exists(output_file):
-        return
-
-    try:
-        cache_dir = get_cache_dir(cache_dir)
-        cache_file = cache_dir / f"{cache_key}_netmhc.out"
-        metadata_file = cache_dir / f"{cache_key}_netmhc.json"
-
-        # Copy output to cache
-        shutil.copy2(output_file, cache_file)
-
-        # Save metadata
-        cache_metadata = {
-            "source_file": str(fasta_file),
-            "cache_key": cache_key,
-            "alleles": alleles,
-            "cached_at": datetime.now().isoformat(),
-        }
-        if metadata:
-            cache_metadata.update(metadata)
-
-        with open(metadata_file, 'w') as f:
-            json.dump(cache_metadata, f, indent=2)
-
-    except Exception as e:
-        print(f"Warning: Failed to save cache: {e}")
-
-
-def clear_cache(cache_dir=None):
-    """Clear all cached NetMHC results."""
-    cache_dir = get_cache_dir(cache_dir)
-    count = 0
-    for f in cache_dir.glob("*_netmhc.*"):
-        f.unlink()
-        count += 1
-    print(f"Cleared {count} cached files from {cache_dir}")
-
-
-def run_netmhc_with_cache(fasta_file, output_file, alleles=None, timeout=600, executor=None, use_cache=True, cache_dir=None):
-    """
-    Run NetMHC with caching support.
-
-    Args:
-        fasta_file: Input FASTA file
-        output_file: Output file path
-        alleles: List of HLA alleles
-        timeout: Command timeout
-        executor: NetMHC executor function
-        use_cache: Whether to use cached results
-        cache_dir: Custom cache directory
-
-    Returns:
-        bool: True if successful
-    """
-    if executor is None:
-        raise RuntimeError("No NetMHC executor provided. Use build_netmhc_executor() to resolve the native binary.")
-
-    # Check cache first
-    if use_cache:
-        cached_file, cached_metadata = get_cached_result(fasta_file, alleles, cache_dir)
-        if cached_file:
-            print(f"Using cached result from {cached_metadata.get('cached_at', 'unknown')}")
-            shutil.copy2(cached_file, output_file)
-            return True
-
-    # Run NetMHC
-    success, output, error = executor(fasta_file, output_file, timeout, alleles)
-
-    if not success:
-        print(f"NetMHC execution failed: {error}")
-        return False
-
-    # Save to cache
-    if use_cache:
-        save_to_cache(fasta_file, output_file, alleles, cache_dir)
-
-    return True
-
-
 def main():
     import argparse
 
@@ -694,9 +554,13 @@ def main():
     # MHC-specific options
     parser.add_argument('--alleles', nargs='+',
                        help='HLA alleles to predict (e.g., HLA-A*02:01 HLA-B*07:02). If not specified, uses default set.')
-    parser.add_argument('--netmhc-tool', choices=['netMHCpan', 'netMHC', 'netMHCII'],
-                       default='netMHCpan',
-                       help='Which NetMHC tool to use (default: netMHCpan)')
+    # Only netMHC-4.0 is supported: the invocation (allele format, `-a`/`-f`) and
+    # the parser (15-column layout, 'HLA' header) are hardcoded to it. netMHCpan /
+    # netMHCII use different output layouts the parser cannot read and would
+    # silently yield zero predictions, so they are not offered.
+    parser.add_argument('--netmhc-tool', choices=['netMHC'],
+                       default='netMHC',
+                       help='NetMHC tool to use (only netMHC-4.0 is supported)')
     # Execution backend
     parser.add_argument('--native-netmhc-path',
                        help='Path to native NetMHC executable')
@@ -709,12 +573,12 @@ def main():
     parser.add_argument('--threshold', type=float, default=0.5,
                        help='Binding rank threshold for strong binders (default: 0.5)')
     parser.add_argument('--batch-size', type=int, default=100,
-                       help='Batch size for large FASTA files')
+                       help='(deprecated; unused — netMHC input is no longer batched)')
     parser.add_argument('--timeout', type=int, default=600,
                        help='Command timeout in seconds (default: 600)')
+    parser.add_argument('--max-workers', type=int, default=4,
+                       help='Concurrent netMHC runs per gene (default: 4; set 1 for serial)')
 
-    parser.add_argument('--keep-intermediates', action='store_true',
-                       help='Keep intermediate files for debugging')
     parser.add_argument('--verbose', action='store_true',
                        help='Enable verbose output')
 
@@ -757,23 +621,41 @@ def main():
                 mutation_files[extract_gene_from_filename(csv_file.name)] = str(csv_file)
 
     # Process each gene
-    for gene_name, wt_nt_seq in wt_sequences.items():
+    for gene_name, wt_seq in wt_sequences.items():
         gene_summary_rows = []
         gene_events = []
         gene_sites = []
         if args.verbose:
             print(f"\nProcessing gene: {gene_name}")
 
-        # Translate to amino acids
-        wt_aa_seq = translate_orf_sequence(wt_nt_seq)
-        if not wt_aa_seq:
-            print(f"Warning: Could not translate {gene_name}, skipping")
+        # Auto-detect the WT alphabet: nucleotide -> translate; protein -> use
+        # directly; codon-encoded -> skip. Prevents the unconditional-translate
+        # crash (TranslationError) that amino-acid input previously caused.
+        try:
+            detected = detect_alphabet(wt_seq)
+        except ValueError:
+            print(f"Warning: {gene_name} WT sequence is empty, skipping")
+            continue
+        if detected == 'nucleotide':
+            wt_nt_seq = wt_seq
+            wt_aa_seq = translate_orf_sequence(wt_nt_seq)
+            build_input_type = 'nt'
+            if not wt_aa_seq:
+                print(f"Warning: Could not translate {gene_name}, skipping")
+                continue
+        elif detected == 'protein':
+            wt_nt_seq = None
+            wt_aa_seq = wt_seq
+            build_input_type = 'aa'
+        else:  # codon-encoded
+            print(f"Warning: {gene_name} WT looks codon-encoded; netMHC needs nt or aa, skipping")
             continue
 
         # Build mutant sequences
         mapping_file = mutation_files.get(gene_name)
         mutant_seqs = build_mutant_sequences_for_gene(
-            gene_name, wt_nt_seq, wt_aa_seq, mapping_file, args.log, failure_map
+            gene_name, wt_nt_seq, wt_aa_seq, mapping_file, args.log, failure_map,
+            input_type=build_input_type
         )
 
         if args.verbose:
@@ -787,41 +669,15 @@ def main():
             wt_fasta = os.path.join(gene_workdir, f"{gene_name}_wt.fasta")
             write_fasta(Path(wt_fasta), {f"{gene_name}_WT": wt_aa_seq})
 
-            # Check if batching is needed for WT
-            wt_predictions = []
-            if len(wt_aa_seq) > args.batch_size and args.batch_size > 0:
-                # Split into batches
-                if args.verbose:
-                    print(f"  Batching WT sequence ({len(wt_aa_seq)} AA) into chunks of {args.batch_size}")
-
-                batch_dir = os.path.join(gene_workdir, "wt_batches")
-                os.makedirs(batch_dir, exist_ok=True)
-
-                batch_files = split_fasta_into_batches(wt_fasta, args.batch_size, batch_dir)
-
-                # Run NetMHC on each batch
-                for batch_file in batch_files:
-                    batch_output = batch_file.replace('.fasta', '.out')
-                    success, _, error = executor(batch_file, batch_output, args.timeout, args.alleles)
-
-                    if not success:
-                        print(f"Warning: NetMHC failed for {gene_name} WT batch {batch_file}: {error}")
-                        continue
-
-                    # Parse batch predictions
-                    batch_preds = parse_netmhc_output(batch_output)
-                    wt_predictions.extend(batch_preds)
-            else:
-                # Run NetMHC on full WT sequence
-                wt_output = os.path.join(gene_workdir, f"{gene_name}_wt.out")
-                success, _, error = executor(wt_fasta, wt_output, args.timeout, args.alleles)
-
-                if not success:
-                    print(f"Warning: NetMHC failed for {gene_name} WT: {error}")
-                    continue
-
-                # Parse WT predictions
-                wt_predictions = parse_netmhc_output(wt_output)
+            # Run netMHC on the single-record WT FASTA. netMHC digests the
+            # sequence into all k-mer windows itself, so no input batching is
+            # needed (audit F8 — the former split-by-record batching was a no-op).
+            wt_output = os.path.join(gene_workdir, f"{gene_name}_wt.out")
+            success, _, error = executor(wt_fasta, wt_output, args.timeout, args.alleles)
+            if not success:
+                print(f"Warning: NetMHC failed for {gene_name} WT: {error}")
+                continue
+            wt_predictions = parse_netmhc_output(wt_output)
             if args.verbose:
                 print(f"  WT: {len(wt_predictions)} predictions")
 
@@ -834,76 +690,56 @@ def main():
                     **pred
                 })
 
-            # Process each mutant
-            for mut_header, mut_aa_seq in mutant_seqs.items():
-                mutation = mut_header.split('-', 1)[1] if '-' in mut_header else mut_header
-
-                # Write mutant FASTA
-                mut_fasta = os.path.join(gene_workdir, f"{gene_name}_{mutation}.fasta")
-                write_fasta(Path(mut_fasta), {mut_header: mut_aa_seq})
-
-                # Check if batching is needed for mutant
-                mut_predictions = []
-                if len(mut_aa_seq) > args.batch_size and args.batch_size > 0:
-                    # Split into batches
-                    if args.verbose:
-                        print(f"  Batching {mutation} sequence ({len(mut_aa_seq)} AA)")
-
-                    batch_dir = os.path.join(gene_workdir, f"{mutation}_batches")
-                    os.makedirs(batch_dir, exist_ok=True)
-
-                    batch_files = split_fasta_into_batches(mut_fasta, args.batch_size, batch_dir)
-
-                    # Run NetMHC on each batch
-                    for batch_file in batch_files:
-                        batch_output = batch_file.replace('.fasta', '.out')
-                        success, _, error = executor(batch_file, batch_output, args.timeout, args.alleles)
-
-                        if not success:
-                            print(f"Warning: NetMHC failed for {gene_name} {mutation} batch {batch_file}: {error}")
-                            continue
-
-                        # Parse batch predictions
-                        batch_preds = parse_netmhc_output(batch_output)
-                        mut_predictions.extend(batch_preds)
-                else:
-                    # Run NetMHC on full mutant sequence
+            # Process each mutant in parallel. Every netMHC run is a separate OS
+            # process (subprocess), so threads give real concurrency (the GIL is
+            # released during subprocess.run) while keeping ONE netMHC invocation
+            # per mutant — unambiguous output attribution and per-mutant failure
+            # isolation. Genes with thousands of mutations no longer pay a fully
+            # serial process-spawn cost.
+            def _process_mutant(item):
+                mut_header, mut_aa_seq = item
+                # Key is f"{gene_name}-{mutant_clean}" (utility.py:1544); strip the
+                # exact gene-name prefix so hyphenated genes (NKX2-1, HLA-A, MT-CO1)
+                # parse correctly instead of split('-',1) corrupting the token.
+                mutation = mut_header[len(gene_name) + 1:] if mut_header.startswith(f"{gene_name}-") else mut_header
+                try:
+                    mut_fasta = os.path.join(gene_workdir, f"{gene_name}_{mutation}.fasta")
+                    write_fasta(Path(mut_fasta), {mut_header: mut_aa_seq})
                     mut_output = os.path.join(gene_workdir, f"{gene_name}_{mutation}.out")
                     success, _, error = executor(mut_fasta, mut_output, args.timeout, args.alleles)
-
                     if not success:
                         print(f"Warning: NetMHC failed for {gene_name} {mutation}: {error}")
-                        continue
-
-                    # Parse mutant predictions
+                        return None
                     mut_predictions = parse_netmhc_output(mut_output)
-                if args.verbose:
-                    print(f"  {mutation}: {len(mut_predictions)} predictions")
+                    if args.verbose:
+                        print(f"  {mutation}: {len(mut_predictions)} predictions")
+                    site_rows = [
+                        {'Gene': gene_name, 'pkey': f"{gene_name}-{mutation}",
+                         'sequence_type': 'mut', **pred}
+                        for pred in mut_predictions
+                    ]
+                    events = compare_wt_mut_predictions(
+                        gene_name, mutation, wt_predictions, mut_predictions, args.threshold
+                    )
+                    summary = summarize_epitope_changes(gene_name, mutation, events)
+                    return site_rows, events, summary
+                except Exception as e:
+                    print(f"Warning: netMHC mutant {gene_name} {mutation} failed: {e}")
+                    return None
 
-                # Add to sites output (all mutant predictions)
-                for pred in mut_predictions:
-                    gene_sites.append({
-                        'Gene': gene_name,
-                        'pkey': f"{gene_name}-{mutation}",
-                        'sequence_type': 'mut',
-                        **pred
-                    })
-
-                # Compare WT vs MUT and classify epitope changes
-                epitope_events = compare_wt_mut_predictions(
-                    gene_name, mutation, wt_predictions, mut_predictions, args.threshold
-                )
-
-                # Add events to collection
-                gene_events.extend(epitope_events)
-
-                # Generate summary for this mutation
-                summary = summarize_epitope_changes(gene_name, mutation, epitope_events)
-                gene_summary_rows.append(summary)
+            # map() preserves input order (deterministic output) and runs concurrently.
+            with ThreadPoolExecutor(max_workers=max(1, args.max_workers)) as pool:
+                for result in pool.map(_process_mutant, list(mutant_seqs.items())):
+                    if result is None:
+                        continue
+                    site_rows, events, summary = result
+                    gene_sites.extend(site_rows)
+                    gene_events.extend(events)
+                    gene_summary_rows.append(summary)
 
         finally:
             # Clean up temp directory
-            if not args.keep_intermediates and os.path.exists(gene_workdir):
+            if os.path.exists(gene_workdir):
                 shutil.rmtree(gene_workdir, ignore_errors=True)
 
         gene_out = Path(args.output) / gene_name / "NetMHC"

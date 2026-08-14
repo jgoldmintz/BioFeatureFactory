@@ -181,7 +181,7 @@ def collect_orf_mutation_positions(orf_mutations: list[str]) -> tuple[list[int],
     positions: list[int] = []
     pos_to_mut: dict[int, list[str]] = {}
     for mut in orf_mutations:
-        rel_pos, nts = get_mutation_data_bioAccurate(mut)
+        rel_pos, nts = get_mutation_data_bioAccurate(mut, is_nt=True)
         if rel_pos is None or not nts:
             continue
         try:
@@ -213,7 +213,7 @@ def validate_mutations_against_orf(
     issues: list[str] = []
     mismatches: list[str] = []
     for mut in orf_mutations:
-        rel_pos, nts = get_mutation_data_bioAccurate(mut)
+        rel_pos, nts = get_mutation_data_bioAccurate(mut, is_nt=True)
         if rel_pos is None or not nts:
             continue
         wt_nt, _ = nts
@@ -538,7 +538,7 @@ def map_orf_mutations_to_transcript_and_genome(orf_mutations: list[str], tx_map:
     tx_rows, chrom_rows, gdna_rows, aa_rows = [], [], [], []
 
     for mut in orf_mutations:
-        rel_pos, nts = get_mutation_data_bioAccurate(mut)
+        rel_pos, nts = get_mutation_data_bioAccurate(mut, is_nt=True)
         if rel_pos is None or not nts:
             continue
         wt_nt, alt_nt = nts
@@ -573,7 +573,7 @@ def map_orf_mutations_to_transcript_and_genome(orf_mutations: list[str], tx_map:
         # sibling path in utility.infer_aamutation_from_nt. Using the 0-based
         # get_mutation_data here double-subtracted and shifted every AA call.
         try:
-            nt_mut = get_mutation_data_bioAccurate(mut)
+            nt_mut = get_mutation_data_bioAccurate(mut, is_nt=True)
             aa_info = get_mutant_aa(nt_mut, orf_seq, aaseq=None, index=0)
             if aa_info:
                 (aa_pos, (wt_aa, mut_aa)), _ = aa_info

@@ -82,7 +82,12 @@ class MutationContext:
     wt_rna_window: str
     mut_rna_window: str
     window_center: int  # Position of mutation in window (0-based)
-    genomic_pos: Optional[int] = None  # Chromosomal position for RBP distance
+    genomic_pos: Optional[int] = None  # Chromosomal position (1-based) for RBP distance
+
+    @property
+    def bed_pos(self) -> Optional[int]:
+        """genomic_pos in the 0-based half-open frame used by POSTAR3 BED intervals."""
+        return None if self.genomic_pos is None else self.genomic_pos - 1
 
 
 @dataclass
@@ -260,12 +265,18 @@ class AlphaFold3Pipeline:
         pkey = f"{gene_name}-{mutation}"
 
         # Parse mutation
-        pos_data = get_mutation_data_bioAccurate(mutation)
+        pos_data = get_mutation_data_bioAccurate(mutation, is_nt=False)  # AF3 opt-out of primitive nt-validation; local ref-check + alt-guard below
         if pos_data[0] is None:
-            raise ValueError(f"Invalid mutation format: {mutation}")
+            self._add_na_mutation(gene_name, mutation)
+            return
 
         nt_pos = pos_data[0]  # 1-based
         wt_nt, mut_nt = pos_data[1]
+
+        # aa/Stop tokens are out of scope for this nucleotide-only pipeline: N/A, not FAILED.
+        if wt_nt.upper() not in "ACGTU" or mut_nt.upper() not in "ACGTU":
+            self._add_na_mutation(gene_name, mutation)
+            return
 
         # Validate mutation
         pos_0 = nt_pos - 1
@@ -311,7 +322,7 @@ class AlphaFold3Pipeline:
         context.genomic_pos = genomic_pos
 
         # Query RBPs near mutation
-        rbp_sites = self._get_nearby_rbps(chrom, genomic_pos)
+        rbp_sites = self._get_nearby_rbps(chrom, context.bed_pos)
 
         if not rbp_sites:
             # No RBPs in region
@@ -345,13 +356,13 @@ class AlphaFold3Pipeline:
     def _get_nearby_rbps(
         self,
         chrom: Optional[str],
-        genomic_pos: Optional[int]
+        bed_pos: Optional[int]
     ) -> List[RBPBindingSite]:
-        """Query POSTAR3 for RBPs near mutation position."""
-        if chrom is None or genomic_pos is None:
+        """Query POSTAR3 for RBPs near mutation position (0-based BED frame)."""
+        if chrom is None or bed_pos is None:
             return []
 
-        return self.rbp_db.query_position(chrom, genomic_pos, self.rbp_window)
+        return self.rbp_db.query_position(chrom, bed_pos, self.rbp_window)
 
     def _generate_windows(
         self,
@@ -426,7 +437,7 @@ class AlphaFold3Pipeline:
             print(f"      {rbp_name}: token limit exceeded ({total_tokens})", file=sys.stderr)
             return None
 
-        distance = min(site.distance_to(context.genomic_pos) for site in sites) if context.genomic_pos else 0
+        distance = min(site.distance_to(context.bed_pos) for site in sites) if context.bed_pos is not None else 0
 
         pending = self._PendingRBPAnalysis(
             rbp_name=rbp_name,
@@ -687,15 +698,29 @@ class AlphaFold3Pipeline:
             'qc_flags': 'no_rbps_in_region'
         })
 
+    def _summary_stub(self, gene: str, mutation: str, qc_flag: str) -> dict:
+        """Summary row for a mutation with no RBP comparison.
+
+        aggregate_mutation_summary([]) supplies the full column set; write_tsv
+        takes its header from rows[0], so a short row would drop columns.
+        """
+        summary = aggregate_mutation_summary([])
+        summary['pkey'] = f"{gene}-{mutation}"
+        summary['Gene'] = gene
+        summary['qc_flags'] = qc_flag
+        return summary
+
+    def _add_na_mutation(self, gene: str, mutation: str):
+        """Add result for a token this nucleotide-only pipeline cannot score."""
+        self.summary_rows.append(
+            self._summary_stub(gene, mutation, 'NA:non_nucleotide_token')
+        )
+
     def _add_failed_mutation(self, gene: str, mutation: str, error: str):
         """Add result for failed mutation."""
-        pkey = f"{gene}-{mutation}"
-        self.summary_rows.append({
-            'pkey': pkey,
-            'Gene': gene,
-            'n_rbps_tested': 0,
-            'qc_flags': f'FAILED:{error[:50]}'
-        })
+        self.summary_rows.append(
+            self._summary_stub(gene, mutation, f'FAILED:{error[:50]}')
+        )
 
     def _write_rows(self, rows, path):
         """Write a list of row dicts to a TSV file."""

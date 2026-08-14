@@ -37,34 +37,58 @@ from biofeaturefactory.utils.utility import (
 )
 
 
+# write_tsv is called with this list and extrasaction='ignore', so a row key absent
+# here is dropped silently — add the column here whenever the row dict gains one.
 FIELDNAMES = [
     'pkey',
     'Gene',
     'codon_number',
-    'codon',
     'position_in_codon',
-    'RSCU',
-    'W',
-    'CAI_W',
-    'tAI',
+    'codon_wt',
+    'codon_mut',
+    'RSCU_wt',
+    'RSCU_mut',
+    'delta_RSCU',
+    'W_wt',
+    'W_mut',
+    'delta_W',
+    'CAI_W_wt',
+    'CAI_W_mut',
+    'delta_CAI_W',
+    'tAI_wt',
+    'tAI_mut',
+    'delta_tAI',
     'CAI_gene',
     'tAI_gene',
-    'bicodon_3prime',
-    'RSCPU_3prime',
-    'CPS_3prime',
-    'noln_CPS_3prime',
-    'W_CP_3prime',
-    'bicodon_5prime',
-    'RSCPU_5prime',
-    'CPS_5prime',
-    'noln_CPS_5prime',
-    'W_CP_5prime',
+    'bicodon_3prime_wt',
+    'bicodon_3prime_mut',
+    'RSCPU_3prime_wt',
+    'RSCPU_3prime_mut',
+    'CPS_3prime_wt',
+    'CPS_3prime_mut',
+    'delta_CPS_3prime',
+    'noln_CPS_3prime_wt',
+    'noln_CPS_3prime_mut',
+    'W_CP_3prime_wt',
+    'W_CP_3prime_mut',
+    'bicodon_5prime_wt',
+    'bicodon_5prime_mut',
+    'RSCPU_5prime_wt',
+    'RSCPU_5prime_mut',
+    'CPS_5prime_wt',
+    'CPS_5prime_mut',
+    'delta_CPS_5prime',
+    'noln_CPS_5prime_wt',
+    'noln_CPS_5prime_mut',
+    'W_CP_5prime_wt',
+    'W_CP_5prime_mut',
     'bicodon_context',
     'qc_flags',
 ]
 
 
-def process_mutation(gene, ntposnt, sequence, codondata, codonpairdata, cai_gene, tai_gene):
+def process_mutation(gene, ntposnt, sequence, codondata, codonpairdata, cai_gene, tai_gene,
+                     wt_sequence=None):
     """
     Process a single mutation and return codon usage statistics.
 
@@ -100,28 +124,88 @@ def process_mutation(gene, ntposnt, sequence, codondata, codonpairdata, cai_gene
         bicodon_context = 'insufficient_sequence'
         qc_flags.append('NO_BICODON')
 
+    # WT counterpart. extract_codon_with_bicodons splices ALT into a copy, so the codon
+    # it returns is the mutant; the wild-type triplet is the same slice of the unmutated
+    # ORF. Safe because that function's REF guard already proved wt_sequence[pos] == REF.
+    # Both alleles are looked up in the SAME codondata/codonpairdata, which are built once
+    # from the WT ORF — a point mutation must not shift the gene's reference usage table.
+    # wt_sequence is None when the caller only has an already-mutated sequence
+    # (process_mutant_fasta): the WT is unrecoverable there, so the wt/delta columns are
+    # left empty rather than filled with the mutant's own values, which would read as a
+    # delta of 0.0 for every row.
+    wt_codon = wt_bi3 = wt_bi5 = None
+    if wt_sequence:
+        start = (codon_number - 1) * 3
+        wt_codon = wt_sequence[start:start + 3]
+        if forward_bicodon:
+            wt_bi3 = wt_codon + forward_bicodon[3:]
+        if reverse_bicodon:
+            wt_bi5 = reverse_bicodon[:3] + wt_codon
+        if len(wt_codon) != 3:
+            wt_codon = wt_bi3 = wt_bi5 = None
+            qc_flags.append('NO_WT_CODON')
+
+    def _delta(mut_val, wt_val):
+        if mut_val is None or wt_val is None:
+            return None
+        return round(mut_val - wt_val, 6)
+
+    rscu_mut = codondata['RSCU'].get(mutated_codon)
+    rscu_wt = codondata['RSCU'].get(wt_codon) if wt_codon else None
+    w_mut = codondata['W'].get(mutated_codon)
+    w_wt = codondata['W'].get(wt_codon) if wt_codon else None
+    caiw_mut = get_codon_cai_w(mutated_codon)
+    caiw_wt = get_codon_cai_w(wt_codon) if wt_codon else None
+    tai_mut = get_codon_tai(mutated_codon)
+    tai_wt = get_codon_tai(wt_codon) if wt_codon else None
+    cps3_mut = codonpairdata['CPS'].get(forward_bicodon) if forward_bicodon else None
+    cps3_wt = codonpairdata['CPS'].get(wt_bi3) if wt_bi3 else None
+    cps5_mut = codonpairdata['CPS'].get(reverse_bicodon) if reverse_bicodon else None
+    cps5_wt = codonpairdata['CPS'].get(wt_bi5) if wt_bi5 else None
+
     row_data = {
         'pkey': pkey,
         'Gene': gene,
         'codon_number': codon_number,
-        'codon': mutated_codon,
         'position_in_codon': poc + 1,  # 1-based
-        'RSCU': codondata['RSCU'].get(mutated_codon),
-        'W': codondata['W'].get(mutated_codon),
-        'CAI_W': get_codon_cai_w(mutated_codon),
-        'tAI': get_codon_tai(mutated_codon),
+        'codon_wt': wt_codon,
+        'codon_mut': mutated_codon,
+        'RSCU_wt': rscu_wt,
+        'RSCU_mut': rscu_mut,
+        'delta_RSCU': _delta(rscu_mut, rscu_wt),
+        'W_wt': w_wt,
+        'W_mut': w_mut,
+        'delta_W': _delta(w_mut, w_wt),
+        'CAI_W_wt': caiw_wt,
+        'CAI_W_mut': caiw_mut,
+        'delta_CAI_W': _delta(caiw_mut, caiw_wt),
+        'tAI_wt': tai_wt,
+        'tAI_mut': tai_mut,
+        'delta_tAI': _delta(tai_mut, tai_wt),
         'CAI_gene': cai_gene,
         'tAI_gene': tai_gene,
-        'bicodon_3prime': forward_bicodon if forward_bicodon else None,
-        'RSCPU_3prime': codonpairdata['RSCPU'].get(forward_bicodon) if forward_bicodon else None,
-        'CPS_3prime': codonpairdata['CPS'].get(forward_bicodon) if forward_bicodon else None,
-        'noln_CPS_3prime': codonpairdata['noln CPS'].get(forward_bicodon) if forward_bicodon else None,
-        'W_CP_3prime': codonpairdata['W_CP'].get(forward_bicodon) if forward_bicodon else None,
-        'bicodon_5prime': reverse_bicodon if reverse_bicodon else None,
-        'RSCPU_5prime': codonpairdata['RSCPU'].get(reverse_bicodon) if reverse_bicodon else None,
-        'CPS_5prime': codonpairdata['CPS'].get(reverse_bicodon) if reverse_bicodon else None,
-        'noln_CPS_5prime': codonpairdata['noln CPS'].get(reverse_bicodon) if reverse_bicodon else None,
-        'W_CP_5prime': codonpairdata['W_CP'].get(reverse_bicodon) if reverse_bicodon else None,
+        'bicodon_3prime_wt': wt_bi3,
+        'bicodon_3prime_mut': forward_bicodon if forward_bicodon else None,
+        'RSCPU_3prime_wt': codonpairdata['RSCPU'].get(wt_bi3) if wt_bi3 else None,
+        'RSCPU_3prime_mut': codonpairdata['RSCPU'].get(forward_bicodon) if forward_bicodon else None,
+        'CPS_3prime_wt': cps3_wt,
+        'CPS_3prime_mut': cps3_mut,
+        'delta_CPS_3prime': _delta(cps3_mut, cps3_wt),
+        'noln_CPS_3prime_wt': codonpairdata['noln CPS'].get(wt_bi3) if wt_bi3 else None,
+        'noln_CPS_3prime_mut': codonpairdata['noln CPS'].get(forward_bicodon) if forward_bicodon else None,
+        'W_CP_3prime_wt': codonpairdata['W_CP'].get(wt_bi3) if wt_bi3 else None,
+        'W_CP_3prime_mut': codonpairdata['W_CP'].get(forward_bicodon) if forward_bicodon else None,
+        'bicodon_5prime_wt': wt_bi5,
+        'bicodon_5prime_mut': reverse_bicodon if reverse_bicodon else None,
+        'RSCPU_5prime_wt': codonpairdata['RSCPU'].get(wt_bi5) if wt_bi5 else None,
+        'RSCPU_5prime_mut': codonpairdata['RSCPU'].get(reverse_bicodon) if reverse_bicodon else None,
+        'CPS_5prime_wt': cps5_wt,
+        'CPS_5prime_mut': cps5_mut,
+        'delta_CPS_5prime': _delta(cps5_mut, cps5_wt),
+        'noln_CPS_5prime_wt': codonpairdata['noln CPS'].get(wt_bi5) if wt_bi5 else None,
+        'noln_CPS_5prime_mut': codonpairdata['noln CPS'].get(reverse_bicodon) if reverse_bicodon else None,
+        'W_CP_5prime_wt': codonpairdata['W_CP'].get(wt_bi5) if wt_bi5 else None,
+        'W_CP_5prime_mut': codonpairdata['W_CP'].get(reverse_bicodon) if reverse_bicodon else None,
         'bicodon_context': bicodon_context,
         'qc_flags': ';'.join(qc_flags) if qc_flags else 'PASS',
     }
@@ -172,7 +256,17 @@ def process_fasta_with_mutations(fasta_path, mutations_path, validation_log=None
         if should_skip_mutation(gene, ntposnt, failure_map):
             continue
 
-        row = process_mutation(gene, ntposnt, sequence, codondata, codonpairdata, cai_gene, tai_gene)
+        # F48: one malformed token must not discard the gene. get_mutation_data_bioAccurate
+        # does int(ntposnt[1:-1]), and the is_nt guard only inspects the first/last chars,
+        # so a token with nucleotide ends but a broken middle (c.76A>T, A76>T) still raises
+        # ValueError. Unguarded, it propagated out of this loop and every mutation already
+        # collected in `results` was lost with it.
+        try:
+            row = process_mutation(gene, ntposnt, sequence, codondata, codonpairdata,
+                                   cai_gene, tai_gene, wt_sequence=sequence)
+        except (ValueError, IndexError) as e:
+            print(f"[codon_usage] {gene}-{ntposnt}: skipped malformed token ({e})", file=sys.stderr)
+            continue
         if row:
             results.append(row)
 
@@ -207,7 +301,11 @@ def process_mutant_fasta(fasta_path):
         cai_gene = compute_cai(sequence)
         tai_gene = compute_tai(sequence)
 
-        row = process_mutation(gene, ntposnt, sequence, codondata, codonpairdata, cai_gene, tai_gene)
+        try:
+            row = process_mutation(gene, ntposnt, sequence, codondata, codonpairdata, cai_gene, tai_gene)
+        except (ValueError, IndexError) as e:
+            print(f"[codon_usage] {gene}-{ntposnt}: skipped malformed token ({e})", file=sys.stderr)
+            continue
         if row:
             results.append(row)
 
@@ -248,8 +346,19 @@ def process_directory(fasta_dir, mutations_dir=None, is_mutant=False, validation
             mutations_file = None
 
             if mutations_dir:
-                for csv_file in Path(mutations_dir).glob('*.csv'):
-                    if gene.upper() in csv_file.stem.upper():
+                gene_up = gene.upper()
+                # F50: exact stem match over a SORTED glob. The old substring test
+                # (`gene.upper() in stem.upper()`) over an unsorted glob with a
+                # first-match break bound a prefix gene (F9) to a superset gene's
+                # file (F9A), nondeterministically across machines — unlike the
+                # sorted() fasta list above. Accepts `<GENE>.csv` and the
+                # `<GENE>_mutations.csv` convention used in Bio_DBs/mappings/mutations.
+                for csv_file in sorted(Path(mutations_dir).glob('*.csv')):
+                    # Use the shared extractor rather than hardcoded stems: it resolves
+                    # 59/59 production files AND the other layouts this repo uses
+                    # (combined_<gene>.csv per main.nf:108-112, muts_<gene>.csv, <gene>.csv),
+                    # and keeps hyphenated symbols intact (HLA-A, NKX2-1).
+                    if (extract_gene_from_filename(csv_file.name) or '').upper() == gene_up:
                         mutations_file = str(csv_file)
                         break
 
@@ -312,6 +421,10 @@ Metrics:
     # Input options
     parser.add_argument('--fasta', required=True, help='FASTA file or directory of FASTA files')
     parser.add_argument('--mutations', help='Mutations CSV file or directory of CSV files')
+    parser.add_argument('--mutant', action='store_true',
+                        help='Input FASTAs contain already-mutated sequences, each named '
+                             '>GENE-MUTATION (e.g. >BRCA1-A123G); no --mutations needed. '
+                             'Requires --fasta to be a directory.')
     parser.add_argument('--validation-log', help='Validation log for filtering failed mutations')
 
     # Output options
@@ -320,17 +433,20 @@ Metrics:
     args = parser.parse_args()
 
     # Validate arguments
-    if not Path(args.fasta).is_dir() and not args.mutations:
-        parser.error("--mutations required when using a single FASTA file")
-    if Path(args.fasta).is_dir() and not args.mutations:
-        parser.error("--mutations required when using a FASTA directory")
+    if args.mutant and not Path(args.fasta).is_dir():
+        parser.error("--mutant requires --fasta to be a directory of mutated FASTA files")
+    if not args.mutant:
+        if not Path(args.fasta).is_dir() and not args.mutations:
+            parser.error("--mutations required when using a single FASTA file")
+        if Path(args.fasta).is_dir() and not args.mutations:
+            parser.error("--mutations required when using a FASTA directory")
 
     # Process files
     if Path(args.fasta).is_dir():
         results = process_directory(
             args.fasta,
             args.mutations,
-            False,
+            args.mutant,
             args.validation_log,
             output_dir=args.output,
         )
@@ -353,19 +469,30 @@ Metrics:
         n_with_5prime = sum(1 for r in results if r.get('bicodon_5prime'))
         n_with_both = sum(1 for r in results if r.get('bicodon_3prime') and r.get('bicodon_5prime'))
 
-        # Get gene-level stats from first result
-        cai = results[0].get('CAI_gene')
-        tai = results[0].get('tAI_gene')
+        # F51: in directory mode `results` spans EVERY gene (results.extend per file),
+        # so results[0] is just whichever gene sorted first — printing its CAI/tAI as
+        # "Gene CAI/tAI" mislabels one gene's value as global. Report per gene instead.
+        # (The per-gene TSVs were always correct; only this stdout line was wrong.)
+        per_gene = {}
+        for r in results:
+            g = r.get('Gene')
+            if g is not None and g not in per_gene:
+                per_gene[g] = (r.get('CAI_gene'), r.get('tAI_gene'))
 
         print(f"\nSummary:")
         print(f"  Total mutations processed: {len(results)}")
         print(f"  With 3' bicodon: {n_with_3prime}")
         print(f"  With 5' bicodon: {n_with_5prime}")
         print(f"  With both bicodons: {n_with_both}")
-        if cai:
-            print(f"  Gene CAI: {cai:.4f}")
-        if tai:
-            print(f"  Gene tAI: {tai:.4f}")
+        if len(per_gene) == 1:
+            gene_only, (cai, tai) = next(iter(per_gene.items()))
+            if cai:
+                print(f"  Gene CAI ({gene_only}): {cai:.4f}")
+            if tai:
+                print(f"  Gene tAI ({gene_only}): {tai:.4f}")
+        elif per_gene:
+            print(f"  Genes processed: {len(per_gene)} "
+                  f"(per-gene CAI/tAI are in each {{GENE}}.codon_usage.tsv)")
 
 
 if __name__ == "__main__":

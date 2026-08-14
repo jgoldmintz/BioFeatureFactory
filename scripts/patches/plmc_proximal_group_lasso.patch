@@ -1,0 +1,36 @@
+--- a/src/inference.c
++++ b/src/inference.c
+@@ -203,6 +203,33 @@
+         ret = lbfgs(ali->nParams, x, &fx, algo, ReportProgresslBFGS,
+             (void*)d, &param);
+         fprintf(stderr, "Gradient optimization: %s\n", LBFGSErrorString(ret));
++
++        /* Proximal group lasso: zero coupling blocks with Frobenius norm
++           below the group L1 threshold. The smooth approximation used
++           during L-BFGS optimization (sqrt(||J||^2 + eps)) cannot produce
++           exact zeros. This post-convergence step applies the proximal
++           operator to enforce true block sparsity. */
++        if (options->lambdaGroup > 0) {
++            int nZeroed = 0;
++            int nTotal = ali->nSites * (ali->nSites - 1) / 2;
++            for (int i = 0; i < ali->nSites - 1; i++)
++                for (int j = i + 1; j < ali->nSites; j++) {
++                    numeric_t norm = 0.0;
++                    for (int ai = 0; ai < ali->nCodes; ai++)
++                        for (int aj = 0; aj < ali->nCodes; aj++)
++                            norm += xEij(i, j, ai, aj) * xEij(i, j, ai, aj);
++                    norm = sqrt(norm);
++                    if (norm < options->lambdaGroup) {
++                        for (int ai = 0; ai < ali->nCodes; ai++)
++                            for (int aj = 0; aj < ali->nCodes; aj++)
++                                xEij(i, j, ai, aj) = 0.0;
++                        nZeroed++;
++                    }
++                }
++            fprintf(stderr,
++                "Group L1 proximal step: zeroed %d/%d coupling blocks (%.1f%%)\n",
++                nZeroed, nTotal, 100.0 * nZeroed / nTotal);
++        }
+     }
+ 
+     /* Optionally re-estimate parameters with adjusted hyperparameters */

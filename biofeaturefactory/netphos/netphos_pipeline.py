@@ -22,10 +22,6 @@ Synthesizes WT + mutant AA FASTAs, runs NetPhos via native APE, parses raw
 output, and builds unified ensemble comparison tables (summary / events / sites
 TSVs) with per-mutation deltas.
 
-Modes:
-  full-pipeline  – synthesize FASTAs → run NetPhos → parse → ensemble
-  netphos-only   – run NetPhos on supplied FASTAs (no parsing)
-  parse-only     – parse existing NetPhos output directories → ensemble
 """
 
 import re
@@ -181,7 +177,18 @@ def _run_native_netphos(fasta_file, output_file, timeout=300, ape_bin=None):
 
 
 def process_netphos_batched(fasta_file, output_file, batch_size=100, timeout=300, executor_fn=None, ape_bin=None):
-    """Process large FASTA files using batching to prevent segmentation faults."""
+    """Process large FASTA files in batches (APE caps at ~2000 seqs/run — see
+    software/ape-1.0/ape 'maxn').
+
+    Returns (ok, complete):
+      ok       -- True if at least one batch produced output (combined result usable)
+      complete -- True only if EVERY batch succeeded (no mutants dropped)
+
+    Each successful batch's output is content-cached, so a rerun reuses the good
+    batches (APE skipped) and re-runs only the failed batch(es). Mutants in failed
+    batches are written to <output_file>.dropped and printed — a partial run is
+    never reported as a silent success.
+    """
     if executor_fn is None:
         executor_fn = _run_native_netphos
 
@@ -190,48 +197,80 @@ def process_netphos_batched(fasta_file, output_file, batch_size=100, timeout=300
 
         if not batch_files:
             print("No sequences found in FASTA file")
-            return False
+            return False, False
 
         print(f"Processing {len(batch_files)} batches...")
         batch_outputs = []
+        failed_batches = []
 
         for i, batch_file in enumerate(batch_files):
             batch_output = output_file.replace('.out', f'-batch-{i+1}.out')
-            print(f"Processing batch {i+1}/{len(batch_files)}...")
 
+            cached = _get_cached_batch(batch_file)
+            if cached:
+                shutil.copy2(cached, batch_output)
+                batch_outputs.append(batch_output)
+                print(f"Batch {i+1}/{len(batch_files)}: cache hit (APE skipped)")
+                continue
+
+            print(f"Processing batch {i+1}/{len(batch_files)}...")
             success, error = executor_fn(batch_file, batch_output, timeout, ape_bin)
 
             if success:
                 batch_outputs.append(batch_output)
+                _save_batch_cache(batch_file, batch_output)
                 print(f"Batch {i+1} completed: {batch_output}")
             else:
-                print(f"Batch {i+1} failed: {error}")
+                failed_batches.append(batch_file)
+                print(f"Batch {i+1} FAILED: {error}")
 
-        if batch_outputs:
-            if len(batch_outputs) == 1:
-                single_batch_output = batch_outputs[0]
-                try:
-                    shutil.move(single_batch_output, output_file)
-                    print(f"Single batch completed: {output_file}")
-                    return True
-                except Exception as e:
-                    print(f"Failed to move single batch output: {e}")
-                    return False
-            else:
-                success = combine_batch_outputs(batch_outputs, output_file, format_type='netphos')
-                if success:
-                    print(f"Combined {len(batch_outputs)} batch outputs into {output_file}")
-                    return True
-                else:
-                    print("Failed to combine batch outputs")
-                    return False
-        else:
+        # Surface dropped mutants (the sequence headers of the failed batches).
+        dropped = []
+        for bf in failed_batches:
+            try:
+                with open(bf) as fh:
+                    dropped.extend(
+                        line[1:].strip().split()[0]
+                        for line in fh if line.startswith('>') and line[1:].strip()
+                    )
+            except Exception:
+                pass
+        if dropped:
+            drop_path = output_file + '.dropped'
+            try:
+                with open(drop_path, 'w') as fh:
+                    fh.write('\n'.join(dropped) + '\n')
+            except Exception:
+                drop_path = '(unwritten)'
+            print(f"WARNING: {len(dropped)} mutant(s) DROPPED from {len(failed_batches)} "
+                  f"failed batch(es); listed in {drop_path}. Re-run to retry — successful "
+                  f"batches are cached, so only the failed batch(es) re-run.")
+
+        complete = not failed_batches
+
+        if not batch_outputs:
             print("No successful batches to combine")
-            return False
+            return False, False
+
+        if len(batch_outputs) == 1:
+            try:
+                shutil.move(batch_outputs[0], output_file)
+                print(f"Single batch completed: {output_file}")
+            except Exception as e:
+                print(f"Failed to move single batch output: {e}")
+                return False, False
+        else:
+            if not combine_batch_outputs(batch_outputs, output_file, format_type='netphos'):
+                print("Failed to combine batch outputs")
+                return False, False
+            print(f"Combined {len(batch_outputs)} batch output(s) into {output_file}"
+                  + ("" if complete else f" ({len(dropped)} mutant(s) dropped)"))
+
+        return True, complete
 
     except Exception as e:
         print(f"Batch processing failed: {e}")
-        return False
+        return False, False
 
 
 # ---------------------------------------------------------------------------
@@ -329,6 +368,36 @@ def clear_cache():
         return 0
 
 
+def _batch_content_cache_key(fasta_file):
+    """Content-based md5 of a FASTA file (independent of path/mtime), so an
+    identical batch reuses its cached result across reruns."""
+    try:
+        with open(fasta_file, 'rb') as fh:
+            return hashlib.md5(fh.read()).hexdigest()
+    except Exception:
+        return None
+
+
+def _get_cached_batch(fasta_file):
+    """Return the cached .out path for a batch's content, or None."""
+    key = _batch_content_cache_key(fasta_file)
+    if not key:
+        return None
+    cache_file = os.path.join(get_cache_dir(), f"{key}_netphos_batch.out")
+    return cache_file if os.path.exists(cache_file) else None
+
+
+def _save_batch_cache(fasta_file, output_file):
+    """Cache a successful batch's output keyed by the batch's content."""
+    key = _batch_content_cache_key(fasta_file)
+    if not key or not os.path.exists(output_file):
+        return
+    try:
+        shutil.copy2(output_file, os.path.join(get_cache_dir(), f"{key}_netphos_batch.out"))
+    except Exception as e:
+        print(f"Warning: failed to cache batch: {e}")
+
+
 def count_fasta_sequences(fasta_file):
     """Count sequences in FASTA file."""
     count = 0
@@ -364,13 +433,15 @@ def run_netphos_with_fasta(fasta_file, output_file, batch_size=None, timeout=300
 
     if batch_size:
         print(f"Using batch processing (batch_size: {batch_size})...")
-        result = process_netphos_batched(fasta_file, output_file, batch_size, timeout,
-                                         executor_fn=executor_fn, ape_bin=ape_bin)
-        if result and use_cache:
+        ok, complete = process_netphos_batched(fasta_file, output_file, batch_size, timeout,
+                                               executor_fn=executor_fn, ape_bin=ape_bin)
+        # Cache the whole-gene result only when COMPLETE — never cache a partial
+        # (dropped-batch) output, or reruns would serve the incomplete result.
+        if ok and complete and use_cache:
             seq_count = count_fasta_sequences(fasta_file)
             save_to_cache(fasta_file, output_file, "netphos",
                           {"processing_mode": "batch", "batch_size": batch_size, "sequence_count": seq_count})
-        return result
+        return ok
 
     seq_count = count_fasta_sequences(fasta_file)
     print(f"Processing {seq_count} sequence(s)...")
@@ -402,43 +473,43 @@ def run_netphos_with_fasta(fasta_file, output_file, batch_size=None, timeout=300
         else:
             print(f"Single run failed: {error}")
             print("Falling back to batch processing for small sequence set...")
-            result = process_netphos_batched(fasta_file, output_file, batch_size=10, timeout=timeout,
-                                             executor_fn=executor_fn, ape_bin=ape_bin)
-            if result and use_cache:
+            ok, complete = process_netphos_batched(fasta_file, output_file, batch_size=10, timeout=timeout,
+                                                   executor_fn=executor_fn, ape_bin=ape_bin)
+            if ok and complete and use_cache:
                 save_to_cache(fasta_file, output_file, "netphos",
                               {"processing_mode": "batch_fallback", "batch_size": 10, "sequence_count": seq_count})
-            return result
+            return ok
 
     elif seq_count <= 100:
         print("Medium sequence set - using batch processing...")
-        result = process_netphos_batched(fasta_file, output_file, batch_size=25, timeout=timeout,
-                                         executor_fn=executor_fn, ape_bin=ape_bin)
-        if result and use_cache:
+        ok, complete = process_netphos_batched(fasta_file, output_file, batch_size=25, timeout=timeout,
+                                               executor_fn=executor_fn, ape_bin=ape_bin)
+        if ok and complete and use_cache:
             save_to_cache(fasta_file, output_file, "netphos",
                           {"processing_mode": "batch", "batch_size": 25, "sequence_count": seq_count})
-        return result
+        return ok
 
     else:
         print("Large sequence set - using batch processing...")
-        result = process_netphos_batched(fasta_file, output_file, batch_size=50, timeout=timeout,
-                                         executor_fn=executor_fn, ape_bin=ape_bin)
-        if result and use_cache:
+        ok, complete = process_netphos_batched(fasta_file, output_file, batch_size=50, timeout=timeout,
+                                               executor_fn=executor_fn, ape_bin=ape_bin)
+        if ok and complete and use_cache:
             save_to_cache(fasta_file, output_file, "netphos",
                           {"processing_mode": "batch", "batch_size": 50, "sequence_count": seq_count})
-        return result
+        return ok
 
 
 # ---------------------------------------------------------------------------
 # Classification logic
 # ---------------------------------------------------------------------------
 
-def _classify_netphos_event(wt_score, mut_score, threshold, delta_threshold=0.05):
+def _classify_netphos_event(wt_score, mut_score, wt_above, mut_above, delta_threshold=0.05):
     """Classify a single (position, kinase) pair between WT and MUT.
 
+    `wt_above`/`mut_above` are the site-membership booleans decided by the caller:
+    score >= threshold, or (under --yes-only) NetPhos answer == 'YES'.
     Returns (classification, classification_code, delta).
     """
-    wt_above = wt_score is not None and wt_score >= threshold
-    mut_above = mut_score is not None and mut_score >= threshold
 
     wt_val = wt_score if wt_score is not None else 0.0
     mut_val = mut_score if mut_score is not None else 0.0
@@ -462,10 +533,15 @@ def _classify_netphos_event(wt_score, mut_score, threshold, delta_threshold=0.05
 # ---------------------------------------------------------------------------
 
 def _collect_output_files(directory):
-    """Collect NetPhos output files from a directory."""
+    """Collect NetPhos output files from a directory, EXCLUDING per-batch
+    intermediates (`*-batch-N.out`). Those are already folded into the combined
+    `{GENE}-netphos.out`, so including them would parse every mutant twice and
+    double-count rows in sites.tsv."""
     output_files = []
     for ext in ['*.out', '*.txt']:
-        output_files.extend(Path(directory).glob(ext))
+        output_files.extend(
+            p for p in Path(directory).glob(ext) if '-batch-' not in p.name
+        )
     return sorted(output_files)
 
 
@@ -482,7 +558,8 @@ def _parse_directory_predictions(directory):
 
 
 def build_netphos_ensemble(wt_preds_by_gene, mut_preds_by_mutation, mapping_lookup,
-                           threshold=0.5, delta_threshold=0.05):
+                           threshold=0.5, delta_threshold=0.05, yes_only=False,
+                           expected_mutations=None):
     """Build ensemble comparison tables from parsed WT and MUT predictions.
 
     Args:
@@ -491,6 +568,10 @@ def build_netphos_ensemble(wt_preds_by_gene, mut_preds_by_mutation, mapping_look
         mapping_lookup: dict  gene -> mapping CSV path
         threshold: score threshold for YES/NO
         delta_threshold: minimum absolute delta for strengthened/weakened
+        expected_mutations: optional iterable of (gene, nt_mutation) that were
+            submitted to NetPhos. Any submitted mutation with no parsed
+            predictions (dropped batch, failed run) gets a zeroed summary row
+            flagged missing_mut instead of vanishing from the output.
 
     Returns:
         (summary_rows, events_rows, sites_rows)
@@ -559,8 +640,14 @@ def build_netphos_ensemble(wt_preds_by_gene, mut_preds_by_mutation, mapping_look
             wt_answer = wp['answer'] if wp else '.'
             mut_answer = mp['answer'] if mp else '.'
 
+            if yes_only:
+                wt_above = (wt_answer == 'YES')
+                mut_above = (mut_answer == 'YES')
+            else:
+                wt_above = wt_score is not None and wt_score >= threshold
+                mut_above = mut_score is not None and mut_score >= threshold
             classification, code, delta = _classify_netphos_event(
-                wt_score, mut_score, threshold, delta_threshold)
+                wt_score, mut_score, wt_above, mut_above, delta_threshold)
 
             event = {
                 'pkey': pkey,
@@ -581,10 +668,16 @@ def build_netphos_ensemble(wt_preds_by_gene, mut_preds_by_mutation, mapping_look
             mutation_events.append(event)
 
         # --- summary row ---
-        n_sites_wt = sum(1 for k in all_keys
-                         if (w := wt_map.get(k)) and w['score'] >= threshold)
-        n_sites_mut = sum(1 for k in all_keys
-                          if (m := mut_map.get(k)) and m['score'] >= threshold)
+        if yes_only:
+            n_sites_wt = sum(1 for k in all_keys
+                             if (w := wt_map.get(k)) and w['answer'] == 'YES')
+            n_sites_mut = sum(1 for k in all_keys
+                              if (m := mut_map.get(k)) and m['answer'] == 'YES')
+        else:
+            n_sites_wt = sum(1 for k in all_keys
+                             if (w := wt_map.get(k)) and w['score'] >= threshold)
+            n_sites_mut = sum(1 for k in all_keys
+                              if (m := mut_map.get(k)) and m['score'] >= threshold)
 
         count_gained = sum(1 for e in mutation_events if e['classification'] == 'gained')
         count_lost = sum(1 for e in mutation_events if e['classification'] == 'lost')
@@ -628,6 +721,53 @@ def build_netphos_ensemble(wt_preds_by_gene, mut_preds_by_mutation, mapping_look
             'top_event_kinase': top_event['kinase'] if top_event else '',
             'top_event_classification_code': top_event['classification_code'] if top_event else '',
             'qc_flags': '|'.join(qc_flags) if qc_flags else '',
+        })
+
+    # Submitted mutations with no parsed predictions never enter the loop above,
+    # so a dropped batch would silently shrink the table. Emit a flagged row.
+    seen_keys = set(mut_preds_by_mutation.keys())
+    for key in (expected_mutations or []):
+        gene, nt_mutation = tuple(key)
+        if (gene, nt_mutation) in seen_keys:
+            continue
+        seen_keys.add((gene, nt_mutation))
+
+        wt_preds = wt_preds_by_gene.get(gene, [])
+        wt_map = {}
+        for p in wt_preds:
+            wkey = (p['pos'], p['kinase'])
+            if wkey not in wt_map or p['score'] > wt_map[wkey]['score']:
+                wt_map[wkey] = p
+
+        if yes_only:
+            n_sites_wt = sum(1 for p in wt_map.values() if p['answer'] == 'YES')
+        else:
+            n_sites_wt = sum(1 for p in wt_map.values() if p['score'] >= threshold)
+
+        qc_flags = []
+        if not wt_preds:
+            qc_flags.append("missing_wt")
+        qc_flags.append("missing_mut")
+
+        summary_rows.append({
+            'pkey': f"{gene}-{nt_mutation}",
+            'Gene': gene,
+            'n_sites_wt': n_sites_wt,
+            'n_sites_mut': 0,
+            'count_gained': 0,
+            'count_lost': 0,
+            'count_strengthened': 0,
+            'count_weakened': 0,
+            'count_stable': 0,
+            'max_abs_delta': 0.0,
+            'sum_abs_delta': 0.0,
+            'n_kinases_affected': 0,
+            'top_event_type': '',
+            'top_event_delta': 0.0,
+            'top_event_position': '',
+            'top_event_kinase': '',
+            'top_event_classification_code': '',
+            'qc_flags': '|'.join(qc_flags),
         })
 
     return summary_rows, events_rows, sites_rows
@@ -733,6 +873,40 @@ def _pair_predictions_with_mutations(wt_dir, mut_dir, mapping_lookup):
     return wt_preds_by_gene, mut_preds_by_mutation
 
 
+def _expected_mutations_from_synthesis(synth_summary):
+    """Recover the (gene, mutation) keys submitted to NetPhos from the synthesized
+    mutant FASTAs. Keys are normalized exactly as _pair_predictions_with_mutations
+    normalizes parsed output names, so the two sets are comparable.
+    """
+    expected = []
+    for entry in synth_summary:
+        mut_path = entry.get('mut_path')
+        if not mut_path:
+            continue
+        gene = str(entry.get('gene', '')).upper()
+        if not gene:
+            continue
+        gene_key = (extract_gene_from_filename(gene) or gene).upper()
+        prefix = f"{gene}-"
+        try:
+            with open(mut_path) as fh:
+                for line in fh:
+                    if not line.startswith('>'):
+                        continue
+                    header = line[1:].strip()
+                    if not header:
+                        continue
+                    header = header.split()[0]
+                    if not header.upper().startswith(prefix):
+                        continue
+                    mutation = header[len(prefix):]
+                    if mutation:
+                        expected.append((gene_key, mutation))
+        except OSError as exc:
+            print(f"Warning: could not read synthesized mutants for {gene}: {exc}")
+    return expected
+
+
 def run_full_pipeline_mode(args, executor_fn, ape_bin):
     """Synthesize FASTAs, run NetPhos, parse, build ensemble."""
     if not args.mapping_dir:
@@ -741,7 +915,6 @@ def run_full_pipeline_mode(args, executor_fn, ape_bin):
 
     wt_header = getattr(args, 'wt_header', 'ORF')
     verbose = getattr(args, 'verbose', False)
-    keep = getattr(args, 'keep_intermediates', False)
 
     # Load WT sequences
     wt_sequences, temp_holder = load_wt_sequence_map(args.input, wt_header=wt_header)
@@ -775,6 +948,8 @@ def run_full_pipeline_mode(args, executor_fn, ape_bin):
     total_mutants = sum(s['mutant_count'] for s in synth_summary)
     print(f"Synthesized FASTAs: {len(synth_summary)} genes, {total_mutants} mutants")
 
+    expected_mutations = _expected_mutations_from_synthesis(synth_summary)
+
     # Run NetPhos on WT and MUT directories
     wt_output_dir = Path(work_dir) / "wt_outputs"
     mut_output_dir = Path(work_dir) / "mut_outputs"
@@ -799,7 +974,13 @@ def run_full_pipeline_mode(args, executor_fn, ape_bin):
     # Build ensemble
     summary, events, sites = build_netphos_ensemble(
         wt_preds_by_gene, mut_preds_by_mutation, mapping_lookup,
-        threshold=args.threshold, delta_threshold=0.05)
+        threshold=args.threshold, delta_threshold=0.05, yes_only=args.yes_only,
+        expected_mutations=expected_mutations)
+
+    n_missing = sum(1 for r in summary if 'missing_mut' in r['qc_flags'])
+    if n_missing:
+        print(f"WARNING: {n_missing} submitted mutation(s) produced no NetPhos "
+              f"predictions; written as summary rows flagged missing_mut")
 
     genes_in_results = set()
     for row in summary:
@@ -825,105 +1006,11 @@ def run_full_pipeline_mode(args, executor_fn, ape_bin):
         write_ensemble_outputs(str(gene_out / "output"), summary, events, sites)
 
     # Cleanup
-    if not keep:
-        shutil.rmtree(work_dir, ignore_errors=True)
-    else:
-        print(f"Intermediate files preserved at: {work_dir}")
+    shutil.rmtree(work_dir, ignore_errors=True)
 
     if temp_holder:
         temp_holder.cleanup()
 
-    return 0
-
-
-def run_netphos_only_mode(args, executor_fn, ape_bin):
-    """Run NetPhos on supplied FASTAs without parsing."""
-    temp_output_dir = tempfile.mkdtemp(prefix="netphos_outputs_")
-
-    if os.path.isfile(args.input):
-        fasta_file = args.input
-        netphos_output = os.path.join(temp_output_dir,
-                                      os.path.basename(args.input).replace('.fasta', '-netphos.out'))
-
-        print(f"Running NetPhos on {fasta_file}...")
-        use_cache = not args.no_cache
-        success = run_netphos_with_fasta(fasta_file, netphos_output, args.batch_size, args.timeout, use_cache,
-                                         executor_fn=executor_fn, ape_bin=ape_bin)
-        if not success:
-            print("ERROR: NetPhos execution failed")
-            return 1
-
-        print(f"NetPhos completed: {netphos_output}")
-
-    elif os.path.isdir(args.input):
-        outputs = _run_netphos_on_directory(args.input, temp_output_dir, args, executor_fn, ape_bin)
-        if not outputs:
-            print("ERROR: NetPhos execution failed for all files")
-            return 1
-        print(f"NetPhos completed for {len(outputs)} files")
-
-    else:
-        print(f"ERROR: Input must be a FASTA file or directory: {args.input}")
-        return 1
-
-    print(f"NetPhos outputs in: {temp_output_dir}")
-    return 0
-
-
-def run_parse_mode(args):
-    """Parse existing NetPhos output directories and build ensemble tables."""
-    if not args.mapping_dir:
-        print("ERROR: --mapping-dir is required for parse-only mode")
-        return 1
-
-    args.output = resolve_output_base(args.output, args.input, "netphos")
-
-    if not os.path.exists(args.mapping_dir):
-        print(f"ERROR: Mapping path not found: {args.mapping_dir}")
-        return 1
-
-    input_path = Path(args.input)
-    if not input_path.exists():
-        print(f"ERROR: Input path not found: {args.input}")
-        return 1
-
-    mapping_lookup = discover_mapping_files(args.mapping_dir)
-    if not mapping_lookup:
-        print(f"ERROR: No mapping files found in {args.mapping_dir}")
-        return 1
-
-    # Expect input directory with wt/ and mut/ subdirs, or a flat directory
-    wt_dir = input_path / "wt"
-    mut_dir = input_path / "mut"
-
-    if wt_dir.is_dir() and mut_dir.is_dir():
-        wt_preds_by_gene, mut_preds_by_mutation = _pair_predictions_with_mutations(
-            str(wt_dir), str(mut_dir), mapping_lookup)
-    else:
-        # Flat directory: treat all outputs as from a single allele context
-        print("Warning: No wt/ and mut/ subdirectories found. Attempting flat directory parsing.")
-        all_preds = _parse_directory_predictions(str(input_path))
-
-        wt_preds_by_gene = {}
-        mut_preds_by_mutation = {}
-        for seq_name, preds in all_preds.items():
-            gene, mutation = extract_mutation_from_sequence_name(seq_name)
-            gene = gene.upper().replace('_AA', '')
-            gene_clean = extract_gene_from_filename(gene) or gene
-            if mutation and mutation.upper() not in ('WT',):
-                mut_preds_by_mutation.setdefault((gene_clean.upper(), mutation), []).extend(preds)
-            else:
-                wt_preds_by_gene.setdefault(gene_clean.upper(), []).extend(preds)
-
-    summary, events, sites = build_netphos_ensemble(
-        wt_preds_by_gene, mut_preds_by_mutation, mapping_lookup,
-        threshold=args.threshold, delta_threshold=0.05)
-
-    output_base = args.output
-    if output_base.endswith('.tsv'):
-        output_base = output_base[:-4]
-
-    write_ensemble_outputs(output_base, summary, events, sites)
     return 0
 
 
@@ -950,8 +1037,6 @@ def main():
                         help='Validation log file or directory to skip failed mutations')
     parser.add_argument('--wt-header', default='ORF',
                         help='FASTA header identifying WT sequence (default: ORF)')
-    parser.add_argument('--keep-intermediates', action='store_true',
-                        help='Keep temp directories for debugging')
     parser.add_argument('--verbose', action='store_true',
                         help='Verbose output')
 
@@ -988,10 +1073,8 @@ def main():
     if not os.path.exists(args.input):
         parser.error(f"Input path not found: {args.input}")
 
-    # Validate threshold/yes-only
-    if args.yes_only and args.threshold > 0.0:
-        print("Warning: --yes-only specified, ignoring --threshold")
-        args.threshold = 0.0
+    # --yes-only redefines a "site" as a NetPhos YES call inside the ensemble
+    # (see build_netphos_ensemble); it no longer zeroes the threshold.
 
     # Resolve APE binary (needed for execution modes)
     native_ape = None

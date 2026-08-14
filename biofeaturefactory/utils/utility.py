@@ -231,14 +231,20 @@ def get_mutation_data(ntposnt):
     """Return zero-based position and nucleotides for a mutation string such as G123A."""
     original_nt = ntposnt[0]
     mutant_nt = ntposnt[-1]
-    if int(ntposnt[1:-1]) == 1:
-        position = int(ntposnt[1:-1])
-    else:
-        position = int(ntposnt[1:-1]) - 1  # Convert to 0-based index
+    position = int(ntposnt[1:-1]) - 1  # Convert 1-based token position to 0-based index
     return position, (original_nt, mutant_nt)
 
-def get_mutation_data_bioAccurate(ntposnt):
-    """Return one-based position and nucleotides for a mutation string; skips stop codons."""
+def get_mutation_data_bioAccurate(ntposnt, is_nt):
+    """Return one-based position and nucleotides for a mutation string; skips stop codons.
+
+    is_nt is REQUIRED (no default): pass True for a nucleotide mutation token
+    (e.g. G123A) or False for an amino-acid token (e.g. R213W). When True, a token
+    whose ref/alt are not nucleotides (ACGTU) returns (None, None) instead of
+    silently coercing an off-alphabet character into a position/ref/alt — this
+    closes the input-level validation gap (F45). Callers MUST state intent
+    explicitly; a missing argument is a TypeError by design (fail-loud, no silent
+    wrong default). alphafold3 opts out (is_nt=False) pending its own custom guard.
+    """
 
     # Skip stop codons (for the case of aa)
     if 'Stop' in ntposnt or 'Sto' in ntposnt:
@@ -246,10 +252,10 @@ def get_mutation_data_bioAccurate(ntposnt):
 
     original_nt = ntposnt[0]
     mutant_nt = ntposnt[-1]
-    if int(ntposnt[1:-1]) == 1:
-        position = int(ntposnt[1:-1])
-    else:
-        position = int(ntposnt[1:-1])
+    # F45: reject off-alphabet tokens on nt paths (collapses the former dead if/else).
+    if is_nt and (original_nt.upper() not in "ACGTU" or mutant_nt.upper() not in "ACGTU"):
+        return None, None
+    position = int(ntposnt[1:-1])
     return position, (original_nt, mutant_nt)
 
 def get_mutant_aa(ntmut, ntseq, aaseq=None, index=0):
@@ -680,7 +686,10 @@ def load_mapping(mapping_file: str, mapType: str ='transcript') -> Dict[str, str
     """Load a two-column mapping CSV (mutant->mapping) using the specified column name."""
 
     mapping = {}
-    tval, delim = validate_mapping_content(mapping_file)
+    res = validate_mapping_content(mapping_file)
+    if not res:  # False on a single-column / unreadable file → graceful empty, no unpack crash (F37)
+        return mapping
+    tval, delim = res
     try:
         if tval:
             with open(mapping_file, 'r') as f:
@@ -1031,7 +1040,7 @@ def process_single_mutation_for_sequence(seq_name, predictions, mapping_dict, is
     aaposaa = mapping_dict[mutation_id]  # e.g., "Y110F"
 
     # Parse amino acid position and mutation info
-    position_data = get_mutation_data_bioAccurate(aaposaa)
+    position_data = get_mutation_data_bioAccurate(aaposaa, is_nt=False)
     if position_data[0] is None:
         return []
 
@@ -1364,8 +1373,17 @@ def load_wt_sequences(input_dir: str, wt_header: str = "transcript") -> Dict[str
             seq = data[wt_header].strip()
         else:
             non_empty = [(h, s) for h, s in data.items() if s and s.strip()]
-            if non_empty:
-                seq = max(non_empty, key=lambda kv: len(kv[1]))[1].strip()
+            if len(non_empty) == 1:
+                # Single record: no ambiguity — use it regardless of header label.
+                seq = non_empty[0][1].strip()
+            elif len(non_empty) > 1:
+                # F39: >1 record and none matches wt_header. The old max-by-length
+                # pick silently seeded WT/MUT from an arbitrary isoform. Refuse to
+                # guess — skip this file loudly so the gene is absent, not wrong.
+                print(f"[WT][SKIP] {fasta_file.name}: header '{wt_header}' not found among "
+                      f"{len(non_empty)} records ({', '.join(h for h, _ in non_empty)}); "
+                      f"cannot disambiguate WT isoform. Pass --wt-header to select one. Skipping.")
+                continue
 
         if not seq:
             continue
@@ -1442,14 +1460,17 @@ def load_wt_sequence_map(input_path: str, wt_header: str = "ORF"):
 
 def infer_aamutation_from_nt(mutant_id: str, nt_sequence: str):
     """Infer the amino-acid mutation string (e.g., K543E) from a nucleotide mutation."""
-    nt_info = get_mutation_data_bioAccurate(mutant_id)
+    nt_info = get_mutation_data_bioAccurate(mutant_id, is_nt=True)
     if nt_info[0] is None:
         return None
     aa_info = get_mutant_aa(nt_info, nt_sequence)
     if not aa_info:
         return None
     (aa_pos, (wt_aa, mut_aa)), _ = aa_info
-    if not wt_aa or not mut_aa:
+    # Skip nonsense (stop-gain) variants: codon_to_aa maps stop codons to the
+    # 4-char string 'Stop', which must NOT be spliced in as a residue. Matches
+    # the stop-skip already done for aa tokens in get_mutation_data_bioAccurate.
+    if not wt_aa or not mut_aa or mut_aa == 'Stop':
         return None
     aa_pos = int(aa_pos)
     return aa_pos, wt_aa, mut_aa
@@ -1523,7 +1544,7 @@ def build_mutant_sequences_for_gene(
                 wt_aa = mut_aa = None
 
                 if input_type == 'aa':
-                    aa_info = get_mutation_data_bioAccurate(mutant_clean)
+                    aa_info = get_mutation_data_bioAccurate(mutant_clean, is_nt=False)
                     if aa_info[0] is not None and aa_info[1]:
                         pos = aa_info[0]
                         wt_aa, mut_aa = aa_info[1]
@@ -1572,13 +1593,13 @@ def build_mutant_sequences_for_gene(
                     pos = None
                     wt_aa = mut_aa = None
                     if aa_string:
-                        pos, nts = get_mutation_data_bioAccurate(aa_string)
+                        pos, nts = get_mutation_data_bioAccurate(aa_string, is_nt=False)
                         if pos is not None and nts:
                             wt_aa, mut_aa = nts
 
                     if pos is None or not wt_aa or not mut_aa:
                         if input_type == 'aa':
-                            aa_info = get_mutation_data_bioAccurate(mutant_clean)
+                            aa_info = get_mutation_data_bioAccurate(mutant_clean, is_nt=False)
                             if aa_info[0] is not None and aa_info[1]:
                                 pos = aa_info[0]
                                 wt_aa, mut_aa = aa_info[1]
@@ -1615,12 +1636,32 @@ def synthesize_gene_fastas(wt_sequences, mapping_lookup, sequence_root, log_path
     mut_dir.mkdir(parents=True, exist_ok=True)
 
     summary = []
-    for gene_name, nt_seq in wt_sequences.items():
+    for gene_name, wt_seq in wt_sequences.items():
         gene_name = gene_name.upper()
-        nt_seq_upper = nt_seq.strip().upper()
-        aa_seq = translate_orf_sequence(nt_seq_upper)
-        if not aa_seq:
-            print(f"Skipping {gene_name}: unable to translate ORF")
+        seq_upper = wt_seq.strip().upper()
+
+        # Auto-detect the WT alphabet: nucleotide -> translate to protein;
+        # protein -> use directly (no translation); codon-encoded -> skip.
+        # Prevents the unconditional-translate crash (TranslationError: invalid
+        # codon) that amino-acid input previously caused here.
+        try:
+            detected = detect_alphabet(seq_upper)
+        except ValueError:
+            print(f"Skipping {gene_name}: empty sequence")
+            continue
+        if detected == 'nucleotide':
+            nt_for_build = seq_upper
+            aa_seq = translate_orf_sequence(seq_upper)
+            build_input_type = 'nt'
+            if not aa_seq:
+                print(f"Skipping {gene_name}: unable to translate ORF")
+                continue
+        elif detected == 'protein':
+            nt_for_build = None
+            aa_seq = seq_upper
+            build_input_type = 'aa'
+        else:  # codon-encoded
+            print(f"Skipping {gene_name}: codon-encoded input, expected nt or aa")
             continue
 
         wt_header = f"{gene_name}-wt"
@@ -1630,11 +1671,12 @@ def synthesize_gene_fastas(wt_sequences, mapping_lookup, sequence_root, log_path
         mapping_file = mapping_lookup.get(gene_name.upper())
         mutant_sequences = build_mutant_sequences_for_gene(
             gene_name,
-            nt_seq_upper,
+            nt_for_build,
             aa_seq,
             mapping_file,
             log_path,
             failure_map,
+            input_type=build_input_type,
         )
 
         mut_path = None
@@ -1935,12 +1977,31 @@ def extract_codon_with_bicodons(ntposnt, seq):
         tuple: (original_codon, forward_bicodon, reverse_bicodon, pos_in_codon, pos, codon_number)
                where bicodons may be empty strings if not biologically possible
     """
-    pos, mut = get_mutation_data_bioAccurate(ntposnt)
+    pos, mut = get_mutation_data_bioAccurate(ntposnt, is_nt=True)
     if pos is None:
         return None, "", "", 0, 0, 0
 
     # Convert to 0-based indexing
     pos_0_indexed = pos - 1
+
+    # F46: apply the ALT base before slicing. Previously `mut` was bound and never
+    # used, so every codon/bicodon (and every RSCU/W/CAI/tAI derived from them) was
+    # sliced from the unmodified WT ORF while the caller labeled it 'mutated_codon'
+    # — the mutation was invisible on the only CLI-reachable path. Only the mutated
+    # codon changes; neighbouring codons in the bicodons stay WT, which is correct.
+    if pos_0_indexed < 0 or pos_0_indexed >= len(seq):
+        return None, "", "", 0, 0, 0
+    ref_nt, alt_nt = mut
+    # F46 REF GUARD: splicing ALT onto a base that is not REF invents a codon present
+    # in NEITHER the WT nor the true mutant sequence. Measured on the production corpus
+    # (59 genes / 35,089 tokens vs Bio_DBs/fastas ORF records): 1,537 tokens (4.38%)
+    # have a REF that disagrees with the ORF base — concentrated in MECP2 295/423,
+    # NOD2 271/387, FGFR2 215/290, MPZ 195/270 — i.e. an ORF/isoform mismatch, not noise.
+    # Reject rather than fabricate; the caller turns None into a skipped row.
+    if ref_nt and seq[pos_0_indexed].upper() != ref_nt.upper():
+        return None, "", "", 0, 0, 0
+    seq = seq[:pos_0_indexed] + alt_nt.upper() + seq[pos_0_indexed + 1:]
+
     pos_in_codon = pos_0_indexed % 3
 
     # Find the codon start position and codon number
@@ -2014,8 +2075,9 @@ def detect_alphabet(sequence):
                     upper-case-letter codons (no digit/'!'/'@') is
                     indistinguishable from protein by composition and is reported
                     as 'protein'. A hard limit of composition-only detection.
-    - 'nucleotide': >=90% of non-gap characters are IUPAC nucleotide codes
-                    (ACGTNURYWSKMBDHV).
+    - 'nucleotide': >=90% of non-gap characters are ACGT + U (RNA) + N (masked
+                    base). IUPAC ambiguity codes are excluded — they collide with
+                    amino-acid letters and do not appear in BFF's ORF/CDS inputs.
     - 'protein'   : otherwise.
     """
     raw = sequence.replace('-', '').replace('.', '')
@@ -2028,7 +2090,11 @@ def detect_alphabet(sequence):
         return 'codon'
 
     seq = raw.upper().replace('*', '')
-    nt_chars = set('ACGTNURYWSKMBDHV')
+    # Bases + U (RNA) + N (masked base) only. IUPAC ambiguity codes
+    # (RYSWKMBDHV) are intentionally EXCLUDED: 10 of them collide with amino-acid
+    # one-letter codes, weakening nt-vs-protein discrimination, and they do not
+    # occur in BFF's ORF/CDS inputs (the only sequences detect_alphabet runs on).
+    nt_chars = set('ACGTUN')
     nt_count = sum(1 for c in seq if c in nt_chars)
     return 'nucleotide' if nt_count / len(seq) >= 0.90 else 'protein'
 

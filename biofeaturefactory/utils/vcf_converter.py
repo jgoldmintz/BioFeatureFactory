@@ -318,7 +318,7 @@ def process_single_file(
 
         for snp_string in mut_list:
             try:
-                relative_pos, nts = get_mutation_data_bioAccurate(snp_string)
+                relative_pos, nts = get_mutation_data_bioAccurate(snp_string, is_nt=True)
                 if relative_pos is None or not nts:
                     continue
                 wt_nt, mut_nt = nts

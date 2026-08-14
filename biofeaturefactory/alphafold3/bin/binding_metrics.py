@@ -300,9 +300,18 @@ def format_events_rows(
 
     Returns:
         List of row dicts for events.tsv
+
+    In multi-window mode the aggregation struct holds across-window statistics,
+    so its count/std are emitted as n_windows_used_*/std_pae_across_windows_*
+    and the per-sample n_samples_*/std_pae_* columns stay empty.
     """
     rows = []
     for d in delta_list:
+        multi_window = bool(d.n_windows)
+        n_wt = d.wt_metrics.n_samples if d.wt_metrics and d.wt_metrics.n_samples else ''
+        n_mut = d.mut_metrics.n_samples if d.mut_metrics and d.mut_metrics.n_samples else ''
+        std_wt = round(d.wt_metrics.std_chain_pair_pae_min, 3) if d.wt_metrics and d.wt_metrics.std_chain_pair_pae_min is not None else ''
+        std_mut = round(d.mut_metrics.std_chain_pair_pae_min, 3) if d.mut_metrics and d.mut_metrics.std_chain_pair_pae_min is not None else ''
         row = {
             'pkey': pkey,
             'rbp_name': d.rbp_name,
@@ -314,11 +323,15 @@ def format_events_rows(
             'delta_interface_contacts': d.delta_interface_contacts,
             'cls': d.event_class.value,
             'priority': round(d.priority_score, 3),
-            'n_samples_wt': d.wt_metrics.n_samples if d.wt_metrics and d.wt_metrics.n_samples else '',
-            'n_samples_mut': d.mut_metrics.n_samples if d.mut_metrics and d.mut_metrics.n_samples else '',
-            'std_pae_wt': round(d.wt_metrics.std_chain_pair_pae_min, 3) if d.wt_metrics and d.wt_metrics.std_chain_pair_pae_min is not None else '',
-            'std_pae_mut': round(d.mut_metrics.std_chain_pair_pae_min, 3) if d.mut_metrics and d.mut_metrics.std_chain_pair_pae_min is not None else '',
+            'n_samples_wt': '' if multi_window else n_wt,
+            'n_samples_mut': '' if multi_window else n_mut,
+            'std_pae_wt': '' if multi_window else std_wt,
+            'std_pae_mut': '' if multi_window else std_mut,
             'n_windows': d.n_windows if d.n_windows else '',
+            'n_windows_used_wt': n_wt if multi_window else '',
+            'n_windows_used_mut': n_mut if multi_window else '',
+            'std_pae_across_windows_wt': std_wt if multi_window else '',
+            'std_pae_across_windows_mut': std_mut if multi_window else '',
         }
         rows.append(row)
     return rows

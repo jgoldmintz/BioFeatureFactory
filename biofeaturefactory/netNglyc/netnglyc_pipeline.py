@@ -446,13 +446,12 @@ class RobustDockerNetNGlyc:
     """
 
     def __init__(self, use_signalp=True,
-                 max_workers=4, cache_dir=None, docker_timeout=600, keep_intermediates=False,
+                 max_workers=4, cache_dir=None, docker_timeout=600,
                  verbose=False, native_bin=None, **_ignored):
         self.max_workers = max_workers
         self.temp_dir = tempfile.mkdtemp(prefix="netnglyc_")
         self.use_signalp = use_signalp
         self.docker_timeout = docker_timeout
-        self.keep_intermediates = keep_intermediates
         self.verbose = verbose
         self.native_bin = native_bin
 
@@ -727,7 +726,7 @@ class RobustDockerNetNGlyc:
                     aamutant = row['aamutant']  # e.g., K541E
                     
                     # Parse amino acid mutation to get position and amino acids
-                    position_data = get_mutation_data_bioAccurate(aamutant)
+                    position_data = get_mutation_data_bioAccurate(aamutant, is_nt=False)
                     if position_data[0] is not None:
                         aa_pos = position_data[0]  # e.g., 541
                         aa_tuple = position_data[1]  # e.g., ('K', 'E')
@@ -823,8 +822,8 @@ class RobustDockerNetNGlyc:
                 success, output_file, error = self.process_single_fasta(
                     batch_files[0], output_base, worker_id
                 )
-                # Clean up batch file (only if not keeping intermediates)
-                if not self.keep_intermediates and os.path.exists(batch_files[0]):
+                # Clean up batch input file
+                if os.path.exists(batch_files[0]):
                     os.remove(batch_files[0])
                 return success, output_file, error
             
@@ -851,16 +850,15 @@ class RobustDockerNetNGlyc:
                     else:
                         if self.verbose:
                             print(f"Batch {i+1} failed: {error}")
-                        # Clean up batch files (only if not keeping intermediates)
-                        if not self.keep_intermediates:
-                            for bf in batch_files:
-                                if os.path.exists(bf):
-                                    os.remove(bf)
+                        # Clean up batch input files
+                        for bf in batch_files:
+                            if os.path.exists(bf):
+                                os.remove(bf)
                         return False, output_base, f"Batch {i+1} failed: {error}"
                         
                 finally:
-                    # Clean up this batch file (only if not keeping intermediates)
-                    if not self.keep_intermediates and os.path.exists(batch_file):
+                    # Clean up this batch input file
+                    if os.path.exists(batch_file):
                         os.remove(batch_file)
             
             # Create combined output for backwards compatibility (optional)
@@ -878,9 +876,9 @@ class RobustDockerNetNGlyc:
                 return False, output_base, "Failed to combine batch outputs"
                 
         except Exception as e:
-            # Clean up any remaining batch files (only if not keeping intermediates)
+            # Clean up any remaining batch input files
             try:
-                if 'batch_files' in locals() and not self.keep_intermediates:
+                if 'batch_files' in locals():
                     for bf in batch_files:
                         if os.path.exists(bf):
                             os.remove(bf)
@@ -899,6 +897,7 @@ class RobustDockerNetNGlyc:
             
             
             current_sequence = None
+            sequence_names = []
             in_results = False
             skip_next_line = False
             found_first_separator = False
@@ -916,6 +915,8 @@ class RobustDockerNetNGlyc:
                 if line.startswith('Name:') and len(line.split()) >= 2:
                     current_sequence = line.split()[1]
                     predictions_by_sequence[current_sequence] = []
+                    if current_sequence not in sequence_names:
+                        sequence_names.append(current_sequence)
                     in_results = False
                     found_first_separator = False
                     continue
@@ -942,8 +943,13 @@ class RobustDockerNetNGlyc:
                         found_first_separator = False
                         continue
                 
-                # Parse prediction lines
-                if in_results and found_first_separator and line and not line.startswith('#'):
+                # Parse prediction lines by CONTENT, not separator state: a data row
+                # has >=5 cols with an integer position at [1] (float potential at [3]
+                # is validated below). This is robust to ---/=== separators and to
+                # batch-combined files where separators are interleaved with data
+                # (see _combine_glycosylation_outputs); the separator/skip_next_line
+                # bookkeeping above is left intact but no longer gates parsing.
+                if line and not line.startswith('#') and len(line.split()) >= 5 and line.split()[1].isdigit():
                     results_lines_found += 1
                     
                     # Check for "No sites predicted" message
@@ -958,7 +964,14 @@ class RobustDockerNetNGlyc:
                         try:
                             seq_name = parts[0]
                             if seq_name not in predictions_by_sequence:
-                                predictions_by_sequence[seq_name] = []
+                                # The binary truncates SeqName to the results-table column
+                                # width; recover the untruncated id from the 'Name:' headers
+                                # when exactly one of them extends this prefix.
+                                full_names = [n for n in sequence_names if n.startswith(seq_name)]
+                                if len(full_names) == 1:
+                                    seq_name = full_names[0]
+                                else:
+                                    predictions_by_sequence[seq_name] = []
                             position = int(parts[1])
                             sequon = parts[2]  # e.g., NKSE
                             potential = float(parts[3])
@@ -1361,13 +1374,14 @@ class RobustDockerNetNGlyc:
         
         return results
 
-    def collect_wt_sites(self, directories, threshold, signalp_cache=None):
+    def collect_wt_sites(self, directories, threshold, mutation_index=None, signalp_cache=None):
         """Collect WT site predictions across provided directories."""
         wt_sites_by_gene: dict[str, list[dict]] = {}
         wt_signalp: dict[str, dict] = {}
         site_rows = []
         directories = [Path(d) for d in directories if d]
         signalp_cache = signalp_cache or {}
+        mutation_index = mutation_index or {}
         for directory in directories:
             if not directory.exists():
                 continue
@@ -1378,6 +1392,11 @@ class RobustDockerNetNGlyc:
                 signalp_map = parse_signalp_summary(str(file_path))
                 for seq_name, predictions in predictions_by_seq.items():
                     gene_key = normalize_gene_symbol(seq_name)
+                    # WT twin of the F1451 mut guard: drop WT rows for genes outside the
+                    # single-gene index. WT has no mutation id -> gene-level check only.
+                    # Empty index stays falsy -> no filtering (matches mut-path semantics).
+                    if mutation_index and gene_key not in mutation_index:
+                        continue
                     seq_signalp = (
                         signalp_map.get(seq_name)
                         or signalp_cache.get(seq_name)
@@ -1448,9 +1467,8 @@ class RobustDockerNetNGlyc:
                         continue
                     gene_key = (gene_name or "").upper()
                     mut_id_norm = normalize_mutation_id(mutation_id)
-                    if mutation_index and gene_key in mutation_index:
-                        if mut_id_norm not in mutation_index[gene_key]:
-                            continue
+                    if mutation_index and (gene_key not in mutation_index or mut_id_norm not in mutation_index[gene_key]):
+                        continue
                     pkey = f"{gene_key}-{mut_id_norm}"
                     seq_signalp = signalp_map.get(seq_name, {})
                     if not seq_signalp:
@@ -1713,7 +1731,7 @@ class RobustDockerNetNGlyc:
         mutation_index = load_mutation_index(mapping_lookup)
         signalp_cache = signalp_cache or load_signalp_cache(self.cache_dir)
         wt_sites_by_gene, wt_signalp, wt_site_rows = self.collect_wt_sites(
-            wt_dirs, threshold, signalp_cache=signalp_cache
+            wt_dirs, threshold, mutation_index=mutation_index, signalp_cache=signalp_cache
         )
         (
             mut_sites_by_pkey,
@@ -1996,7 +2014,6 @@ class RobustDockerNetNGlyc:
             max_workers=1,  # Each worker handles one file
             cache_dir=self.cache_dir,
             docker_timeout=self.docker_timeout,
-            keep_intermediates=self.keep_intermediates,
             verbose=self.verbose,
             native_bin=getattr(self, 'native_path', None),
         )
@@ -2185,7 +2202,8 @@ class RobustDockerNetNGlyc:
         Process FASTA file by splitting into individual sequences and running
         them in parallel.
         """
-        
+        temp_files = []  # bound before try so the finally cleanup never hits an unbound name
+
         try:
             # Read all sequences
             sequences = read_fasta(fasta_file)
@@ -2198,13 +2216,12 @@ class RobustDockerNetNGlyc:
             
             # Create temporary files for individual sequences (save to outputs directory for troubleshooting)
             outputs_dir = os.path.dirname(output_file)
-            temp_files = []
             output_files = []
             
             for i, (seq_name, sequence) in enumerate(sequences.items()):
                 # Create individual FASTA file (save to outputs directory for troubleshooting)
-                temp_fasta = os.path.join(outputs_dir, f"seq_{i}_{seq_name.replace('/', '_')}.fasta")
-                temp_output = os.path.join(outputs_dir, f"seq_{i}_output.out")
+                temp_fasta = os.path.join(outputs_dir, f"{Path(output_file).stem}_seq_{i}_{seq_name.replace('/', '_')}.fasta")
+                temp_output = os.path.join(outputs_dir, f"{Path(output_file).stem}_seq_{i}_output.out")
                 
                 with open(temp_fasta, 'w') as f:
                     f.write(f">{seq_name}\n")
@@ -2263,15 +2280,14 @@ class RobustDockerNetNGlyc:
         except Exception as e:
             return False, output_file, f"Parallel processing error: {e}"
         finally:
-            # Clean up temporary files (only if not keeping intermediates)
-            if not self.keep_intermediates:
-                for temp_fasta, temp_output, _ in temp_files:
-                    for temp_file in [temp_fasta, temp_output]:
-                        if os.path.exists(temp_file):
-                            try:
-                                os.remove(temp_file)
-                            except:
-                                pass
+            # Clean up temporary files
+            for temp_fasta, temp_output, _ in temp_files:
+                for temp_file in [temp_fasta, temp_output]:
+                    if os.path.exists(temp_file):
+                        try:
+                            os.remove(temp_file)
+                        except:
+                            pass
 
     def combine_parallel_outputs(self, output_files, final_output_file, total_sequences):
         """Combine multiple parallel NetNGlyc outputs into a single file"""
@@ -2460,7 +2476,6 @@ def run_full_pipeline_mode(args, failure_map, parser):
             max_workers=args.workers,
             cache_dir=args.cache_dir,
             docker_timeout=args.batch_timeout,
-            keep_intermediates=args.keep_intermediates,
             verbose=args.verbose,
             native_bin=args.native_netnglyc_bin,
         ) as processor:
@@ -2502,12 +2517,8 @@ def run_full_pipeline_mode(args, failure_map, parser):
     finally:
         if wt_temp_holder:
             wt_temp_holder.cleanup()
-        if args.keep_intermediates:
-            print(f"WT/Mutant FASTAs saved in {temp_sequence_dir}")
-            print(f"Raw NetNGlyc outputs saved in {temp_output_dir}")
-        else:
-            shutil.rmtree(temp_sequence_dir, ignore_errors=True)
-            shutil.rmtree(temp_output_dir, ignore_errors=True)
+        shutil.rmtree(temp_sequence_dir, ignore_errors=True)
+        shutil.rmtree(temp_output_dir, ignore_errors=True)
 
     return 0
 
@@ -2533,8 +2544,6 @@ def main():
                         help="Minimum glycosylation potential threshold for predictions (default: 0.5)")
     parser.add_argument("--batch-timeout", type=int, default=5000,
                         help="Timeout in seconds for NetNGlyc execution (default: 5000s)")
-    parser.add_argument("--keep-intermediates", action="store_true",
-                        help="Keep intermediate output files for debugging (don't clean up temporary directories)")
     parser.add_argument("--verbose", action="store_true",
                         help="Enable verbose output showing detailed processing information")
     parser.add_argument("--log",

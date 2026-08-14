@@ -113,16 +113,19 @@ def generate_pkey_with_mapping(pos, ref, alt, gene_context, chromosome_mapping, 
     skip_upper = {m.upper() for m in skip_mutations} if skip_mutations else None
 
     # Step 2: Find the transcript mutation ID that maps to this chromosome notation
-    transcript_mutation_id = None
-    for mutant, chrom_notation in chromosome_mapping.items():
-        if chrom_notation == chromosome_notation:
-            if skip_upper and mutant.upper() in skip_upper:
-                continue
-            transcript_mutation_id = mutant
-            break
-
-    if not transcript_mutation_id:
+    candidates = [
+        mutant for mutant, cn in chromosome_mapping.items()
+        if cn == chromosome_notation and not (skip_upper and mutant.upper() in skip_upper)
+    ]
+    if not candidates:
         return None
+    # F43: deterministic pick. A genomic REF+POS+ALT maps to multiple transcript keys
+    # for a multi-isoform gene; the old dict-order `break` made the chosen ORF label
+    # arbitrary. sorted()[0] is stable; the single-match case is byte-identical.
+    transcript_mutation_id = sorted(candidates)[0]
+    if len(candidates) > 1:
+        print(f"[WARN] {chromosome_notation}: {len(candidates)} transcript keys share this "
+              f"genomic notation; ORF label from '{transcript_mutation_id}'", file=sys.stderr)
 
     # Step 3: Look up ORF mutation ID
     orf_mutation_id = transcript_mapping.get(transcript_mutation_id)
@@ -184,6 +187,8 @@ def parse_spliceai_vcf(
         # Parse header for metadata
         metadata = parse_vcf_header(vcf_file)
         gene_context = metadata.get('gene_context', '').strip()
+        if not gene_context:
+            print(f"[WARN] {vcf_file}: ##gene_context header missing; every pkey will be None -> 0 rows", file=sys.stderr)
 
         # Load mapping files
         chromosome_mapping = {}
@@ -204,8 +209,17 @@ def parse_spliceai_vcf(
 
         predictions = []
         processed_count = 0
+        dropped_no_pkey = 0
+        # F42: split the drop counter. A drop because the mutation is on the
+        # validation skip-list is EXPECTED; a drop because the genomic notation has
+        # no chromosome_mapping entry is a contract break. Reporting them together
+        # made a total mapping failure look like routine filtering.
+        dropped_skipped = 0
+        dropped_unmapped = 0
 
         skip_set = failures.get(gene_context.upper(), set()) if failures and gene_context else set()
+        # O(1) membership test for "did this genomic notation map to anything at all"
+        mapped_notations = set(chromosome_mapping.values())
 
         with open(vcf_file, 'r') as f:
             for line_num, line in enumerate(f, 1):
@@ -254,11 +268,25 @@ def parse_spliceai_vcf(
                     )
 
                     if not pkey:
+                        dropped_no_pkey += 1
+                        if f"{ref}{pos}{alt}" in mapped_notations:
+                            dropped_skipped += 1      # matched a mapping key; skip-listed or no ORF id
+                        else:
+                            dropped_unmapped += 1     # genomic notation absent from chromosome_mapping
                         continue
 
                     prediction = {
                         'pkey': pkey,
+                        # F44 REVERTED 2026-08-12: `gene` MUST stay the per-block SpliceAI
+                        # SYMBOL. SpliceAI emits one block per annotation record spanning the
+                        # position (spliceai/utils.py get_delta_scores -> genes[i]), and 2,349
+                        # of 35,078 production variants (6.70%) lie inside >=2 distinct #NAME
+                        # spans (CDSN 615/615, CFTR 466/1495, PKD1 277/2915). Overwriting this
+                        # with gene_context made every block of such a locus claim the target
+                        # gene and left block_label as the only difference. `symbol` is also
+                        # part of the row-identity key in parse_spliceai_entries.
                         'gene': call['symbol'],
+                        'gene_context': gene_context,   # pipeline namespace (matches the pkey prefix)
                         'chrom': chrom,
                         'pos': pos,
                         'ref': ref,
@@ -279,12 +307,23 @@ def parse_spliceai_vcf(
 
         # Write TSV output
         fieldnames = [
-            'pkey', 'gene', 'chrom', 'pos', 'ref', 'alt', 'allele', 'block_label',
+            'pkey', 'gene', 'gene_context', 'chrom', 'pos', 'ref', 'alt', 'allele', 'block_label',
             'ds_ag', 'ds_al', 'ds_dg', 'ds_dl',
             'dp_ag', 'dp_al', 'dp_dg', 'dp_dl',
             'max_delta_score'
         ]
         write_tsv(predictions, output_file, fieldnames)
+
+        if dropped_unmapped:
+            print(f"[WARN] {vcf_file}: {dropped_unmapped} above-threshold predictions dropped because the "
+                  f"genomic notation is absent from chromosome_mapping (contract break)", file=sys.stderr)
+        if dropped_skipped:
+            print(f"[INFO] {vcf_file}: {dropped_skipped} above-threshold predictions dropped as expected "
+                  f"(skip-listed mutation or no ORF id)", file=sys.stderr)
+        if processed_count and not predictions and dropped_unmapped:
+            print(f"[ERROR] {vcf_file}: {processed_count} variants processed but ZERO rows written and "
+                  f"{dropped_unmapped} unmapped — the mapping file almost certainly does not match this VCF.",
+                  file=sys.stderr)
 
         print(f"Processed {processed_count} variants, found {len(predictions)} predictions above threshold {threshold}")
         return True, processed_count, len(predictions)

@@ -50,7 +50,6 @@ from biofeaturefactory.utils.utility import (
     extract_gene_from_filename,
     extract_mutation_from_sequence_name,
     update_str,
-    validate_mapping_content,
     load_wt_sequences,
     load_mapping,
 )
@@ -122,13 +121,14 @@ def load_transcript_mappings(mapping_dir: str, map_type: str = "transcript") -> 
     if path.is_file():
         files = [path] if path.suffix.lower() in (".csv", ".tsv", ".txt") else []
     else:
-        files = sorted(f for f in path.rglob("*.csv") if f.is_file() and f.suffix.lower() in (".csv", ".tsv", ".txt"))
+        files = sorted(f for f in path.rglob("*") if f.is_file() and f.suffix.lower() in (".csv", ".tsv", ".txt"))
     for f in files:
-        try:
-            validate_mapping_content(str(f))
-        except Exception:
-            continue
-
+        # F36: rglob("*") + suffix filter admits .csv/.tsv/.txt (was rglob("*.csv"),
+        # which silently dropped .tsv/.txt mappings). F37: no local pre-validation —
+        # load_mapping now self-guards and returns {} on an invalid/single-column file,
+        # which the `if not mp` skip already handles. (The old try/except was a no-op:
+        # validate_mapping_content returns False rather than raising, so it caught
+        # nothing and the ignored False later reached load_mapping's unpack → TypeError.)
         mp = load_mapping(str(f), mapType=map_type)
         if not mp:
             continue
@@ -186,7 +186,11 @@ def _run_single_miranda_task(args: Tuple[str, str, str, str, str]) -> Tuple[str,
     if os.path.exists(out_file) and os.path.getsize(out_file) > 0:
         return (seq_id, "already")
 
-    tmp_file = os.path.join(tmp_base, f"tmp_{os.getpid()}_{hash(seq_id) & 0xFFFFF}.fasta")
+    # F40: atomically-unique temp path. The prior tmp_{pid}_{hash&0xFFFFF} scheme
+    # collided across ThreadPoolExecutor threads (constant pid) on any 20-bit hash
+    # clash, racing open/run/unlink between two concurrent mutations.
+    fd, tmp_file = _tempfile.mkstemp(prefix="tmp_", suffix=".fasta", dir=tmp_base)
+    os.close(fd)
     try:
         with open(tmp_file, "w") as f:
             f.write(f">{seq_id}\n{seq_str}")
@@ -435,15 +439,31 @@ def run_mut_phase(wt_sequences: Dict[str, str],
 # -------------------------------------------------------------------------
 def parse_miranda_text(miranda_text: str) -> List[Dict]:
     """
-    Parse MirandA stdout -> site rows.
+    Parse miRanda stdout -> per-hit site rows.
 
-    miRNA ID is taken from the '>>' summary line (parts[0][2:] strips '>>'),
-    NOT from the 'Query: 3'..5'' alignment line which contains the alignment
-    sequence (not the ID) and produces a spurious trailing ' 5' artifact.
+    F35: emit one row per INDIVIDUAL hit, read from the single-'>' "Scores for
+    this hit" lines, which carry that site's own score/energy/position. The '>>'
+    summary line is a transcript-wide aggregate (Tot Score = SUM over all hits,
+    Max Score = best single hit); the previous code exploded it across the
+    position field, stamping the aggregate onto every site (e.g. tot=473
+    replicated on the three SMN2/miR-608 sites at 589/673/736 instead of each
+    site's own score).
+
+    '>' layout after whitespace->tab:
+      [0]>mirna [1]target [2]score [3]energy [4]_ [5]q_start [6]q_end
+      [7]ref_start [8]ref_end [9]aln_len [10]%id [11]%sim
     """
     sites: List[Dict] = []
     query_seq = ""
     ref_seq = ""
+    # strand / len_mirna / len_target are transcript-wide descriptors that miRanda
+    # only prints on the '>>' summary (Strand=parts[6], Len1=parts[7], Len2=parts[8]).
+    # They are collected per miRNA here and stamped onto that miRNA's hits after the
+    # scan. An earlier revision inferred lengths from the 'Read Sequence:' lines by
+    # testing `"transcript" in line`, which holds only for the WT FASTA (run_wt_phase
+    # writes '>transcript'); MUT files are headed '>{GENE}-{MUT}-mut', so every MUT
+    # row got len_mirna = transcript length and len_target = None.
+    summary_by_mirna: Dict[str, Dict] = {}
 
     for raw in miranda_text.splitlines():
         line = raw.strip()
@@ -474,14 +494,30 @@ def parse_miranda_text(miranda_text: str) -> List[Dict]:
             ref_seq = token.replace("5", "").replace("3", "").replace(" ", "")
             continue
 
+        # Transcript-wide summary. Per-site scores/positions are NOT taken from here
+        # (Tot Score is a SUM over hits), but Strand/Len1/Len2 are only available here.
         if line.startswith(">>"):
+            sparts = re.sub(r"\s+", "\t", line).split("\t")
+            if len(sparts) >= 9:
+                sid = sparts[0][2:]
+                if sid:
+                    def _i(v):
+                        try: return int(v)
+                        except Exception: return None
+                    summary_by_mirna[sid] = {
+                        "strand": sparts[6],
+                        "len_mirna": _i(sparts[7]),
+                        "len_target": _i(sparts[8]),
+                    }
+            continue
+
+        if line.startswith(">"):
             norm = re.sub(r"\s+", "\t", line)
             parts = norm.split("\t")
-            if len(parts) < 10:
+            if len(parts) < 9:
                 continue
 
-            # miRNA ID is the first field with '>>' stripped.
-            mirna_id = parts[0][2:] if parts[0].startswith(">>") else parts[0]
+            mirna_id = parts[0][1:]  # strip the single '>'
             if not mirna_id:
                 continue
 
@@ -493,36 +529,35 @@ def parse_miranda_text(miranda_text: str) -> List[Dict]:
                 try: return int(parts[i])
                 except Exception: return None
 
-            tot_score  = f(2)
-            tot_energy = f(3)
-            max_score  = f(4)
-            max_energy = f(5)
-            strand     = parts[6] if len(parts) > 6 else ""
-            len1       = i_(7)
-            len2       = i_(8)
-            # re.sub converted spaces inside the positional field to tabs,
-            # so rejoin parts[9:] to recover all space-separated positions.
-            pos_field  = " ".join(parts[9:])
-            pos_tokens = [p for p in pos_field.strip().split() if p.isdigit()]
-            if not pos_tokens:
+            score     = f(2)   # THIS hit's score (was the '>>' transcript sum)
+            energy    = f(3)
+            ref_start = i_(7)  # R: start = 1-based site position
+            if ref_start is None:
                 continue
 
-            for p in pos_tokens:
-                site_pos = int(p)
-                sites.append({
-                    "mirna_id": mirna_id,
-                    "site_pos": site_pos,
-                    "tot_score": tot_score,
-                    "tot_energy": tot_energy,
-                    "max_score": max_score,
-                    "max_energy": max_energy,
-                    "strand": strand,
-                    "len_mirna": len1,
-                    "len_target": len2,
-                    "query_seq": query_seq,
-                    "ref_seq": ref_seq,
-                    "parser_confidence": 1.0 if (mirna_id and tot_score is not None) else 0.5,
-                })
+            sites.append({
+                "mirna_id": mirna_id,
+                "site_pos": ref_start,
+                "tot_score": score,
+                "tot_energy": energy,
+                "max_score": score,     # single hit → its own score is its max
+                "max_energy": energy,
+                "strand": "",
+                "len_mirna": None,
+                "len_target": None,
+                "query_seq": query_seq,
+                "ref_seq": ref_seq,
+                "parser_confidence": 1.0 if (mirna_id and score is not None) else 0.5,
+            })
+
+    # Stamp the '>>' descriptors onto each hit (the summary follows its hits, so this
+    # is done after the scan rather than inline).
+    for s in sites:
+        meta = summary_by_mirna.get(s["mirna_id"])
+        if meta:
+            s["strand"] = meta["strand"]
+            s["len_mirna"] = meta["len_mirna"]
+            s["len_target"] = meta["len_target"]
     return sites
 
 def _collect_gene_outputs(outdir: str) -> Dict[str, Dict[str, List[Path]]]:
@@ -544,7 +579,11 @@ def _collect_gene_outputs(outdir: str) -> Dict[str, Dict[str, List[Path]]]:
             core = base[:-4]  # GENE-<mut>
             if "-" not in core:
                 continue
-            gene = core.split("-", 1)[0].upper()
+            # rsplit on the LAST hyphen (F547): the gene may itself contain hyphens
+            # (HLA-A, NKX2-1). split("-",1) truncated "HLA-A-<mut>" to "HLA", bucketing
+            # MUT files under a different key than the WT branch's suffix-strip, silently
+            # losing all MUT/delta for hyphenated genes. Mutant nt tokens have no hyphen.
+            gene = core.rsplit("-", 1)[0].upper()
             buckets.setdefault(gene, {}).setdefault("mut", []).append(Path(f.path))
     return buckets
 
@@ -596,13 +635,12 @@ def build_sites_table_from_outputs(outdir: str,
             if "-" not in core:
                 miss_map += 1
                 continue
-            # Use utility extractor when possible
-            try:
-                gene_tok, mut_tok = extract_mutation_from_sequence_name(core)
-                mutation_token = mut_tok
-            except Exception:
-                # Fallback split
-                mutation_token = core.split("-", 1)[1]
+            # Use utility extractor (rsplit-based, hyphen-safe). It cannot raise
+            # for a hyphen-containing str (guaranteed by the `-` check above), so
+            # the former try/except fallback (`core.split('-',1)[1]`, first-hyphen
+            # unsafe) was dead code and has been removed.
+            gene_tok, mut_tok = extract_mutation_from_sequence_name(core)
+            mutation_token = mut_tok
 
             transcript_nt = mp.get(mutation_token, None)
             if not transcript_nt:
