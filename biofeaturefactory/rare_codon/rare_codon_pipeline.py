@@ -45,11 +45,13 @@ CG_DIR = SCRIPT_DIR / "cg_cotrans"
 from biofeaturefactory.utils.utility import (
     read_fasta,
     trim_muts,
-    get_mutation_data_bioAccurate,
+    parse_variant,
     extract_gene_from_filename,
     load_validation_failures,
     should_skip_mutation,
     write_tsv,
+    split_intronic_tokens,
+    warn_intronic_unsupported,
 )
 
 # Import cg_cotrans library (GPL v3 licensed, Copyright 2017 William M. Jacobs)
@@ -225,10 +227,114 @@ def run_rare_codon_analysis(gene, msa_path, usage_path, wt_gi, window_size=15,
             'f_enriched_wt': rc_analysis['f_enriched'][wt_gi].get(pos),
             'frac_seq_enriched': rc_analysis['fseq_enriched'].get(pos),
             'frac_seq_depleted': rc_analysis['fseq_depleted'].get(pos),
-            'n_rare': rc_analysis['n_rare'][wt_gi].get(pos, 0),
+            # No default. This is the direct structural sibling of
+            # f_enriched_wt above -- same rc_analysis, same [wt_gi] indexing,
+            # same key space -- and that one already returns None for an absent
+            # position, which _rare_codon_row renders as empty. Defaulting this
+            # one to 0 instead made the SAME missing key read as "measured, no
+            # rare codons in this window", which is indistinguishable downstream
+            # from a real zero. If cg_cotrans genuinely omits zero-count windows
+            # then f_enriched_wt already loses them the same way, so the fix
+            # belongs there and in both columns at once, not in a lone default
+            # that hides the asymmetry.
+            'n_rare': rc_analysis['n_rare'][wt_gi].get(pos),
         }
 
     return results, len(seqs)
+
+
+def _rare_codon_row(gene, ntposnt, codon_position, rc_data, window_size, qc_flags):
+    """Build the full 11-column row. Single builder for every outcome.
+
+    The three exit paths of process_mutations used to construct three separate
+    literals with the same keys, which is how a column comes to exist on one
+    path and not another. They now share this one.
+
+    rc_data is None when no enrichment window covers the codon. The six
+    window-derived columns are then EMPTY, never 0: a 0 in p_enriched reads as
+    "measured, maximally enriched" and a 0 in n_rare as "measured, no rare
+    codons", and neither is distinguishable afterwards from a real null.
+    qc_flags always names why.
+
+    A per-key None inside an otherwise-present rc_data is emptied for the same
+    reason AND named in qc_flags. Emptying it alone was still a silent loss: the
+    row said 'PASS' while carrying blank cells, so a reader could not tell a
+    column cg_cotrans never produced from one this pipeline failed to carry.
+    """
+    absent = []
+
+    def cell(key):
+        if rc_data is None:
+            return ''
+        value = rc_data.get(key)
+        if value is None:
+            absent.append(key)
+            return ''
+        return value
+
+    row = {
+        'pkey': f"{gene}-{ntposnt}",
+        'Gene': gene,
+        'codon_position': '' if codon_position is None else codon_position,
+        'p_enriched': cell('p_enriched'),
+        'p_depleted': cell('p_depleted'),
+        'f_enriched_wt': cell('f_enriched_wt'),
+        'frac_seq_enriched': cell('frac_seq_enriched'),
+        'frac_seq_depleted': cell('frac_seq_depleted'),
+        'n_rare': cell('n_rare'),
+        'window_size': window_size,
+        'qc_flags': '',      # filled below, once `absent` is complete
+    }
+    # Built after the dict literal because `absent` is only complete once every
+    # cell() call has run.
+    flags = list(qc_flags or [])
+    if absent:
+        flags.append(f"VALUE_ABSENT:{','.join(absent)}")
+    row['qc_flags'] = ';'.join(flags) if flags else 'PASS'
+    return row
+
+
+def _variant_flags(variant):
+    """qc_flags describing a non-SNV token, or [] for an SNV.
+
+    Says what the row is and what it cannot say:
+      NON_SNV:<kind>            substitution class from the shared Variant record
+      length_delta:<+/-N>nt     omitted when 0 (an MNV is a non-SNV of equal length)
+      FRAMESHIFT:...            same reason code codon_usage uses, because the
+                                scope statement is the same: every downstream
+                                codon is re-read, and one window row cannot
+                                express that
+      span_codons_<a>-<b>;centred_codon_<c>
+                                only when the REF span crosses a codon boundary,
+                                so the reader can see which codon the single
+                                reported window actually describes
+    """
+    if variant.is_snv:
+        return []
+    flags = [f"NON_SNV:{variant.kind}"]
+    if variant.length_delta:
+        flags.append(f"length_delta:{variant.length_delta:+d}nt")
+    if variant.length_delta % 3 != 0:
+        flags.append('FRAMESHIFT:downstream_codons_also_change')
+    first_codon = (variant.pos - 1) // 3 + 1
+    last_codon = (variant.pos + len(variant.ref) - 2) // 3 + 1
+    if last_codon != first_codon:
+        flags.append(f"span_codons_{first_codon}-{last_codon}")
+        flags.append(f"centred_codon_{_centre_codon(variant)}")
+    return flags
+
+
+def _centre_codon(variant):
+    """1-based codon holding the MIDPOINT of the REF span.
+
+    Anchoring on the first REF base instead would push the reported window
+    steadily 5' of the region the variant actually disturbs as len(REF) grows:
+    a 30 nt deletion would be described by the window centred 5 codons before
+    its middle. For an SNV len(REF) is 1, the midpoint IS the first base, and
+    this returns exactly what (nt_pos - 1) // 3 + 1 returned before.
+    """
+    centre_nt = variant.pos + (len(variant.ref) - 1) // 2
+    return (centre_nt - 1) // 3 + 1
 
 
 def process_mutations(mutations_list, gene, orf_sequence, rc_results, window_size, failure_map=None):
@@ -242,10 +348,23 @@ def process_mutations(mutations_list, gene, orf_sequence, rc_results, window_siz
     p_enriched/p_depleted/f_enriched_wt/n_rare values, and no WT-vs-MUT delta is
     computed or implied by these columns.
 
+    Because the value is allele-independent, every column is defined for every
+    variant class: a deletion, an insertion and a frameshift all sit at a codon
+    position and that codon's window has an enrichment. Non-SNV tokens are
+    therefore processed by default and fully populated; what changes is the
+    qc_flags cell, which names the class and, for a multi-codon REF span, which
+    codon the single reported window describes.
+
     Args:
         mutations_list: List of mutation strings
         gene: Gene symbol
-        orf_sequence: ORF nucleotide sequence (unused; enrichment is MSA-derived)
+        orf_sequence: ORF nucleotide sequence. Deliberately NOT used as a REF
+            guard: the codon frame here is the MSA's WT record (wt_gi), and
+            nothing in this pipeline establishes that the ORF FASTA and that MSA
+            record are the same sequence rather than two isoforms. Guarding
+            against the ORF would therefore flag correct rows whenever they
+            differ. Out-of-range positions are already caught, in the right
+            frame, by the rc_results lookup below.
         rc_results: Dict from run_rare_codon_analysis
         window_size: Window size used in analysis
         failure_map: Optional validation failure map
@@ -261,30 +380,22 @@ def process_mutations(mutations_list, gene, orf_sequence, rc_results, window_siz
         if should_skip_mutation(gene, ntposnt, failure_map):
             continue
 
-        qc_flags = []
-        pkey = f"{gene}-{ntposnt}"
-
-        # Get mutation position
-        pos_data = get_mutation_data_bioAccurate(ntposnt, is_nt=True)
-        if pos_data[0] is None:
-            qc_flags.append('INVALID_MUTATION')
-            results.append({
-                'pkey': pkey,
-                'Gene': gene,
-                'codon_position': '',
-                'p_enriched': '',
-                'p_depleted': '',
-                'f_enriched_wt': '',
-                'frac_seq_enriched': '',
-                'frac_seq_depleted': '',
-                'n_rare': '',
-                'window_size': window_size,
-                'qc_flags': ';'.join(qc_flags) if qc_flags else 'PASS',
-            })
+        # parse_variant NEVER raises and is length-aware. The former
+        # get_mutation_data_bioAccurate call did `int(ntposnt[1:-1])`, which on
+        # any multi-base token (ACAA112A -> int("CAA112")) raised ValueError.
+        # That exception escaped this function, escaped _run_single_gene, and
+        # escaped main's gene loop: one indel token anywhere aborted the entire
+        # run and lost every gene after it. Its F45 alphabet guard could not
+        # catch it either, because it inspects only ntposnt[0] and ntposnt[-1],
+        # which on an indel are both legal bases.
+        variant = parse_variant(ntposnt, is_nt=True)
+        if variant is None:
+            results.append(_rare_codon_row(gene, ntposnt, None, None, window_size,
+                                           ['INVALID_MUTATION']))
             continue
 
-        nt_pos = pos_data[0]
-        codon_pos = (nt_pos - 1) // 3 + 1  # 1-based codon position
+        qc_flags = _variant_flags(variant)
+        codon_pos = _centre_codon(variant)
 
         # Look up enrichment data (center position of window)
         rc_data = rc_results.get(codon_pos)
@@ -302,34 +413,9 @@ def process_mutations(mutations_list, gene, orf_sequence, rc_results, window_siz
                       file=sys.stderr)
                 warned_missing = True
             qc_flags.append('POSITION_NOT_IN_WINDOW')
-            results.append({
-                'pkey': pkey,
-                'Gene': gene,
-                'codon_position': codon_pos,
-                'p_enriched': '',
-                'p_depleted': '',
-                'f_enriched_wt': '',
-                'frac_seq_enriched': '',
-                'frac_seq_depleted': '',
-                'n_rare': '',
-                'window_size': window_size,
-                'qc_flags': ';'.join(qc_flags) if qc_flags else 'PASS',
-            })
-            continue
 
-        results.append({
-            'pkey': pkey,
-            'Gene': gene,
-            'codon_position': codon_pos,
-            'p_enriched': rc_data['p_enriched'],
-            'p_depleted': rc_data['p_depleted'],
-            'f_enriched_wt': rc_data['f_enriched_wt'],
-            'frac_seq_enriched': rc_data['frac_seq_enriched'],
-            'frac_seq_depleted': rc_data['frac_seq_depleted'],
-            'n_rare': rc_data['n_rare'],
-            'window_size': window_size,
-            'qc_flags': 'PASS',
-        })
+        results.append(_rare_codon_row(gene, ntposnt, codon_pos, rc_data,
+                                       window_size, qc_flags))
 
     return results
 
@@ -543,6 +629,27 @@ def _run_single_gene(gene, fasta_file, msa_file, mut_file, args, wt_gi, output_d
         print(f"Error: No mutations found in {mut_file}", file=sys.stderr)
         return
 
+    # Intronic gate. Every column here is indexed by CODON position: _centre_codon
+    # converts an nt position to a codon, and rc_results is keyed by window-centre
+    # codon of the MSA's WT record. An intron has no codon, so there is no key to
+    # look up and no defensible value to report.
+    #
+    # Unguarded these tokens do not crash -- parse_variant returns None -- but
+    # they produce a ROW flagged 'INVALID_MUTATION' with every window column
+    # empty. That label is false: 'gd.T5000C' is a well-formed token in a
+    # coordinate space this pipeline cannot index, and the row's presence in the
+    # TSV implies it was analysed and found null. Exclude and say so instead.
+    mut_list, intronic = split_intronic_tokens(mut_list)
+    warn_intronic_unsupported(
+        'rare_codon', gene, intronic,
+        "Rare codon enrichment is indexed by codon position; an intron has none. "
+        "Score these with RNAfold or miranda instead.")
+
+    if not mut_list:
+        print(f"Error: {gene}: every mutation was intronic; nothing to analyse",
+              file=sys.stderr)
+        return
+
     print(f"Running rare codon enrichment analysis for {gene}...")
     print(f"  MSA: {msa_file}")
     print(f"  Usage: {args.usage}")
@@ -661,6 +768,7 @@ Copyright notice:
         if not fasta_files:
             print(f"Error: No FASTA files found in {args.fasta}", file=sys.stderr)
             sys.exit(1)
+        failed_genes = []
         for fasta_file in fasta_files:
             gene = extract_gene_from_filename(str(fasta_file))
             msa_file = _resolve_per_gene(args.msa, gene, ('.fasta', '.fa', '.msa.fasta'))
@@ -668,9 +776,26 @@ Copyright notice:
             if not msa_file or not mut_file:
                 print(f"  Skipping {gene}: missing MSA or mutations")
                 continue
-            _run_single_gene(gene, str(fasta_file), msa_file, mut_file,
-                             args, args.wt_gi or gene, args.output)
+            # Per-gene guard. _run_single_gene already catches failures of the
+            # enrichment analysis itself, but nothing outside that inner try was
+            # guarded: read_fasta, trim_muts, process_mutations and write_output
+            # all ran bare, so a single bad input killed the run and every gene
+            # after it. A gene that fails is now named and counted, and the rest
+            # of the directory still runs.
+            try:
+                _run_single_gene(gene, str(fasta_file), msa_file, mut_file,
+                                 args, args.wt_gi or gene, args.output)
+            except Exception as exc:
+                failed_genes.append((gene, f"{type(exc).__name__}: {exc}"))
+                print(f"Error processing {gene}: {type(exc).__name__}: {exc}",
+                      file=sys.stderr)
+        if failed_genes:
+            print(f"\n{len(failed_genes)}/{len(fasta_files)} genes failed:", file=sys.stderr)
+            for gene, reason in failed_genes:
+                print(f"  {gene}: {reason}", file=sys.stderr)
     else:
+        # Single-gene mode is deliberately NOT guarded: there is no later gene to
+        # protect, and a swallowed exception here would exit 0 with no output.
         gene = extract_gene_from_filename(args.fasta)
         _run_single_gene(gene, args.fasta, args.msa, args.mutations,
                          args, args.wt_gi or gene, args.output)

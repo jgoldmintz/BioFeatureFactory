@@ -25,6 +25,7 @@ Canonical lexicographic ordering (ACGT): AAA→A, AAC→B, ..., TTT→@
 """
 
 import itertools
+import sys
 
 # Canonical lexicographic ordering of all 64 codons (ACGT base order)
 _BASES = "ACGT"
@@ -64,6 +65,14 @@ def encode_codon_msa(input_path, output_path):
 
     Returns:
         int: Number of sequences encoded.
+
+    Triplets that are not one of the 64 standard codons -- an N-containing codon,
+    a partial gap such as 'A--' -- are written as the gap character, which is the
+    only symbol the 65-character plmc alphabet has for them. That coercion is
+    COUNTED and reported: it is indistinguishable in the encoded file from a real
+    '---' gap, and it raises the alignment's gap fraction, which changes N_eff and
+    therefore every score the fitted model produces. Silently absorbing it made a
+    degraded MSA look like a clean one.
     """
     sequences = {}
     current_id = None
@@ -83,6 +92,10 @@ def encode_codon_msa(input_path, output_path):
     if current_id is not None:
         sequences[current_id] = ''.join(current_seq_parts)
 
+    coerced = 0
+    coerced_examples = {}
+    coerced_seqs = set()
+
     with open(output_path, 'w') as out:
         for seq_id, seq in sequences.items():
             seq = seq.replace(' ', '').upper()
@@ -98,10 +111,26 @@ def encode_codon_msa(input_path, output_path):
                 if triplet == GAP_CODON:
                     encoded.append(GAP_CHAR)
                 else:
-                    char = CODON_TO_CHAR.get(triplet, GAP_CHAR)
+                    char = CODON_TO_CHAR.get(triplet)
+                    if char is None:
+                        coerced += 1
+                        coerced_seqs.add(seq_id)
+                        coerced_examples[triplet] = coerced_examples.get(triplet, 0) + 1
+                        char = GAP_CHAR
                     encoded.append(char)
 
             out.write(f'>{seq_id}\n')
             out.write(''.join(encoded) + '\n')
+
+    if coerced:
+        top = sorted(coerced_examples.items(), key=lambda kv: -kv[1])[:5]
+        print(
+            f"WARNING: {coerced} non-standard triplet(s) across {len(coerced_seqs)} "
+            f"sequence(s) were written as the gap character '{GAP_CHAR}' and are now "
+            f"indistinguishable from real gaps. This raises the alignment's gap "
+            f"fraction and so changes N_eff and every score derived from it. "
+            f"Most frequent: {', '.join(f'{t} x{n}' for t, n in top)}",
+            file=sys.stderr,
+        )
 
     return len(sequences)

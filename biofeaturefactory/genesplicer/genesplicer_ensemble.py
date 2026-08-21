@@ -17,12 +17,28 @@
 
 """
 GeneSplicer WT<->ALT ensemble delta caller
-- Runs GeneSplicer on full genomic sequences (or windowed/custom) for each gene.
+- Runs GeneSplicer on full genomic sequences for each gene.
+
+GeneSplicer is run once per allele and reports each site in the coordinate frame
+of the sequence it was handed. For an SNV those two frames coincide, so the WT
+and MUT site lists can be joined on raw position. For anything that changes
+length they do not: every MUT site 3' of the edit sits at wt_pos + length_delta.
+Joining on raw position there reports a phantom displacement for every
+downstream site -- large enough to be called `shifted`, or to split into a
+`lost`/`gained` pair that the redirect pass then links as one relocated site.
+
+So every cross-allele comparison in this module is done in the WT frame: each
+site carries `ref_frame_pos` (its WT-frame coordinate) alongside `site_pos` (its
+real coordinate in its own allele), and clustering, dpos and the redirect pass
+all key on the former. `frame_status` names the three cases -- aligned, a WT site
+the edit deleted, and a MUT site sitting on inserted sequence that has no WT
+coordinate at all.
 """
 
 import os
 import sys
 import argparse
+import json
 import shutil
 import tempfile
 import subprocess
@@ -37,8 +53,8 @@ import concurrent.futures
 # ---------------------------------------------------------------------------
 from biofeaturefactory.utils.utility import (
     read_fasta,
-    update_str,
-    get_mutation_data,
+    parse_variant,
+    splice_seq,
     load_validation_failures,
     should_skip_mutation,
     extract_gene_from_filename,
@@ -108,7 +124,17 @@ def _run_genesplicer_on_seq(seq_name: str, seq: str, genesplicer_dir: str | None
 
     with tempfile.NamedTemporaryFile(mode="w", dir=tmp_dir, delete=False, suffix=".fasta") as tmpf:
         tmp_name = os.path.basename(tmpf.name)
-        tmpf.write(f">{seq_name}\n{seq}\n")
+        # NO trailing newline, deliberately. GeneSplicer's reader
+        # (sources/genesplicer.cpp:376-385) strips the newline, decrements the
+        # length, and then decrements AGAIN -- `length-=1` plus
+        # strncat(Data,line,lcopy-1) -- so it silently drops the last base of
+        # every newline-terminated line. Measured on a 2096 nt sequence:
+        # with a trailing newline it reports "Done 2095bp", without one
+        # "Done 2096bp". Writing the sequence as ONE line already keeps the loss
+        # to a single base instead of one per wrapped line (a 60-column FASTA
+        # loses ~1.7% of its bases at scattered positions and shifts every
+        # downstream coordinate); dropping the final newline removes it entirely.
+        tmpf.write(f">{seq_name}\n{seq}")
         tmp_path = tmpf.name
 
     out = None
@@ -211,21 +237,104 @@ def load_mapping_dir(mapping_dir: str):
 # site builders
 # ---------------------------------------------------------------------------
 
+SITE_COLUMNS = [
+    "pkey", "allele", "type", "site_pos", "ref_frame_pos", "frame_status",
+    "score", "confidence", "rank", "distance_to_snv", "visible_flag",
+    "cluster_id", "in_radius",
+]
+
+
+def _wt_frame_position(site_pos: int, allele: str, variant_pos1: int,
+                       ref_len: int, alt_len: int) -> tuple[int, str]:
+    """Project a 1-based site coordinate into the WT frame.
+
+    Returns (ref_frame_pos, frame_status). This is the exact inverse of
+    utility.align_wt_to_mut, region for region, so the two can never disagree
+    about which MUT base corresponds to which WT base:
+
+        before the edit   identity
+        inside the REF    the first min(ref_len, alt_len) bases pair up
+        after the edit    shifted by (alt_len - ref_len)
+
+    frame_status:
+        aligned    the site has a counterpart coordinate in the other allele
+        deleted    (WT only) the edit removed the base this site is keyed on --
+                   align_wt_to_mut maps it to None
+        inserted   (MUT only) the site sits on bases the ALT inserted, which have
+                   no WT coordinate at all
+
+    An inserted site is reported at the edit anchor, because under the SpliceAI
+    convention align_wt_to_mut implements an insertion collapses to the edit
+    boundary -- that is its honest WT-frame position, not a fabricated one. It is
+    still tagged `inserted` so clustering keeps it out of the aligned namespace.
+
+    That tag covers the ALT bases BEYOND min(ref_len, alt_len) and no others,
+    because that is the extent align_wt_to_mut leaves without a WT index. Inside
+    the first min(ref_len, alt_len) bases the two alleles are paired by
+    coordinate whatever their content -- deliberately, since that is the
+    measurement a delta caller exists to make ("did the site at this locus
+    survive the edit?") and it is what already happens for the substituted base
+    of an SNV. For a delins those paired ALT bases are novel sequence, so a site
+    called on them WILL be joined to a WT site at the same coordinate and
+    reported as one site weakened/strengthened rather than as a loss plus a gain.
+    Measured: WT donor 760 (6.22) vs a donor built entirely from a 20 nt ALT,
+    called at MUT 759, comes out `weakened` dscore -2.36. The pairing is correct
+    under the convention and the scores are real; only the one-site reading of it
+    is an inference the caller has to make for itself.
+
+    Note that the anchor locates the site but does NOT measure displacement to it:
+    every base of the insertion shares that one coordinate, so a difference taken
+    against it says nothing about how far into the insertion the site sits. See
+    _reconcile_redirects, which is why it refuses the register-shift test there.
+
+    For an SNV (ref_len == alt_len == 1) every branch is the identity and every
+    status is `aligned`, so nothing about the SNV path changes.
+    """
+    edit_off = variant_pos1 - 1     # 0-based WT index of the first REF base
+    i = site_pos - 1                # 0-based index in this allele's own sequence
+
+    if allele == "WT":
+        # A WT site is already in the WT frame; only its survival is in question.
+        if edit_off + alt_len <= i < edit_off + ref_len:
+            return site_pos, "deleted"
+        return site_pos, "aligned"
+
+    if i < edit_off:
+        return i + 1, "aligned"
+    k = i - edit_off
+    if k < alt_len:
+        if k < ref_len:
+            return edit_off + k + 1, "aligned"
+        return variant_pos1, "inserted"
+    return i - (alt_len - ref_len) + 1, "aligned"
+
+
 def _build_sites_for_allele(pkey: str,
                             allele: str,
-                            snv_pos: int,
                             df: pd.DataFrame,
                             visibility_threshold: float,
                             report_radius: int,
-                            scan_mode: str) -> pd.DataFrame:
+                            variant_pos1: int,
+                            ref_len: int,
+                            alt_len: int) -> pd.DataFrame:
     """
     Convert GeneSplicer raw DF into the canonical per-site schema.
+
+    variant_pos1 is 1-based at the first REF base (Variant.pos). ref_len/alt_len
+    are the allele lengths; the span this allele actually carries is ref_len bases
+    for WT and alt_len for MUT.
+
+    `scan_mode` used to be accepted here and never read -- the only value ever
+    passed was the literal "full" -- so it is gone along with the `pipeline`
+    parameter that existed solely to supply it.
     """
     if df is None or df.empty:
-        return pd.DataFrame(columns=[
-            "pkey", "allele", "type", "site_pos", "score", "confidence",
-            "rank", "distance_to_snv", "visible_flag", "cluster_id", "in_radius"
-        ])
+        return pd.DataFrame(columns=SITE_COLUMNS)
+
+    # The variant's own span, in THIS allele's coordinates. WT carries the REF,
+    # MUT carries the ALT, and they differ in length whenever the edit does.
+    span_start = variant_pos1
+    span_end = variant_pos1 + (ref_len if allele == "WT" else alt_len) - 1
 
     rows = []
     for _, r in df.iterrows():
@@ -239,21 +348,30 @@ def _build_sites_for_allele(pkey: str,
         else:
             site_pos = int(r["End3"])
 
-        # site_pos is GeneSplicer 1-based (End5/End3); snv_pos is 0-based
-        # (get_mutation_data returns pos-1). Shift the SNV into GeneSplicer's
-        # 1-based frame so a site on the mutated base reports dist=0. bioAccurate
-        # returns the same 1-based value but costs a second token parse + a
-        # Stop-token None branch, so (snv_pos + 1) is preferred (F31).
-        dist = abs(site_pos - (snv_pos + 1))
+        # Distance to the variant's SPAN, measured in this allele's own frame:
+        # zero inside the span, else to the nearer edge. A multi-base REF has no
+        # single base to measure to, and measuring to its first base alone makes
+        # the distance grow with len(REF) for sites lying 3' of it. For an SNV
+        # both edges are the same base, so this is exactly the old
+        # abs(site_pos - (snv_pos + 1)).
+        if span_start <= site_pos <= span_end:
+            dist = 0
+        else:
+            dist = min(abs(site_pos - span_start), abs(site_pos - span_end))
         in_radius = 0
         if report_radius is not None:
             in_radius = 1 if dist <= report_radius else 0
+
+        ref_frame_pos, frame_status = _wt_frame_position(
+            site_pos, allele, variant_pos1, ref_len, alt_len)
 
         rows.append({
             "pkey": pkey,
             "allele": allele,
             "type": sstype,
             "site_pos": site_pos,
+            "ref_frame_pos": ref_frame_pos,
+            "frame_status": frame_status,
             "score": score,
             "confidence": conf_w,
             "distance_to_snv": dist,
@@ -287,8 +405,27 @@ def _build_sites_for_allele(pkey: str,
 
 def _cluster_sites(sites_df: pd.DataFrame, cluster_radius: int, max_cluster_span: int = 0) -> pd.DataFrame:
     """
-    Assign cluster_id per (pkey, allele, type) using single-linkage by position.
-    cluster_id is the same across alleles later when we merge WT and MUT.
+    Assign cluster_id per (pkey, type, inserted-or-not) using single-linkage by
+    position. Both alleles are clustered together and NOT split by allele -- that
+    shared cluster_id is exactly what joins a WT site to its MUT counterpart in
+    _pair_clusters_to_events.
+
+    Linkage is on `ref_frame_pos`, NOT on `site_pos`. The cluster is the unit the
+    WT and MUT alleles are joined on, so it has to be built in a frame both
+    alleles share. Under an indel a MUT site 3' of the edit has
+    site_pos == wt_site_pos + length_delta, so linking on site_pos compares a WT
+    coordinate to a MUT coordinate and reads the frame offset as a displacement
+    of the site. With the defaults that is not a subtle error: cluster_radius and
+    --shift-bp are both 3, so a 3 nt indel puts every downstream site just close
+    enough to co-cluster and just far enough to be classified `shifted`, and a
+    larger one splits it into a lost/gained pair that _reconcile_redirects then
+    links as a relocated site. In the WT frame an unaffected downstream site has
+    dpos == 0 and no event at all, which is the truth.
+
+    Sites on inserted sequence have no WT coordinate and are clustered in a
+    separate namespace (cluster ids `di1`, `ai1`, ... rather than `d1`, `a1`), so
+    they surface as genuinely gained sites instead of being welded onto whichever
+    WT site the edit anchor happens to sit next to.
 
     max_cluster_span is accepted but INERT (0 = unbounded), and must stay that way
     until a non-fabricating bound exists. Single linkage is unbounded — 101 sites
@@ -304,7 +441,13 @@ def _cluster_sites(sites_df: pd.DataFrame, cluster_radius: int, max_cluster_span
     if sites_df is None or sites_df.empty:
         return sites_df
 
-    sites_df = sites_df.sort_values(["pkey", "type", "site_pos", "allele"]).reset_index(drop=True)
+    sites_df = sites_df.copy()
+    # Inserted sites cluster among themselves. Carrying that as a sort/group key
+    # keeps this a single pass, so the ordering of the aligned rows -- and every
+    # cluster id built from it -- is exactly what it was before.
+    sites_df["_ins"] = (sites_df["frame_status"] == "inserted").astype(int)
+    sites_df = sites_df.sort_values(
+        ["pkey", "type", "_ins", "ref_frame_pos", "allele"]).reset_index(drop=True)
 
     cluster_ids = []
     current_key = None
@@ -312,30 +455,43 @@ def _cluster_sites(sites_df: pd.DataFrame, cluster_radius: int, max_cluster_span
     last_pos = None
     cluster_start = None
 
-    for idx, row in sites_df.iterrows():
-        key = (row["pkey"], row["type"])
-        pos = int(row["site_pos"])
+    for _, row in sites_df.iterrows():
+        key = (row["pkey"], row["type"], int(row["_ins"]))
+        pos = int(row["ref_frame_pos"])
+        prefix = f"{row['type'][0]}i" if row["_ins"] else row["type"][0]
         if key != current_key:
             current_key = key
             current_cluster = 1
             last_pos = pos
             cluster_start = pos
-            cluster_ids.append(f"{row['type'][0]}{current_cluster}")
+            cluster_ids.append(f"{prefix}{current_cluster}")
             continue
 
         # same key
         if abs(pos - last_pos) <= cluster_radius and (
                 not max_cluster_span or abs(pos - cluster_start) <= max_cluster_span):
             # same cluster
-            cluster_ids.append(f"{row['type'][0]}{current_cluster}")
+            cluster_ids.append(f"{prefix}{current_cluster}")
         else:
             current_cluster += 1
             cluster_start = pos
-            cluster_ids.append(f"{row['type'][0]}{current_cluster}")
+            cluster_ids.append(f"{prefix}{current_cluster}")
         last_pos = pos
 
     sites_df["cluster_id"] = cluster_ids
-    return sites_df
+    return sites_df.drop(columns=["_ins"])
+
+
+EVENT_BASE_COLUMNS = [
+    "pkey", "type", "cluster_id",
+    "wt_pos", "mut_pos", "dpos", "dpos_raw",
+    "wt_frame_pos", "mut_frame_pos", "wt_frame_status", "mut_frame_status",
+    "wt_score", "mut_score", "dscore", "pct_delta",
+    "distance_to_snv",
+    "rank_wt", "rank_mut",
+    "conf_wt", "conf_mut", "conf_weighted_delta",
+    "cls", "is_high_impact", "priority", "in_radius",
+]
 
 
 def _pair_clusters_to_events(sites_df: pd.DataFrame,
@@ -349,17 +505,16 @@ def _pair_clusters_to_events(sites_df: pd.DataFrame,
         - classify
     Returns the events frame and the number of non-top cluster members dropped
     by the top-of-cluster selection.
+
+    `wt_pos`/`mut_pos` stay in their own allele's coordinates -- that is where the
+    site really is, and it is what a consumer needs to look the site up. `dpos` is
+    computed from the WT-frame positions instead, because it answers "did this
+    site move?", and under an indel the raw difference answers "how long was the
+    indel?" for every site 3' of it. `dpos_raw` keeps the raw difference so
+    nothing is lost; the two are equal for every length-preserving variant.
     """
     if sites_df is None or sites_df.empty:
-        return pd.DataFrame(columns=[
-            "pkey", "type", "cluster_id",
-            "wt_pos", "mut_pos", "dpos",
-            "wt_score", "mut_score", "dscore", "pct_delta",
-            "distance_to_snv",
-            "rank_wt", "rank_mut",
-            "conf_wt", "conf_mut", "conf_weighted_delta",
-            "cls", "is_high_impact", "priority", "in_radius",
-        ]), 0
+        return pd.DataFrame(columns=EVENT_BASE_COLUMNS), 0
 
     events = []
     n_discarded = 0
@@ -391,9 +546,20 @@ def _pair_clusters_to_events(sites_df: pd.DataFrame,
         elif mut_site is not None:
             dist = int(mut_site["distance_to_snv"])
 
+        # WT-frame positions: the only frame in which the two alleles' coordinates
+        # are comparable. Equal to site_pos for every site of a length-preserving
+        # variant, so dpos is unchanged for SNVs and MNVs.
+        wt_frame_pos = int(wt_site["ref_frame_pos"]) if wt_site is not None else None
+        mut_frame_pos = int(mut_site["ref_frame_pos"]) if mut_site is not None else None
+        wt_frame_status = str(wt_site["frame_status"]) if wt_site is not None else None
+        mut_frame_status = str(mut_site["frame_status"]) if mut_site is not None else None
+
         dpos = None
+        if wt_frame_pos is not None and mut_frame_pos is not None:
+            dpos = mut_frame_pos - wt_frame_pos
+        dpos_raw = None
         if wt_pos is not None and mut_pos is not None:
-            dpos = mut_pos - wt_pos
+            dpos_raw = mut_pos - wt_pos
 
         dscore = None
         if wt_score is not None and mut_score is not None:
@@ -440,6 +606,11 @@ def _pair_clusters_to_events(sites_df: pd.DataFrame,
             "wt_pos": wt_pos,
             "mut_pos": mut_pos,
             "dpos": dpos,
+            "dpos_raw": dpos_raw,
+            "wt_frame_pos": wt_frame_pos,
+            "mut_frame_pos": mut_frame_pos,
+            "wt_frame_status": wt_frame_status,
+            "mut_frame_status": mut_frame_status,
             "wt_score": wt_score,
             "mut_score": mut_score,
             "dscore": dscore,
@@ -494,9 +665,19 @@ def _reconcile_redirects(events_df: pd.DataFrame,
     Matching is type-matched, one-to-one, nearest-first (ties broken by the
     stronger gained site, then by position for determinism).
 
+    Displacement is measured in the WT frame (mut_frame_pos - wt_frame_pos), for
+    the same reason clustering is: on raw coordinates an indel makes every
+    downstream lost/gained pair look like a relocation by exactly length_delta,
+    so a 20 nt deletion would report every site 3' of it as a redirected site.
+    A gained site sitting on inserted sequence is still linked -- it is one
+    physical redirection and must be counted once -- but it is always classed
+    `redirected` and carries no redirect_dpos; see the comment at the assignment
+    for why a displacement measured across an insertion is not a register shift.
+
     Adds columns:
         redirect_id           shared id for the two rows of a linked pair
-        redirect_dpos         mut_pos - wt_pos, signed
+        redirect_dpos         mut_frame_pos - wt_frame_pos, signed (WT frame);
+                              EMPTY when the gained site is on inserted sequence
         score_transfer_ratio  mut_score(gain) / wt_score(loss); diagnostic only
         redirect_class        'shifted' (<= register_bp) or 'redirected'
         cls_reconciled        e.g. 'lost_redirected', 'gained_shifted'
@@ -510,9 +691,9 @@ def _reconcile_redirects(events_df: pd.DataFrame,
             ev[c] = pd.NA
     ev["cls_reconciled"] = ev["cls"]
 
-    for (pkey, sstype), grp in ev.groupby(["pkey", "type"], dropna=False):
-        losses = grp[(grp["cls"] == "lost") & grp["wt_pos"].notna()]
-        gains = grp[(grp["cls"] == "gained") & grp["mut_pos"].notna()]
+    for (_pkey, sstype), grp in ev.groupby(["pkey", "type"], dropna=False):
+        losses = grp[(grp["cls"] == "lost") & grp["wt_frame_pos"].notna()]
+        gains = grp[(grp["cls"] == "gained") & grp["mut_frame_pos"].notna()]
         if losses.empty or gains.empty:
             continue
 
@@ -522,30 +703,50 @@ def _reconcile_redirects(events_df: pd.DataFrame,
             if pd.notna(d_snv) and float(d_snv) > snv_max_bp:
                 continue  # variant too far away to have plausibly caused the loss
             wt_pos = int(lrow["wt_pos"])
+            wt_frame = int(lrow["wt_frame_pos"])
             wt_s = float(lrow["wt_score"]) if pd.notna(lrow["wt_score"]) else 0.0
             for gi, grow in gains.iterrows():
                 mut_pos = int(grow["mut_pos"])
-                dpos = mut_pos - wt_pos
+                dpos = int(grow["mut_frame_pos"]) - wt_frame
                 if abs(dpos) > max_bp:
                     continue
                 mut_s = float(grow["mut_score"]) if pd.notna(grow["mut_score"]) else 0.0
                 ratio = (mut_s / wt_s) if wt_s > 1e-6 else float("nan")
+                gained_inserted = str(grow["mut_frame_status"]) == "inserted"
                 # sort key: nearest, then strongest gain, then position (determinism)
-                cands.append((abs(dpos), -mut_s, wt_pos, mut_pos, li, gi, dpos, ratio))
+                cands.append((abs(dpos), -mut_s, wt_pos, mut_pos, li, gi, dpos, ratio,
+                              gained_inserted))
 
         cands.sort(key=lambda t: t[:4])
         used_l, used_g = set(), set()
-        for _absd, _negs, wt_pos, mut_pos, li, gi, dpos, ratio in cands:
+        for _absd, _negs, wt_pos, mut_pos, li, gi, dpos, ratio, gained_inserted in cands:
             if li in used_l or gi in used_g:
                 continue
             used_l.add(li)
             used_g.add(gi)
             # deterministic id: stable between the global run and the per-gene run
             tag = f"{sstype[0]}:{wt_pos}>{mut_pos}"
-            rclass = "shifted" if abs(dpos) <= register_bp else "redirected"
+            if gained_inserted:
+                # The gained site is on inserted sequence, which has no WT extent:
+                # every base of the insertion collapses to the edit boundary, so
+                # the WT-frame displacement is the distance from the lost site to
+                # the edit and says nothing about how far into the insertion the
+                # new site actually sits. Measured on it, a site 14 bp inside a
+                # 90 bp insertion comes out as a 3 bp "register shift" -- the one
+                # thing it certainly is not. So the register test is skipped (a
+                # site in novel sequence is a redirection by construction) and
+                # redirect_dpos is left EMPTY rather than reporting a number that
+                # re-thresholds, per this function's own docstring, straight back
+                # into the wrong class. `mut_frame_status` on the row names the
+                # reason.
+                rclass = "redirected"
+                dpos_out = pd.NA
+            else:
+                rclass = "shifted" if abs(dpos) <= register_bp else "redirected"
+                dpos_out = dpos
             for ix in (li, gi):
                 ev.at[ix, "redirect_id"] = tag
-                ev.at[ix, "redirect_dpos"] = dpos
+                ev.at[ix, "redirect_dpos"] = dpos_out
                 ev.at[ix, "score_transfer_ratio"] = ratio
                 ev.at[ix, "redirect_class"] = rclass
             ev.at[li, "cls_reconciled"] = f"lost_{rclass}"
@@ -554,46 +755,76 @@ def _reconcile_redirects(events_df: pd.DataFrame,
     return ev
 
 
+def _empty_summary_row(pkey: str, variant_meta: dict) -> dict:
+    """Summary row for a variant GeneSplicer found nothing to compare.
+
+    Written twice verbatim before this existed, which meant any column added to
+    the schema had to be added to both copies or the summary frame's columns
+    would depend on which branch happened to fire.
+
+    The zeros here are real measurements -- GeneSplicer ran on both alleles and
+    reported no sites -- and `qc_flags` says so by name. The variant's own
+    identity is still known and is still reported: which class it was and how the
+    length changed do not depend on any site being found.
+    """
+    delta = variant_meta["length_delta"]
+    return {
+        "pkey": pkey,
+        "n_sites_wt": 0,
+        "n_sites_mut": 0,
+        "n_clusters": 0,
+        "global_count_gained_high": 0,
+        "global_count_lost_high": 0,
+        "global_count_shifted": 0,
+        "global_count_redirected": 0,
+        "global_max_abs_deltascore": 0.0,
+        "global_sum_weighted_abs_delta": 0.0,
+        "nearest_event_bp_any": None,
+        "local_count_gained_high": 0,
+        "local_count_lost_high": 0,
+        "local_count_shifted": 0,
+        "local_count_redirected": 0,
+        "local_max_abs_deltascore": 0.0,
+        "nearest_event_bp_local": None,
+        "frac_effect_in_radius": 0.0,
+        "top_event_type": "none",
+        "top_event_deltascore": 0.0,
+        "top_event_pos": None,
+        "top_event_ref_frame_pos": None,
+        "dominant_boundary": None,
+        "qc_flags": "no_sites",
+        "variant_class": variant_meta["variant_class"],
+        "length_delta": delta,
+        "align_qc": f"length_changed:{delta:+d}nt;no_sites" if delta else "",
+    }
+
+
 def _summarize_variant(events_df: pd.DataFrame,
                        sites_df: pd.DataFrame,
                        pkey: str,
                        report_radius: int,
-                       policy: dict) -> dict:
+                       policy: dict,
+                       variant_meta: dict) -> dict:
     """
     Build the summary row for a single pkey.
     Hardened to return a valid row even if there are *no* sites/events.
+
+    variant_meta carries the variant's own identity (`variant_class`,
+    `length_delta`), which no amount of inspecting the events frame can recover:
+    a deletion that changed nothing produces the same events as an SNV that
+    changed nothing, and the reader of the summary needs to be able to tell them
+    apart.
     """
-    visibility_threshold = policy["visibility_threshold"]
+    # Only these two are used here. `visibility_threshold` and `shift_bp` were
+    # unpacked from policy and never read -- visibility is already resolved into
+    # visible_flag by _build_sites_for_allele and into cls by
+    # _pair_clusters_to_events, both of which run before this function sees the
+    # frames.
     high_cutoff = policy["high_cutoff"]
-    shift_bp = policy["shift_bp"]
     distance_k = policy["distance_k"]
 
     if events_df is None or events_df.empty or "pkey" not in events_df.columns:
-        return {
-            "pkey": pkey,
-            "n_sites_wt": 0,
-            "n_sites_mut": 0,
-            "n_clusters": 0,
-            "global_count_gained_high": 0,
-            "global_count_lost_high": 0,
-            "global_count_shifted": 0,
-            "global_count_redirected": 0,
-            "global_max_abs_deltascore": 0.0,
-            "global_sum_weighted_abs_delta": 0.0,
-            "nearest_event_bp_any": None,
-            "local_count_gained_high": 0,
-            "local_count_lost_high": 0,
-            "local_count_shifted": 0,
-            "local_count_redirected": 0,
-            "local_max_abs_deltascore": 0.0,
-            "nearest_event_bp_local": None,
-            "frac_effect_in_radius": 0.0,
-            "top_event_type": "none",
-            "top_event_deltascore": 0.0,
-            "top_event_pos": None,
-            "dominant_boundary": None,
-            "qc_flags": "no_sites",
-        }
+        return _empty_summary_row(pkey, variant_meta)
 
     sub_events = events_df[events_df["pkey"] == pkey]
 
@@ -603,31 +834,7 @@ def _summarize_variant(events_df: pd.DataFrame,
         sub_sites = pd.DataFrame()
 
     if sub_events.empty and sub_sites.empty:
-        return {
-            "pkey": pkey,
-            "n_sites_wt": 0,
-            "n_sites_mut": 0,
-            "n_clusters": 0,
-            "global_count_gained_high": 0,
-            "global_count_lost_high": 0,
-            "global_count_shifted": 0,
-            "global_count_redirected": 0,
-            "global_max_abs_deltascore": 0.0,
-            "global_sum_weighted_abs_delta": 0.0,
-            "nearest_event_bp_any": None,
-            "local_count_gained_high": 0,
-            "local_count_lost_high": 0,
-            "local_count_shifted": 0,
-            "local_count_redirected": 0,
-            "local_max_abs_deltascore": 0.0,
-            "nearest_event_bp_local": None,
-            "frac_effect_in_radius": 0.0,
-            "top_event_type": "none",
-            "top_event_deltascore": 0.0,
-            "top_event_pos": None,
-            "dominant_boundary": None,
-            "qc_flags": "no_sites",
-        }
+        return _empty_summary_row(pkey, variant_meta)
 
     # counts
     if not sub_sites.empty:
@@ -731,10 +938,26 @@ def _summarize_variant(events_df: pd.DataFrame,
         top_event_type = top_ev["cls"]
         top_event_deltascore = float(top_ev["dscore"]) if not pd.isna(top_ev["dscore"]) else 0.0
         top_event_pos = top_ev["mut_pos"] if pd.notna(top_ev["mut_pos"]) else top_ev["wt_pos"]
+        # top_event_pos is in whichever allele's coordinates the top event happened
+        # to have -- MUT for anything with a mutant site, WT only for a pure loss --
+        # and the column does not say which. Under an indel those two frames differ
+        # by length_delta, so the summary's only coordinate silently changes frame
+        # with the event class, and a consumer joining it back to the genomic
+        # coordinates the mapping file is written in lands on the wrong base. The
+        # WT-frame coordinate of the SAME site is reported alongside it; the two
+        # are equal for every length-preserving variant. `inserted` sites carry the
+        # edit anchor, which is their honest WT-frame position (see
+        # _wt_frame_position) -- top_event_pos still gives the real mutant offset.
+        if pd.notna(top_ev["mut_pos"]):
+            trf = top_ev["mut_frame_pos"]
+        else:
+            trf = top_ev["wt_frame_pos"]
+        top_event_ref_frame_pos = trf if pd.notna(trf) else None
     else:
         top_event_type = "none"
         top_event_deltascore = 0.0
         top_event_pos = None
+        top_event_ref_frame_pos = None
 
     # dominant boundary
     dom = None
@@ -748,6 +971,27 @@ def _summarize_variant(events_df: pd.DataFrame,
         )
         if not agg.empty:
             dom = agg.idxmax()
+
+    # Cross-allele pairing accounting, over the UNION of both alleles' clusters.
+    # Counting WT clusters alone would report a 20 nt insertion as fully paired,
+    # because every WT cluster does keep a counterpart -- the clusters with no
+    # counterpart are all on the mutant side. Reported only when the length
+    # actually changed; for an SNV or an MNV there is nothing to reconcile.
+    length_delta = variant_meta["length_delta"]
+    align_qc = ""
+    if length_delta:
+        both = sub_events["wt_pos"].notna() & sub_events["mut_pos"].notna()
+        wt_only = int((sub_events["wt_pos"].notna() & sub_events["mut_pos"].isna()).sum())
+        mut_only = int((sub_events["mut_pos"].notna() & sub_events["wt_pos"].isna()).sum())
+        paired = int(both.sum())
+        union = paired + wt_only + mut_only
+        align_qc = (f"length_changed:{length_delta:+d}nt;"
+                    f"clusters_paired_{paired}/{union};"
+                    f"wt_only_{wt_only};mut_only_{mut_only}")
+        if not sub_sites.empty and "frame_status" in sub_sites.columns:
+            n_del = int((sub_sites["frame_status"] == "deleted").sum())
+            n_ins = int((sub_sites["frame_status"] == "inserted").sum())
+            align_qc += f";sites_in_deleted_{n_del};sites_in_inserted_{n_ins}"
 
     # qc_flags
     flags = []
@@ -781,8 +1025,12 @@ def _summarize_variant(events_df: pd.DataFrame,
         "top_event_type": top_event_type,
         "top_event_deltascore": top_event_deltascore,
         "top_event_pos": top_event_pos,
+        "top_event_ref_frame_pos": top_event_ref_frame_pos,
         "dominant_boundary": dom,
         "qc_flags": qc_flags,
+        "variant_class": variant_meta["variant_class"],
+        "length_delta": length_delta,
+        "align_qc": align_qc,
     }
 
 
@@ -794,7 +1042,6 @@ def _process_gene(fasta_path: Path,
                   gene_mapping_df: pd.DataFrame,
                   genesplicer_dir: str,
                   model_dir: str,
-                  pipeline: str,
                   window: int,
                   report_radius: int,
                   visibility_threshold: float,
@@ -813,7 +1060,27 @@ def _process_gene(fasta_path: Path,
         - synthesize ALT
         - run genesplicer
         - build sites
-    - return events and sites
+    - return events, sites, per-variant metadata, stats
+
+    Non-SNV tokens are processed BY DEFAULT and there is no flag for it. The nt
+    token grammar is uniquely decodable (the base and digit classes are disjoint),
+    so no parser mode has to be selected, and whether a given variant changes the
+    frame is decided per variant from len(ref) != len(alt) -- a fact of the
+    record, not a user preference.
+
+    Every rejected token is counted under its OWN reason and its token is kept in
+    `skipped_detail`, which is written to genesplicer.run_summary.json. Previously
+    an indel, an off-alphabet string and a token with a broken middle all landed
+    in one `invalid` counter, so a run that silently dropped every indel in the
+    mapping was indistinguishable from one whose mapping was malformed.
+
+    A gene can also be abandoned WHOLESALE, before any token is looked at: an
+    unreadable FASTA, a failed WT GeneSplicer run, an empty mapping, or a mapping
+    with no recognisable mutant/genomic columns. Those rows were counted into
+    `total_rows` and then dropped against no reason at all, so the run summary
+    showed a variant count that did not reconcile with anything. `gene_skipped`
+    names which of the four it was; the per-token counters cannot express it,
+    because the tokens were never parsed.
     """
     gene_name = extract_gene_from_filename(str(fasta_path)) or fasta_path.stem
     stats = {
@@ -823,12 +1090,21 @@ def _process_gene(fasta_path: Path,
         "skipped_validation": 0,
         "skipped_invalid": 0,
         "skipped_out_of_range": 0,
+        "skipped_ref_mismatch": 0,
         "skipped_runtime": 0,
         "cluster_members_discarded": 0,
+        "skipped_detail": [],
+        "gene_skipped": None,
     }
+
+    def _abandon_gene(reason):
+        """Every row of this gene is being dropped before it is parsed."""
+        stats["gene_skipped"] = reason
+        return [], [], [], stats
+
     fa = read_fasta(str(fasta_path))
     if not fa:
-        return [], [], [], stats
+        return _abandon_gene("fasta_unreadable")
 
     # adopt first sequence or key "genomic"
     if "genomic" in fa:
@@ -843,11 +1119,11 @@ def _process_gene(fasta_path: Path,
     except Exception as e:
         # F28: a failed WT run must not fabricate "all gained" for the gene; skip it.
         print(f"[SKIP] {gene_name}: WT GeneSplicer run failed ({e}); skipping gene", file=sys.stderr)
-        return [], [], [], stats
+        return _abandon_gene("wt_run_failed")
 
     # if mapping df is empty or missing, nothing to do
     if gene_mapping_df is None or gene_mapping_df.empty:
-        return [], [], [], stats
+        return _abandon_gene("no_mapping_rows")
 
     # harmonize column names
     cols = {c.lower(): c for c in gene_mapping_df.columns}
@@ -856,12 +1132,21 @@ def _process_gene(fasta_path: Path,
     genomic_col = cols.get("genomic") or cols.get("genomic_nt") or cols.get("genomic_mut") or cols.get("genomicmutation")
 
     if not mutant_col or not genomic_col:
-        # skip gene
-        return [], [], [], stats
+        return _abandon_gene("mapping_missing_mutant_or_genomic_column")
 
     events_all = []
     sites_all = []
-    pkeys = []
+    variants_meta = []
+
+    def _reject(reason, mutant_tok, genomic_tok):
+        """Record a dropped token by name. A bare counter bump loses which token
+        it was, and returning without recording anything -- the behaviour this
+        replaces for indels -- is indistinguishable from the mapping never having
+        listed the variant."""
+        stats[f"skipped_{reason}"] += 1
+        stats["skipped_detail"].append(
+            {"gene": gene_name, "mutant": mutant_tok, "genomic": genomic_tok,
+             "reason": reason})
 
     # allow fallback for report radius
     if report_radius is None:
@@ -878,50 +1163,77 @@ def _process_gene(fasta_path: Path,
             stats["skipped_validation"] += 1
             continue
 
-        # parse genomic token e.g. T57261C
-        try:
-            snv_pos, (ref_nt, alt_nt) = get_mutation_data(genomic_tok)
-        except Exception:
-            # malformed, skip
-            stats["skipped_invalid"] += 1
+        # Parse the genomic token, e.g. T57261C or ACAA112217430A. parse_variant
+        # never raises and returns None for a token it cannot decode, which is
+        # what makes an indel distinguishable from garbage here: the old
+        # try/except around get_mutation_data could not tell them apart, because
+        # a valid indel and a malformed token raised the SAME ValueError, and
+        # both were counted as `invalid`.
+        variant = parse_variant(genomic_tok, is_nt=True)
+        if variant is None:
+            _reject("invalid", mutant_tok, genomic_tok)
+            continue
+        pos0, ref_nt, alt_nt = variant.pos0, variant.ref, variant.alt
+        ref_len, alt_len = len(ref_nt), len(alt_nt)
+
+        # Bound the END of the REF span, not its start: a multi-base REF can begin
+        # inside the sequence and run off the end, and splicing it would then
+        # truncate silently. (pos0 >= 0 needs no check -- Variant rejects pos < 1
+        # at construction, so a guard for it here could never fire.)
+        if pos0 + ref_len > wt_len:
+            _reject("out_of_range", mutant_tok, genomic_tok)
             continue
 
-        # build ALT sequence in memory
-        if snv_pos < 0 or snv_pos >= wt_len:  # 0-based: allow first base (index 0); coupled with get_mutation_data pos-1 fix
-            # out of range, skip
-            stats["skipped_out_of_range"] += 1
+        # REF guard on the WHOLE span. This pipeline had no REF guard at all --
+        # ref_nt was unpacked and never read -- so a mapping whose coordinate
+        # disagreed with the FASTA produced a complete, plausible, entirely
+        # fictional result set. Checking wt_seq[pos0] alone would not be enough
+        # either: it passes on any multi-base REF whose first base happens to
+        # match.
+        observed = wt_seq[pos0:pos0 + ref_len].upper()
+        if observed != ref_nt.upper():
+            _reject("ref_mismatch", mutant_tok, genomic_tok)
             continue
-        alt_seq = update_str(wt_seq, alt_nt, snv_pos)
+
+        # splice_seq honours len(ref); update_str hardcodes a one-base stride and
+        # cannot express an indel. REF was just verified, so skip the re-check.
+        alt_seq = splice_seq(wt_seq, pos0, ref_nt, alt_nt, validate=False)
 
         # run GeneSplicer on ALT
         try:
             mut_df = _run_genesplicer_on_seq(f"{gene_name}_{mutant_tok}", alt_seq, genesplicer_dir, model_dir)
         except Exception:
-            stats["skipped_runtime"] += 1
+            _reject("runtime", mutant_tok, genomic_tok)
             continue
 
         stats["processed"] += 1
-        pkeys.append(pkey)
+        variants_meta.append({
+            "pkey": pkey,
+            "variant_class": variant.kind,
+            "length_delta": variant.length_delta,
+        })
 
         # convert WT ALT to canonical sites
         wt_sites = _build_sites_for_allele(
             pkey=pkey,
             allele="WT",
-            snv_pos=snv_pos,
             df=wt_df,
             visibility_threshold=visibility_threshold,
             report_radius=report_radius,
-            scan_mode=pipeline,
+            variant_pos1=variant.pos,
+            ref_len=ref_len,
+            alt_len=alt_len,
         )
 
         mut_sites = _build_sites_for_allele(
             pkey=pkey,
             allele="MUT",
-            snv_pos=snv_pos,
             df=mut_df,
             visibility_threshold=visibility_threshold,
             report_radius=report_radius,
-            scan_mode=pipeline,
+            variant_pos1=variant.pos,
+            ref_len=ref_len,
+            alt_len=alt_len,
         )
 
         # merge sites
@@ -939,7 +1251,7 @@ def _process_gene(fasta_path: Path,
         events_all.append(events_df)
         sites_all.append(sites_clustered)
 
-    return events_all, sites_all, pkeys, stats
+    return events_all, sites_all, variants_meta, stats
 
 
 # ---------------------------------------------------------------------------
@@ -973,9 +1285,10 @@ def main():
                         help="Single-linkage radius (bp) for grouping sites into clusters (default 3)")
     parser.add_argument("--max-cluster-span", type=int, default=DEFAULT_MAX_CLUSTER_SPAN,
                         help="Max total span (bp) of one cluster; a site that would push the "
-                             "cluster past this starts a new one, so a chain of near-neighbour "
-                             "sites cannot weld into one cluster of unbounded span "
-                             "(default 12, = --register-max-bp)")
+                             "cluster past this starts a new one. Default 0 = UNBOUNDED and "
+                             "inert: a left-anchored fixed window splits genuine cross-allele "
+                             "pairs that straddle its boundary, so it is off until a bound that "
+                             "cuts at the largest gap exists (see _cluster_sites)")
     parser.add_argument("--redirect-max-bp", type=int, default=DEFAULT_REDIRECT_MAX_BP,
                         help="Max bp between a lost and a gained site to link them as one "
                              "redirected site (default 100)")
@@ -983,9 +1296,9 @@ def main():
                         help="Linked pairs within this distance are labelled 'shifted' "
                              "(register shift) rather than 'redirected' (default 12)")
     parser.add_argument("--redirect-snv-max-bp", type=int, default=DEFAULT_REDIRECT_SNV_BP,
-                        help="Max distance from the SNV to the lost site for a redirect link "
-                             "to be considered variant-caused (default 80, = GeneSplicer's "
-                             "coding/non-coding context window)")
+                        help="Max distance from the variant span (zero inside it) to the lost "
+                             "site for a redirect link to be considered variant-caused "
+                             "(default 80, = GeneSplicer's coding/non-coding context window)")
     parser.add_argument("--workers", type=int, default=None,
                         help="Max parallel workers (default: half cores, capped at 8)")
     parser.add_argument("--log", help="Validation log file/dir to skip failed mutations")
@@ -1048,12 +1361,12 @@ def main():
     else:
         max_workers = args.workers
 
-    all_events = []
-    all_sites = []
-    all_pkeys = []
+    # (The former all_events/all_sites/all_pkeys accumulators are gone: they were
+    # the inputs to the global pass removed in F34 and had been extended-but-never-
+    # read ever since.)
     events_by_gene = {}
     sites_by_gene = {}
-    pkeys_by_gene = {}
+    variants_by_gene = {}
 
     total_genes = len(fasta_paths)
     genes_completed = 0
@@ -1062,8 +1375,11 @@ def main():
     total_skipped_validation = 0
     total_skipped_invalid = 0
     total_skipped_out_of_range = 0
+    total_skipped_ref_mismatch = 0
     total_skipped_runtime = 0
     total_cluster_members_discarded = 0
+    skipped_detail = []
+    genes_skipped = []
 
     with concurrent.futures.ProcessPoolExecutor(max_workers=max_workers) as ex:
         futs = []
@@ -1077,7 +1393,6 @@ def main():
                 gene_map_df,
                 genesplicer_dir,
                 model_dir,
-                "full",
                 window,
                 report_radius,
                 visibility_threshold,
@@ -1092,10 +1407,7 @@ def main():
             fut_meta[fut] = gene_name
 
         for fut in concurrent.futures.as_completed(futs):
-            gene_events, gene_sites, gene_pkeys, gene_stats = fut.result()
-            all_events.extend(gene_events)
-            all_sites.extend(gene_sites)
-            all_pkeys.extend(gene_pkeys)
+            gene_events, gene_sites, gene_variants, gene_stats = fut.result()
 
             genes_completed += 1
             total_variants_seen += gene_stats.get("total_rows", 0)
@@ -1103,13 +1415,25 @@ def main():
             total_skipped_validation += gene_stats.get("skipped_validation", 0)
             total_skipped_invalid += gene_stats.get("skipped_invalid", 0)
             total_skipped_out_of_range += gene_stats.get("skipped_out_of_range", 0)
+            total_skipped_ref_mismatch += gene_stats.get("skipped_ref_mismatch", 0)
             total_skipped_runtime += gene_stats.get("skipped_runtime", 0)
             total_cluster_members_discarded += gene_stats.get("cluster_members_discarded", 0)
+            skipped_detail.extend(gene_stats.get("skipped_detail", []))
 
             gene_name = gene_stats.get("gene") or fut_meta.get(fut, "unknown")
             events_by_gene[gene_name] = gene_events
             sites_by_gene[gene_name] = gene_sites
-            pkeys_by_gene[gene_name] = gene_pkeys
+            variants_by_gene[gene_name] = gene_variants
+            # A gene abandoned before its tokens were parsed contributes rows to
+            # variants_total that no per-token counter can account for. Without
+            # this the run summary simply does not add up and the reader cannot
+            # tell an empty mapping from an unreadable FASTA.
+            if gene_stats.get("gene_skipped"):
+                genes_skipped.append({
+                    "gene": gene_name,
+                    "reason": gene_stats["gene_skipped"],
+                    "rows_dropped": gene_stats.get("total_rows", 0),
+                })
             skips = []
             if gene_stats.get("skipped_validation", 0):
                 skips.append(f"validation={gene_stats['skipped_validation']}")
@@ -1117,8 +1441,12 @@ def main():
                 skips.append(f"invalid={gene_stats['skipped_invalid']}")
             if gene_stats.get("skipped_out_of_range", 0):
                 skips.append(f"out_of_range={gene_stats['skipped_out_of_range']}")
+            if gene_stats.get("skipped_ref_mismatch", 0):
+                skips.append(f"ref_mismatch={gene_stats['skipped_ref_mismatch']}")
             if gene_stats.get("skipped_runtime", 0):
                 skips.append(f"runtime={gene_stats['skipped_runtime']}")
+            if gene_stats.get("gene_skipped"):
+                skips.append(f"GENE ABANDONED: {gene_stats['gene_skipped']}")
             skip_msg = ", ".join(skips) if skips else "none"
             print(
                 f"[{genes_completed}/{total_genes}] {gene_name}: "
@@ -1135,21 +1463,11 @@ def main():
     # column contracts and the two scorer closures (lifted out of the old
     # `if not events_df.empty` block so they are always defined, even when a run
     # produces zero events).
-    events_required = [
-        "pkey", "type", "cluster_id",
-        "wt_pos", "mut_pos", "dpos",
-        "wt_score", "mut_score", "dscore", "pct_delta",
-        "distance_to_snv",
-        "rank_wt", "rank_mut",
-        "conf_wt", "conf_mut", "conf_weighted_delta",
-        "cls", "is_high_impact", "priority", "in_radius",
+    events_required = EVENT_BASE_COLUMNS + [
         "redirect_id", "redirect_dpos", "score_transfer_ratio",
         "redirect_class", "cls_reconciled",
     ]
-    sites_required = [
-        "pkey", "allele", "type", "site_pos", "score", "confidence",
-        "rank", "distance_to_snv", "visible_flag", "cluster_id", "in_radius",
-    ]
+    sites_required = list(SITE_COLUMNS)
 
     def _calc_priority(row):
         if pd.isna(row["dscore"]) or row["dscore"] is None:
@@ -1196,7 +1514,7 @@ def main():
     for gname in events_by_gene:
         g_events = events_by_gene[gname]
         g_sites = sites_by_gene[gname]
-        g_pkeys = pkeys_by_gene[gname]
+        g_variants = variants_by_gene[gname]
 
         g_events_df = pd.concat(g_events, ignore_index=True) if g_events else pd.DataFrame(columns=events_required)
         g_sites_df = pd.concat(g_sites, ignore_index=True) if g_sites else pd.DataFrame(columns=sites_required)
@@ -1221,14 +1539,15 @@ def main():
             g_events_df["is_high_impact"] = g_events_df.apply(_is_hi, axis=1)
 
         g_summary_rows = []
-        for pkey in g_pkeys:
+        for vmeta in g_variants:
             g_summary_rows.append(
                 _summarize_variant(
                     events_df=g_events_df,
                     sites_df=g_sites_df,
-                    pkey=pkey,
+                    pkey=vmeta["pkey"],
                     report_radius=report_radius,
                     policy=policy,
+                    variant_meta=vmeta,
                 )
             )
         g_summary_df = pd.DataFrame(g_summary_rows)
@@ -1240,6 +1559,36 @@ def main():
         g_sites_df.to_csv(str(gene_out_dir / f"{gname}.sites.tsv"), sep="\t", index=False)
         print(f"wrote {gname} outputs to {gene_out_dir}")
 
+    # Durable skip accounting. The printed line below is ephemeral, and a token
+    # that was dropped is exactly the thing a reader of the outputs cannot
+    # otherwise discover -- there is no row for it anywhere.
+    run_summary = {
+        "genes_total": total_genes,
+        "genes_processed": genes_completed,
+        "variants_total": total_variants_seen,
+        "variants_processed": total_variants_processed,
+        "skipped_validation": total_skipped_validation,
+        "skipped_invalid": total_skipped_invalid,
+        "skipped_out_of_range": total_skipped_out_of_range,
+        "skipped_ref_mismatch": total_skipped_ref_mismatch,
+        "skipped_runtime": total_skipped_runtime,
+        "cluster_members_discarded": total_cluster_members_discarded,
+        "genes_skipped": genes_skipped,
+        "rows_dropped_with_gene": sum(g["rows_dropped"] for g in genes_skipped),
+        "skipped_detail": skipped_detail,
+    }
+    # The ledger must reconcile, or a reader cannot tell "nothing to report" from
+    # "something went unrecorded". Anything left over is a drop with no reason
+    # attached, which is the one outcome this file exists to make impossible.
+    unaccounted = (total_variants_seen - total_variants_processed
+                   - total_skipped_validation - total_skipped_invalid
+                   - total_skipped_out_of_range - total_skipped_ref_mismatch
+                   - total_skipped_runtime - run_summary["rows_dropped_with_gene"])
+    run_summary["variants_unaccounted"] = unaccounted
+    Path(output_base).mkdir(parents=True, exist_ok=True)
+    with open(Path(output_base) / "genesplicer.run_summary.json", "w") as fh:
+        json.dump(run_summary, fh, indent=2)
+
     print(
         "Run summary: "
         f"{genes_completed}/{total_genes} genes processed, "
@@ -1247,8 +1596,12 @@ def main():
         f"skipped validation={total_skipped_validation}, "
         f"invalid={total_skipped_invalid}, "
         f"out_of_range={total_skipped_out_of_range}, "
+        f"ref_mismatch={total_skipped_ref_mismatch}, "
         f"runtime={total_skipped_runtime}; "
-        f"non-top cluster members discarded={total_cluster_members_discarded}."
+        f"genes abandoned={len(genes_skipped)} ({run_summary['rows_dropped_with_gene']} rows); "
+        f"unaccounted={unaccounted}; "
+        f"non-top cluster members discarded={total_cluster_members_discarded} "
+        f"-> genesplicer.run_summary.json"
     )
 
 

@@ -55,6 +55,30 @@ class RBPBindingSite:
         else:
             return 0  # Position is within binding site
 
+    def distance_to_span(self, start: int, span_len: int = 1) -> int:
+        """Distance from a variant's whole REF span to the nearest edge of this site.
+
+        `start` is the 0-based position of the first REF base and `span_len` is
+        len(REF), so the span is the half-open interval [start, start + span_len).
+
+        distance_to() takes a single coordinate, which is only unambiguous for a
+        one-base REF. Feeding it the first REF base of a multi-base variant
+        measures from the span's 5' end and therefore overstates the separation
+        of every deletion whose 3' half sits closer to the site, and reports a
+        non-zero distance for a deletion that STRADDLES the site entirely
+        (neither endpoint inside, yet the two overlap).
+
+        Identical to distance_to(start) when span_len == 1.
+        """
+        if span_len < 1:
+            raise ValueError(f"span_len must be >= 1, got {span_len}")
+        end = start + span_len          # exclusive
+        if end <= self.start:
+            return self.start - (end - 1)
+        if start >= self.end:
+            return start - self.end + 1
+        return 0                        # span overlaps the binding site
+
 
 class POSTAR3Database:
     """

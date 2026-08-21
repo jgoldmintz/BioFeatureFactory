@@ -15,6 +15,7 @@
 # along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
 import csv
+import hashlib
 import re
 import os
 import math
@@ -22,10 +23,11 @@ import tempfile
 import subprocess
 import shutil
 import sys
+from dataclasses import dataclass, replace
 from pathlib import Path
 from urllib.parse import unquote
 from Bio.Seq import Seq
-from typing import Dict
+from typing import Dict, Optional, Tuple
 
 chromosome_map = {
     "GRCh37": {"1": "NC_000001.10", "2": "NC_000002.11", "3": "NC_000003.11", "4": "NC_000004.11", "5": "NC_000005.9",
@@ -229,6 +231,13 @@ def trim_muts(ntPosnt, log=None, gene_name=None):
 
 def get_mutation_data(ntposnt):
     """Return zero-based position and nucleotides for a mutation string such as G123A."""
+    # A gDNA/intronic token ('gd.T5000C') reaches int(ntposnt[1:-1]) as
+    # int('d.T5000') and raises. Measured: across both legacy parsers a gd. token
+    # yields 0 real parses out of 24 attempts, so this early return is unreachable
+    # for any input that works today -- 'd' is not in ACGTU and '.' is not a digit,
+    # so no token matching [ACGTU]+\d+[ACGTU]+ can start with the prefix.
+    if is_intronic_token(ntposnt):
+        return None, None
     original_nt = ntposnt[0]
     mutant_nt = ntposnt[-1]
     position = int(ntposnt[1:-1]) - 1  # Convert 1-based token position to 0-based index
@@ -250,6 +259,20 @@ def get_mutation_data_bioAccurate(ntposnt, is_nt):
     if 'Stop' in ntposnt or 'Sto' in ntposnt:
         return None, None
 
+    # gDNA/intronic token. Same reasoning as get_mutation_data above: this is
+    # unreachable for any currently-working input. Note the F45 alphabet guard
+    # below does NOT catch it -- 'g' and the trailing base are both legal
+    # nucleotide letters, so it falls through to int('d.T5000') and raises.
+    # Returning (None, None) matches this function's existing contract for
+    # "recognised but not scoreable here", which it already uses for stop codons
+    # and off-alphabet tokens.
+    #
+    # This is a floor, not a fix: it converts a crash into a SILENT drop. A
+    # pipeline that must report intronic tokens has to gate them at ingest with
+    # warn_intronic_unsupported BEFORE reaching here.
+    if is_intronic_token(ntposnt):
+        return None, None
+
     original_nt = ntposnt[0]
     mutant_nt = ntposnt[-1]
     # F45: reject off-alphabet tokens on nt paths (collapses the former dead if/else).
@@ -257,6 +280,707 @@ def get_mutation_data_bioAccurate(ntposnt, is_nt):
         return None, None
     position = int(ntposnt[1:-1])
     return position, (original_nt, mutant_nt)
+
+
+# ---------------------------------------------------------------------------
+# Length-aware variant representation (non-SNV support).
+#
+# Everything below is ADDITIVE. get_mutation_data (above) and
+# get_mutation_data_bioAccurate (above) are the SNV path and are NOT modified:
+# same signatures, same return shapes, same callers. A pipeline opts into
+# non-SNV support by using parse_variant/splice_seq instead.
+#
+# The reason this cannot be a flag on the existing parsers: they hold REF and
+# ALT as CHARACTER POSITIONS in an unstructured string (`ntposnt[0]`,
+# `ntposnt[-1]`, `int(ntposnt[1:-1])`), so there is no len(REF) to compare
+# against len(ALT). A record is required before the question is even askable.
+# ---------------------------------------------------------------------------
+
+_NT_ALPHABET = frozenset("ACGTU")
+
+# Strict superset of the legacy SNV grammar. Uniquely decodable because the base
+# and digit character classes are disjoint: greedy [ACGTU]+ cannot cross a digit
+# and greedy \d+ cannot cross a base. Every legacy token parses identically.
+_VARIANT_NT_RE = re.compile(r"^([ACGTUacgtu]+)([0-9]+)([ACGTUacgtu]+)$")
+_VARIANT_AA_RE = re.compile(r"^([A-Za-z*]+)([0-9]+)([A-Za-z*]+)$")
+
+# Multi-base sibling of _LOG_MUTATION_RE (see above). That pattern is
+# [ACGT][0-9]+[ACGT] -- single base either side -- so an indel named in a
+# validation log silently fails to match and is therefore never skipped.
+_LOG_VARIANT_RE = re.compile(
+    r"^(?P<gene>[^:]+): mutation (?P<mut>[ACGTacgtu]+[0-9]+[ACGTUacgtu]+)\b"
+)
+
+_COMPLEMENT = {
+    "A": "T", "T": "A", "G": "C", "C": "G", "U": "A", "N": "N",
+    "a": "t", "t": "a", "g": "c", "c": "g", "u": "a", "n": "n",
+}
+
+
+@dataclass(frozen=True)
+class Variant:
+    """A length-aware mutation record.
+
+    pos is 1-BASED and points at the first REF base, matching both the ntposnt
+    token grammar and VCF. Use `pos0` for slicing. Frozen so it is hashable and
+    usable as a dict key.
+
+    orientation declares which strand ref/alt are written on. There is no safe
+    default to infer for a minus-strand indel, so it is carried rather than
+    guessed; 'genomic' matches the VCF convention.
+    """
+
+    pos: int
+    ref: str
+    alt: str
+    gene: Optional[str] = None
+    orientation: str = "genomic"
+
+    def __post_init__(self):
+        if self.pos < 1:
+            raise ValueError(f"Variant.pos is 1-based, got {self.pos}")
+        if not self.ref or not self.alt:
+            raise ValueError(
+                "Variant.ref and Variant.alt must be non-empty; use the VCF "
+                "anchor-base convention for pure insertions/deletions"
+            )
+        if self.orientation not in ("genomic", "transcript"):
+            raise ValueError(
+                f"orientation must be 'genomic' or 'transcript', got {self.orientation!r}"
+            )
+
+    @property
+    def pos0(self) -> int:
+        """0-based index of the first REF base, for sequence slicing."""
+        return self.pos - 1
+
+    @property
+    def length_delta(self) -> int:
+        """len(ALT) - len(REF). Zero for SNVs and MNVs."""
+        return len(self.alt) - len(self.ref)
+
+    @property
+    def is_snv(self) -> bool:
+        return len(self.ref) == 1 and len(self.alt) == 1
+
+    @property
+    def kind(self) -> str:
+        """One of: snv, mnv, insertion, deletion, delins."""
+        if self.is_snv:
+            return "snv"
+        if len(self.ref) == len(self.alt):
+            return "mnv"
+        if len(self.ref) == 1:
+            return "insertion"
+        if len(self.alt) == 1:
+            return "deletion"
+        return "delins"
+
+    def token(self) -> str:
+        """Round-trip serialization. NOT canonical -- use canonical_token()."""
+        return f"{self.ref}{self.pos}{self.alt}"
+
+
+def parse_variant(token, is_nt, gene=None, orientation="genomic"):
+    """Parse a mutation token into a Variant, or return None if it does not parse.
+
+    is_nt is REQUIRED and carries the same meaning as in
+    get_mutation_data_bioAccurate: True for nucleotide tokens (G123A,
+    ACAA112217430A), False for amino-acid tokens (R213W). The nt grammar rejects
+    off-alphabet tokens rather than coercing them, so an aa token handed to the
+    nt path returns None instead of a silently wrong record.
+
+    Returns None (never raises) for: stop-codon tokens, tokens that do not match
+    the grammar, and nt tokens carrying non-ACGTU characters. This mirrors the
+    (None, None) convention of get_mutation_data_bioAccurate so callers that
+    already branch on a falsy parse need no new error handling.
+
+    When you already hold ref/alt as separate fields -- a 4-column mutations
+    file, a VCF record -- construct Variant(...) directly instead of formatting
+    a token just to re-parse it.
+    """
+    if not isinstance(token, str):
+        return None
+    token = token.strip()
+    if not token:
+        return None
+
+    # Same stop-codon guard as get_mutation_data_bioAccurate.
+    if "Stop" in token or "Sto" in token:
+        return None
+
+    pattern = _VARIANT_NT_RE if is_nt else _VARIANT_AA_RE
+    m = pattern.match(token)
+    if not m:
+        return None
+
+    ref, pos_str, alt = m.group(1), m.group(2), m.group(3)
+    if is_nt:
+        ref, alt = ref.upper(), alt.upper()
+        if not (set(ref) <= _NT_ALPHABET and set(alt) <= _NT_ALPHABET):
+            return None
+
+    try:
+        pos = int(pos_str)
+    except ValueError:
+        return None
+    if pos < 1:
+        return None
+
+    return Variant(pos=pos, ref=ref, alt=alt, gene=gene, orientation=orientation)
+
+
+def get_variant_data(ntposnt, is_nt=True):
+    """Indel-capable drop-in for get_mutation_data.
+
+    Returns (position0, (ref, alt)) -- the SAME shape get_mutation_data returns,
+    with the same 0-BASED position convention -- but ref and alt may be multiple
+    bases. Returns (None, None) instead of raising when the token does not parse,
+    so a caller that already guards on a falsy position needs no new handling.
+
+    This exists so a pipeline can migrate one call site at a time:
+
+        pos, (ref, alt) = get_mutation_data(tok)      # SNV only, raises on indel
+        pos, (ref, alt) = get_variant_data(tok)       # indel-capable, never raises
+
+    The caller must then use splice_seq(seq, pos, ref, alt) rather than
+    update_str(seq, alt, pos), because only the former honours len(ref).
+    Anything downstream that assumes len(ref) == len(alt) == 1 -- a codon
+    extraction, a per-position join, an amino-acid projection -- is NOT made
+    correct by this function alone; it only makes the variant representable.
+    """
+    v = parse_variant(ntposnt, is_nt=is_nt)
+    if v is None:
+        return None, None
+    return v.pos0, (v.ref, v.alt)
+
+
+def get_variant_data_bioAccurate(ntposnt, is_nt=True):
+    """1-based sibling of get_variant_data, matching get_mutation_data_bioAccurate.
+
+    Returns (position1, (ref, alt)) or (None, None). Same contract as
+    get_mutation_data_bioAccurate, including the stop-codon and off-alphabet
+    guards, but with multi-base ref/alt.
+    """
+    v = parse_variant(ntposnt, is_nt=is_nt)
+    if v is None:
+        return None, None
+    return v.pos, (v.ref, v.alt)
+
+
+def _trim_alleles(pos, ref, alt):
+    """Parsimonious VCF trim: drop the shared suffix, then the shared prefix.
+
+    Both alleles keep at least one base (the VCF anchor convention), so an SNV is
+    untouched and ACAA/A at p stays ACAA/A at p rather than collapsing.
+    """
+    while len(ref) > 1 and len(alt) > 1 and ref[-1] == alt[-1]:
+        ref, alt = ref[:-1], alt[:-1]
+    while len(ref) > 1 and len(alt) > 1 and ref[0] == alt[0]:
+        ref, alt, pos = ref[1:], alt[1:], pos + 1
+    return pos, ref, alt
+
+
+def _left_align(pos, ref, alt, seq, seq_offset=1):
+    """Shift an indel as far 5' as the reference allows (bcftools norm semantics).
+
+    seq is the reference sequence ref/alt are written against; seq_offset is the
+    1-based coordinate of seq[0]. Requires the reference because left-alignment
+    is a property of the surrounding sequence, not of the alleles alone.
+    """
+    idx = pos - seq_offset
+    if idx < 0 or idx + len(ref) > len(seq):
+        # Cannot see the flank; leave the representation alone rather than
+        # shifting against a sequence that does not cover it.
+        return pos, ref, alt
+    while True:
+        if ref and alt and ref[-1] == alt[-1]:
+            ref, alt = ref[:-1], alt[:-1]
+        elif not ref or not alt:
+            if idx <= 0:
+                break
+            prev = seq[idx - 1]
+            ref, alt, idx = prev + ref, prev + alt, idx - 1
+        else:
+            break
+    # Re-anchor: a fully trimmed indel has an empty allele, which VCF forbids.
+    if not ref or not alt:
+        if idx <= 0:
+            return idx + seq_offset, ref or seq[idx], alt or seq[idx]
+        prev = seq[idx - 1]
+        ref, alt, idx = prev + ref, prev + alt, idx - 1
+    return idx + seq_offset, ref, alt
+
+
+def canonical_token(variant, seq=None, seq_offset=1):
+    """Return the canonical string form of a variant.
+
+    This exists because BFF's entire cross-pipeline join is exact string equality
+    on a concatenated {ref}{pos}{alt} token -- see the three mapping identities in
+    exon_aware_mapping.py and the pkey mint in spliceai/bin/spliceai-parser.py.
+    Two textual spellings of one deletion therefore become two primary keys and
+    the miss is silent (the lookup returns None and the row is dropped).
+
+    Without `seq` this normalizes representation only: uppercase plus
+    parsimonious trimming. That is deterministic and sufficient when every
+    producer already agrees on placement.
+
+    With `seq` it additionally left-aligns, which is the only thing that makes
+    two spellings inside a tandem repeat collapse to one key. In a CAACAA repeat
+    the VCF-left and HGVS-3' placements differ by up to 3 bp -- the same
+    magnitude as a 3 bp deletion -- so for repeat-adjacent indels passing `seq`
+    is not optional if the token is going to be used as a join key.
+    """
+    pos, ref, alt = variant.pos, variant.ref.upper(), variant.alt.upper()
+    if seq is not None:
+        pos, ref, alt = _left_align(pos, ref, alt, seq.upper(), seq_offset)
+    pos, ref, alt = _trim_alleles(pos, ref, alt)
+    return f"{ref}{pos}{alt}"
+
+
+PKEY_HASH_HEX = 12
+
+
+def mint_pkey(gene: str, token: str) -> str:
+    """The bounded primary key for one (gene, token) pair: '{GENE}-{sha1[:12]}'.
+
+    The key used to be '{GENE}-{token}', and the token spells out the whole REF
+    allele, so key length was the length of the variant. Measured across the
+    19,305 genes in grch38.txt, for a whole-gene deletion:
+
+        mean gene span 57,992 nt; largest CNTNAP2 2,304,640 nt (a 2.3 MB key)
+        99.3% exceed the 255-byte NAME_MAX that filenames are built against
+        89.2% exceed PostgreSQL's ~2,704 B btree limit
+        88.0% exceed MySQL InnoDB's 3,072 B index prefix
+        22.9% exceed VARCHAR's 65,535 entirely
+
+    Those are not hypothetical: miranda lost 6 runs to '[Errno 63] File name
+    too long', and netMHC's workdir_stem already exists to route around the
+    same wall. Length here is constant at len(gene) + 13 for every variant
+    class, SNV through knockout.
+
+    sha1 is a content digest, not a security primitive. 12 hex = 48 bits; the
+    gene travels in the clear, so a collision must occur between two variants
+    of the SAME gene, and the population per prefix is one gene's variants
+    rather than the whole corpus.
+
+    The digest is over the VERBATIM token -- what every existing cross-pipeline
+    join already keys on -- so this changes key LENGTH and nothing else. It
+    therefore inherits the property that two textual spellings of one deletion
+    remain two keys. canonical_token above collapses those, but applying it
+    first needs the per-space sequence for left-alignment, which does not exist
+    at the point tokens are read from the mutations CSV.
+    """
+    digest = hashlib.sha1(token.encode("utf-8")).hexdigest()[:PKEY_HASH_HEX]
+    return f"{gene.upper()}-{digest}"
+
+
+INTRONIC_PREFIX = "gd."
+CHROM_PREFIX = "ch."
+# Every prefix that means "NOT ORF-relative". Kept as one tuple so the gates in
+# codon_usage / rare_codon / evmutation / build_mutant_sequences_for_gene and the
+# router in exon_aware_mapping cannot disagree about which spaces exist.
+NON_ORF_PREFIXES = (INTRONIC_PREFIX, CHROM_PREFIX)
+
+
+def is_intronic_token(token) -> bool:
+    """True for any NON-ORF-space token: 'gd.T5000C' (gDNA) or 'ch.T70050267A'
+    (absolute chromosomal).
+
+    The name is historical -- it predates the chromosomal space and a gd./ch.
+    token can perfectly well be exonic. What it actually tests is "is this token
+    written in a coordinate space other than the ORF", which is the question
+    every caller is really asking: none of them can score a token whose position
+    is not an ORF offset, whichever non-ORF space it came from.
+
+    Intronic (and other non-ORF gDNA) variants carry this prefix because a bare
+    token is ambiguous between ORF and gDNA space whenever a gene's 5'UTR is
+    shorter than its ORF -- SMN2's ORF spans 1-879 and its gDNA slice starts at
+    18, so 'T500C' is a legal coordinate in both.
+
+    parse_variant deliberately does NOT understand the prefix and returns None
+    for it, so a pipeline that never calls this helper still fails closed. What
+    it will NOT do is say anything useful: the legacy parsers raise
+    ValueError("invalid literal for int() with base 10: 'd.T5000'"), which
+    reads as a corrupt input file rather than as a variant class the pipeline
+    cannot score.
+    """
+    # CASE-INSENSITIVE. Tokens are routinely upper-cased before they reach a gate
+    # -- netnglyc's normalize_mutation_id does it to build the pkey, and the same
+    # pattern minted 'TESTG~INTRON1' in miranda -- so a case-sensitive prefix test
+    # silently stops recognising the very tokens it exists to catch, and the
+    # variant resumes being reported as unparseable garbage. Widening is monotone:
+    # it can only classify MORE tokens as non-ORF, never fewer, so no caller
+    # becomes more permissive.
+    return isinstance(token, str) and token.lower().startswith(NON_ORF_PREFIXES)
+
+
+def split_intronic_tokens(tokens):
+    """Partition tokens into (orf_space, gdna_space), preserving order."""
+    orf_tokens, gd_tokens = [], []
+    for tok in tokens:
+        (gd_tokens if is_intronic_token(tok) else orf_tokens).append(tok)
+    return orf_tokens, gd_tokens
+
+
+def warn_intronic_unsupported(pipeline, gene, tokens, why, stream=None):
+    """Emit the hard warning for intronic tokens a pipeline cannot score.
+
+    Returns the number warned so the caller can fold it into its own accounting.
+
+    This is deliberately loud and deliberately specific about WHY. A frame- or
+    protein-dependent pipeline has no defensible output for an intronic variant:
+    an intron has no reading frame and no residue, so every codon or amino-acid
+    column would be undefined. Emitting a row anyway -- especially one whose
+    delta columns come out 0.0 because WT and MUT are identical -- would read as
+    a measured 'no effect' rather than 'not modelled', which is the failure this
+    whole layer exists to prevent.
+    """
+    if not tokens:
+        return 0
+    out = stream if stream is not None else sys.stderr
+    label = f"{gene}: " if gene else ""
+    print(f"[{pipeline}] *** WARNING *** {label}{len(tokens)} intronic / non-ORF "
+          f"(gd., ch.) token(s) were EXCLUDED.", file=out)
+    print(f"[{pipeline}] These variants lie OUTSIDE the open reading frame. This "
+          f"pipeline WILL NOT produce biologically meaningful results for them, "
+          f"and forcing one through would yield a number that LOOKS like a "
+          f"measurement and is not.", file=out)
+    print(f"[{pipeline}] Reason: {why}", file=out)
+    for tok in tokens:
+        print(f"[{pipeline}]   excluded (NOT scored): {tok}", file=out)
+    return len(tokens)
+
+
+def splice_seq(seq, pos0, ref, alt, validate=True):
+    """Apply a length-changing edit: seq[:pos0] + alt + seq[pos0 + len(ref):].
+
+    The length-aware counterpart of update_str, which hardcodes a stride of
+    exactly one base (`s[:pos] + c + s[pos + 1:]`) and so cannot express an indel.
+    update_str is left in place and unchanged for the SNV path.
+
+    pos0 is 0-BASED (use Variant.pos0). Raises ValueError on an out-of-range
+    position or, unless validate=False, on a REF that does not match the
+    sequence. The REF assertion is on by default deliberately: an unverified
+    splice at a wrong coordinate produces a plausible sequence and no error,
+    which is the failure mode this whole record exists to prevent.
+    """
+    if pos0 < 0:
+        raise ValueError(f"pos0 must be >= 0, got {pos0}")
+    end = pos0 + len(ref)
+    if end > len(seq):
+        raise ValueError(
+            f"variant REF spans {pos0}..{end} (0-based) but sequence is only "
+            f"{len(seq)} long"
+        )
+    if validate:
+        observed = seq[pos0:end].upper().replace("U", "T")
+        expected = ref.upper().replace("U", "T")
+        if observed != expected:
+            raise ValueError(
+                f"REF mismatch at 0-based position {pos0}: sequence has "
+                f"{seq[pos0:end]!r}, variant declares {ref!r}"
+            )
+    return seq[:pos0] + alt + seq[end:]
+
+
+def align_wt_to_mut(wt_len, edit_offset, ref_len, alt_len):
+    """WT-frame alignment across a length-changing edit.
+
+    Returns a list of length wt_len: entry i is the MUT index corresponding to WT
+    index i, or None where the edit deleted that base so no counterpart exists.
+
+    This is the one piece of machinery that makes a per-position delta definable
+    under an indel, and it is why BFF can stop emitting a positional zip that
+    silently compares base i of one allele to a different base of the other.
+
+    Three regions, all in WT coordinates:
+      before the edit   identity -- unaffected by anything downstream
+      inside the REF    the first min(ref_len, alt_len) bases pair up; any REF
+                        base beyond that was deleted and maps to None
+      after the edit    shifted by (alt_len - ref_len)
+
+    Bases the ALT *inserted* have no WT index and therefore do not appear: the
+    output is in the WT frame, matching the convention SpliceAI uses (zero-pad a
+    deletion, collapse an insertion) -- the only correct alignment convention
+    already present anywhere in this codebase.
+    """
+    delta = alt_len - ref_len
+    out = []
+    for i in range(wt_len):
+        if i < edit_offset:
+            out.append(i)
+        elif i < edit_offset + ref_len:
+            k = i - edit_offset
+            out.append(edit_offset + k if k < alt_len else None)
+        else:
+            out.append(i + delta)
+    return out
+
+
+def infer_edit_span(wt_seq, mut_seq, frameshift=False):
+    """Recover (edit_offset, ref_len, alt_len) from two sequences.
+
+    For pipelines that hold a WT and a MUT sequence but not the variant record --
+    the DTU protein tools score proteins and never see the nucleotide token. The
+    edit is located by trimming the common prefix and the common suffix, which is
+    exact for a single contiguous edit and needs no aligner.
+
+    frameshift=True forces alt_len=0, meaning NOTHING after the edit aligns.
+    That is required and cannot be inferred here: prefix/suffix trimming returns
+    the minimal edit, so a frameshift like MKEWLTCD -> MKNG is reported as a
+    6->2 replacement, which would then pair E with N and W with G. Those residues
+    are not counterparts; after a frameshift every downstream residue is a
+    different one. The caller knows the consequence class -- see
+    protein_consequence -- and must say so.
+    """
+    if wt_seq == mut_seq:
+        return 0, 0, 0
+    n = min(len(wt_seq), len(mut_seq))
+    pre = 0
+    while pre < n and wt_seq[pre] == mut_seq[pre]:
+        pre += 1
+    suf = 0
+    while suf < (n - pre) and wt_seq[len(wt_seq) - 1 - suf] == mut_seq[len(mut_seq) - 1 - suf]:
+        suf += 1
+    ref_len = len(wt_seq) - pre - suf
+    alt_len = len(mut_seq) - pre - suf
+    if frameshift:
+        # Everything from the edit to the end of the WT loses its counterpart.
+        return pre, len(wt_seq) - pre, 0
+    return pre, ref_len, alt_len
+
+
+def aligned_pairs(wt_values, mut_values, edit_offset, ref_len, alt_len):
+    """Yield (wt_index, wt_value, mut_value) for WT positions with a counterpart.
+
+    Positions deleted by the edit, or projecting outside the mutant vector, are
+    skipped rather than coalesced to zero. That distinction matters: a coalesced
+    0.0 reads downstream as "measured, no change", which is a fabricated
+    observation, whereas a skipped position is simply absent.
+    """
+    mapping = align_wt_to_mut(len(wt_values), edit_offset, ref_len, alt_len)
+    for i, j in enumerate(mapping):
+        if j is None or not (0 <= j < len(mut_values)):
+            continue
+        yield i, wt_values[i], mut_values[j]
+
+
+def _translate_codons(nt):
+    """Translate a nucleotide string, ONE CHARACTER PER RESIDUE, stop kept as '*'.
+
+    Deliberately NOT translate_orf_sequence: that one ends with .rstrip('*'),
+    which discards exactly the stop position protein_consequence reports as
+    new_stop_aa_pos. It is the right function for "give me the protein"; it is
+    the wrong one for "where does translation now terminate".
+
+    The trailing partial codon is trimmed before translating rather than after,
+    because Biopython emits a BiopythonWarning for a length that is not a
+    multiple of three.
+
+    Note the repo carries two stop conventions: codon_to_aa maps a stop to the
+    4-character string 'Stop' (see get_mutant_aa), while Biopython uses '*'.
+    Per-residue indexing and len() require the single character, so this uses
+    Biopython.
+    """
+    cleaned = nt.strip().upper().replace("U", "T")
+    cleaned = cleaned[:len(cleaned) - len(cleaned) % 3]
+    if not cleaned:
+        return ""
+    return str(Seq(cleaned).translate(to_stop=False))
+
+
+def _trim_aa_span(aa_pos, wt_aa, mut_aa):
+    """Minimal aa representation: drop residues identical on both sides.
+
+    HGVS convention -- a 3 bp deletion whose codon span happens to start with an
+    unchanged residue should be reported at the residue that actually changed.
+    Unlike the nucleotide trim this may empty an allele, which is correct: a pure
+    in-frame deletion has no mutant residue.
+    """
+    while wt_aa and mut_aa and wt_aa[-1] == mut_aa[-1]:
+        wt_aa, mut_aa = wt_aa[:-1], mut_aa[:-1]
+    while wt_aa and mut_aa and wt_aa[0] == mut_aa[0]:
+        wt_aa, mut_aa, aa_pos = wt_aa[1:], mut_aa[1:], aa_pos + 1
+    return aa_pos, wt_aa, mut_aa
+
+
+def protein_consequence(variant, orf_seq, mut_orf_seq=None):
+    """Codon-aware protein consequence of a nucleotide variant.
+
+    An amino-acid token cannot express an indel's protein effect -- you need the
+    ORF and the reading frame. This walks the edit through translation and
+    returns the columns the DTU pipelines need:
+
+        aa_pos          1-based residue where the change starts
+        wt_aa, mut_aa   the replaced span as MULTI-CHARACTER STRINGS, minimally
+                        trimmed. 'M'/'V' for an SNV -- byte-identical to the
+                        current single-residue output -- 'MK'/'M' for a
+                        2-residue in-frame deletion, '' for a frameshift.
+                        Strings, not lists: a list written through write_tsv
+                        becomes the repr "['M', 'K']" and needs literal_eval on
+                        read, which then fails on the bare 'M' of an SNV row.
+        n_aa_wt/n_aa_mut  len() of each, so "how many residues" is answerable
+                        without parsing anything
+        aa_consequence  snv | mnv | inframe_del | inframe_ins | inframe_delins |
+                        frameshift | stop_gained | stop_lost | synonymous
+        new_stop_aa_pos 1-based residue of the mutant's first stop, or None.
+                        This is the only informative number for a frameshift,
+                        where wt_aa/mut_aa are deliberately empty because
+                        wt_aa[i] and mut_aa[i] no longer describe the same site.
+
+    Returns None if the variant does not lie within the ORF.
+    """
+    if variant.pos0 < 0 or variant.pos0 + len(variant.ref) > len(orf_seq):
+        return None
+    if mut_orf_seq is None:
+        mut_orf_seq = splice_seq(orf_seq, variant.pos0, variant.ref, variant.alt,
+                                 validate=False)
+
+    wt_prot_full = _translate_codons(orf_seq)
+    mut_prot_full = _translate_codons(mut_orf_seq)
+    new_stop = mut_prot_full.find('*')
+    new_stop_aa_pos = new_stop + 1 if new_stop >= 0 else None
+
+    delta = variant.length_delta
+    first_codon = variant.pos0 // 3
+    aa_pos = first_codon + 1
+
+    if delta % 3 != 0:
+        # Every residue from here to the new stop differs, and mut_aa[i] does not
+        # correspond to wt_aa[i]. Emitting the two peptides as a "pair" would
+        # invite exactly that false comparison, so both are left empty.
+        return {
+            'aa_pos': aa_pos,
+            'wt_aa': '',
+            'mut_aa': '',
+            'n_aa_wt': 0,
+            'n_aa_mut': 0,
+            'aa_consequence': 'frameshift',
+            'new_stop_aa_pos': new_stop_aa_pos,
+        }
+
+    last_codon = (variant.pos0 + len(variant.ref) - 1) // 3
+    wt_span = orf_seq[first_codon * 3:(last_codon + 1) * 3]
+    mut_span = mut_orf_seq[first_codon * 3:(last_codon + 1) * 3 + delta]
+    wt_aa = _translate_codons(wt_span)
+    mut_aa = _translate_codons(mut_span)
+    aa_pos, wt_aa, mut_aa = _trim_aa_span(aa_pos, wt_aa, mut_aa)
+
+    if '*' in mut_aa and '*' not in wt_aa:
+        consequence = 'stop_gained'
+    elif '*' in wt_aa and '*' not in mut_aa:
+        consequence = 'stop_lost'
+    elif not wt_aa and not mut_aa:
+        consequence = 'synonymous'
+    elif delta < 0:
+        consequence = 'inframe_del' if not mut_aa else 'inframe_delins'
+    elif delta > 0:
+        consequence = 'inframe_ins' if not wt_aa else 'inframe_delins'
+    elif len(wt_aa) == 1 and len(mut_aa) == 1:
+        consequence = 'snv'
+    else:
+        consequence = 'mnv'
+
+    return {
+        'aa_pos': aa_pos,
+        'wt_aa': wt_aa,
+        'mut_aa': mut_aa,
+        'n_aa_wt': len(wt_aa),
+        'n_aa_mut': len(mut_aa),
+        'aa_consequence': consequence,
+        'new_stop_aa_pos': new_stop_aa_pos,
+    }
+
+
+def apply_variants(seq, variants, validate=True):
+    """Apply SEVERAL edits to one sequence as a single haplotype.
+
+    The Enh13 target case is a strain carrying two edits scored as one phenotype
+    (`Enh13^SOX9*-3bp SRY*-12bp`). BFF's ingestion is one-token-per-line and its
+    pkey is `{GENE}-{single token}`, so "apply both, score once" has no
+    representation. This is the primitive for it.
+
+    Edits are applied in DESCENDING position order. That is not a preference --
+    it is required. Applying a 5' edit first shifts every downstream coordinate
+    by its length delta, so a 3'-side variant parsed against the original
+    sequence would then splice at the wrong place. Going 3' -> 5' leaves every
+    not-yet-applied coordinate untouched.
+
+    Overlapping edits raise. Two REF spans that touch the same base have no
+    well-defined joint meaning, and silently applying one then the other would
+    make the result depend on ordering.
+    """
+    ordered = sorted(variants, key=lambda v: v.pos, reverse=True)
+    for later, earlier in zip(ordered, ordered[1:]):
+        if earlier.pos0 + len(earlier.ref) > later.pos0:
+            raise ValueError(
+                f"overlapping edits cannot be applied as one haplotype: "
+                f"{earlier.token()} spans {earlier.pos}..{earlier.pos + len(earlier.ref) - 1} "
+                f"and {later.token()} starts at {later.pos}"
+            )
+    out = seq
+    for v in ordered:
+        out = splice_seq(out, v.pos0, v.ref, v.alt, validate=validate)
+    return out
+
+
+def canonical_haplotype_token(variants, seq=None, seq_offset=1):
+    """One stable key for a set of edits applied together.
+
+    Components are canonicalized individually then joined 5'->3' with '+', so
+    the same haplotype always mints the same key regardless of the order the
+    edits were listed in the input file. Pass `seq` for the same reason as in
+    canonical_token: without it, repeat-adjacent indels are not left-aligned and
+    two spellings of one haplotype will mint two keys.
+    """
+    parts = sorted(
+        ((v.pos, canonical_token(v, seq=seq, seq_offset=seq_offset)) for v in variants),
+        key=lambda pair: pair[0],
+    )
+    return "+".join(tok for _, tok in parts)
+
+
+def revcomp_seq(seq):
+    """Reverse-complement, length-aware and fail-loud on unknown bases.
+
+    rc_base in exon_aware_mapping.py is a single-character dict lookup with a
+    `.get(b, b)` fallback: handed a multi-base string it returns that string
+    UNCOMPLEMENTED and UNREVERSED, silently. Harmless while every caller passes
+    one character; wrong the moment an indel reaches a minus-strand element.
+    """
+    for base in seq:
+        if base not in _COMPLEMENT:
+            raise ValueError(f"cannot complement base {base!r} in {seq!r}")
+    return str(Seq(seq).reverse_complement())
+
+
+def rc_variant(variant, genomic_pos=None):
+    """Flip a variant onto the opposite strand.
+
+    Complements and REVERSES both alleles, and flips the orientation label.
+
+    genomic_pos, when supplied, is the genomic coordinate of the variant's
+    FIRST REF BASE IN TRANSCRIPT ORDER -- i.e. exactly what
+    `tx_to_genome[tx_pos - 1]` yields in exon_aware_mapping.py. On the minus
+    strand transcript order runs 3'->5' along the genome, so that base is the
+    RIGHTMOST of the REF span and the genomic (leftmost) start is
+    genomic_pos - (len(ref) - 1). Getting this wrong is invisible for an SNV,
+    where the span is one base and the correction is zero.
+    """
+    rc_ref = revcomp_seq(variant.ref)
+    rc_alt = revcomp_seq(variant.alt)
+    flipped = "transcript" if variant.orientation == "genomic" else "genomic"
+    if genomic_pos is None:
+        return replace(variant, ref=rc_ref, alt=rc_alt, orientation=flipped)
+    return replace(
+        variant,
+        pos=genomic_pos - (len(variant.ref) - 1),
+        ref=rc_ref,
+        alt=rc_alt,
+        orientation=flipped,
+    )
+
 
 def get_mutant_aa(ntmut, ntseq, aaseq=None, index=0):
     pos_0_indexed = ntmut[0] - 1 - index
@@ -624,13 +1348,30 @@ def _prepare_structured_annotation(genename, annotation_file, assembly, fmt, tra
     # If a specific transcript_id is requested, try to find it among candidates
     if transcript_id:
         # Try exact match first
-        match = [c for c in candidates if c[1] == transcript_id]
+        exact = [c for c in candidates if c[1] == transcript_id]
+        match = exact
         if not match:
             # Try matching without version suffix (e.g., NM_022162 matches NM_022162.3)
             tid_base = transcript_id.rsplit('.', 1)[0]
             match = [c for c in candidates if c[1].rsplit('.', 1)[0] == tid_base]
         if match:
             _, best_tid, best = match[0]
+            # Announce a version substitution. Falling back on the bare accession
+            # is the intended behaviour when the caller supplies no version
+            # ('NM_022162' -> 'NM_022162.3'), but when a version WAS named and a
+            # different one is returned, the caller asked a specific question and
+            # got another answer. Transcript versions can differ in exon
+            # structure, so every coordinate downstream is then computed against
+            # a record the caller did not choose. Measured: --force-cds
+            # NM_022876.3 against GRCh38.p14, which carries only NM_022876.2.
+            if not exact and "." in transcript_id and best_tid != transcript_id:
+                print(
+                    f"WARNING: transcript '{transcript_id}' is not present for gene "
+                    f"'{genename}' in this annotation; using '{best_tid}' instead "
+                    f"(same accession, different version). Exon structure may differ "
+                    f"from the version requested.",
+                    file=sys.stderr,
+                )
         else:
             available = sorted(set(c[1] for c in candidates))
             raise ValueError(
@@ -669,6 +1410,20 @@ def get_genome_loc(genename, annotation_file, assembly="GRCh38", transcript_id=N
     fmt = _detect_annotation_format(annotation_file)
 
     if fmt == "custom":
+        # The custom tab-delimited format carries ONE record per gene and no
+        # transcript IDs, so a requested transcript cannot be honoured here.
+        # Saying so matters: the caller printed "Forcing transcript X for all
+        # genes" before reaching this point, and without this line a fabricated
+        # accession produced output byte-identical to an unforced run with no
+        # signal anywhere that the request had been dropped.
+        if transcript_id:
+            print(
+                f"WARNING: requested transcript '{transcript_id}' is ignored for gene "
+                f"'{genename}': '{annotation_file}' is the custom tab-delimited format, "
+                f"which holds a single record per gene and no transcript IDs. Supply a "
+                f"GTF/GFF3 annotation to select a specific transcript.",
+                file=sys.stderr,
+            )
         try:
             return _prepare_custom_annotation(genename, annotation_file)
         except Exception as e:
@@ -1219,10 +1974,21 @@ def discover_mapping_files(mapping_dir):
     if not mapping_dir or not Path(mapping_dir).exists():
         return mapping_files
 
+    # validate_mapping_content returns a BARE False for a single-column or
+    # unreadable file and a [ok, delimiter] pair otherwise, so subscripting it
+    # raises TypeError on exactly the files it means to reject -- the
+    # {GENE}_mutations.csv copies sitting in the same tree. The except arm below
+    # swallowed that as "Skipping", which is the right outcome reached by the
+    # wrong route and hides a real read error behind the same message.
+    # load_mapping already guards this (tagged F37); this did not.
+    def _accepts(path) -> bool:
+        res = validate_mapping_content(path)
+        return bool(res[0]) if isinstance(res, (list, tuple)) else bool(res)
+
     p = Path(mapping_dir)
     if p.is_file():
         gene_name = extract_gene_from_filename(p.stem)
-        if validate_mapping_content(p)[0]:
+        if _accepts(p):
             mapping_files[gene_name] = str(p)
         return mapping_files
 
@@ -1233,7 +1999,7 @@ def discover_mapping_files(mapping_dir):
             gene_name = extract_gene_from_filename(csv_file.stem)
 
             # Validate CSV content structure
-            if validate_mapping_content(csv_file)[0]:
+            if _accepts(csv_file):
                 mapping_files[gene_name] = str(csv_file)
 
         except Exception as e:
@@ -1306,9 +2072,19 @@ def validate_mapping_content(file_path):
             # Check for required columns
             fieldnames = [field.lower() for field in reader.fieldnames] if reader.fieldnames else []
             has_mutation = any(col in fieldnames for col in ['mutant', 'mutation', 'nt_mutation', 'ntmutant'])
+            # 'intron' and 'pre_mrna' are the value columns of the two mapping
+            # CSVs exon_aware_mapping emits for intronic variants. fieldnames are
+            # lower-cased above, so the pre_mRNA header arrives as 'pre_mrna'.
+            # Adding to this allow-list can only ACCEPT files that were previously
+            # rejected; it cannot reject anything that passes today.
+            # 'pkey' is the value column of the mutant->pkey inversion table
+            # exon_aware_mapping emits alongside the coordinate mappings. Without
+            # it a pkey,mutant file is rejected as single-column and the four
+            # pipelines that must invert a FASTA header back to a token cannot
+            # load their lookup file.
             has_aa_mutation = any(col in fieldnames for col in
                                   ['aamutant', 'transcript', 'genomic', 'aa_mutation', 'amino_acid_mutation',
-                                   'protein_mutation', 'chromosome'])
+                                   'protein_mutation', 'chromosome', 'intron', 'pre_mrna', 'pkey'])
 
             # Valid formats
             return [(has_mutation and has_aa_mutation), delimiter] or [(has_mutation and not has_aa_mutation), delimiter]
@@ -1476,6 +2252,146 @@ def infer_aamutation_from_nt(mutant_id: str, nt_sequence: str):
     return aa_pos, wt_aa, mut_aa
 
 
+def infer_aavariant_from_nt(mutant_id: str, nt_sequence: str):
+    """Length-aware sibling of infer_aamutation_from_nt.
+
+    Same inputs (nt token + WT ORF) and the same first three return values, but
+    wt_aa/mut_aa may be MULTI-RESIDUE strings and a fourth element carries the
+    consequence class:
+
+        (aa_pos, wt_aa, mut_aa, aa_consequence)   or   None
+
+    infer_aamutation_from_nt is the SNV-only original and is left untouched: it
+    routes through get_mutation_data_bioAccurate, which raises on any multi-base
+    token, and it returns None for stop-gain. Three tests pin that behaviour
+    (test_utils_sequence.py::TestInferAamutationFromNt), so this is additive.
+
+    This is the shared chokepoint for indel support in the four protein
+    pipelines: gitnexus reports infer_aamutation_from_nt as CRITICAL with 22
+    impacted symbols, reached twice per pipeline -- once via
+    build_mutant_sequences_for_gene when synthesizing the mutant protein, and
+    once when a mapping CSV lacks an `aamutant` column and the token has to be
+    derived (netnglyc_pipeline.py:1233). An indel returns None from the original,
+    and the netNglyc caller then drops the mutation outright at :1237-1238.
+
+    Unlike the original this does NOT drop stop-gain -- a premature stop is a
+    real consequence and is reported as 'stop_gained'.
+    """
+    variant = parse_variant(mutant_id, is_nt=True)
+    if variant is None or not nt_sequence:
+        return None
+    cons = protein_consequence(variant, nt_sequence)
+    if cons is None:
+        return None
+    aa_pos, wt_aa, mut_aa = cons['aa_pos'], cons['wt_aa'], cons['mut_aa']
+
+    if cons['aa_consequence'] == 'synonymous':
+        # _trim_aa_span empties BOTH alleles here because nothing changed, not
+        # because an allele is absent. Letting that fall through to the indel
+        # anchoring below re-anchored on the PRECEDING residue and returned
+        # aa_pos - 1, so every synonymous variant was reported one codon early
+        # (nt 13 is codon 5 'CTG'/L and came back as codon 4 'TGG'/W). The
+        # position from protein_consequence is already right; only the residue
+        # has to be filled back in.
+        prot_full = _translate_codons(nt_sequence)
+        idx = aa_pos - 1
+        residue = prot_full[idx] if 0 <= idx < len(prot_full) else ''
+        return (aa_pos, residue, residue, 'synonymous')
+
+    # protein_consequence returns the MINIMAL (trimmed) form, so a pure deletion
+    # has mut_aa == '' and a pure insertion has wt_aa == ''. An empty allele
+    # cannot be rendered as a token, and a caller that receives one drops the
+    # mutation -- the exact silent drop this replaces. Re-anchor on the preceding
+    # residue, the VCF convention already used for nucleotides, so both alleles
+    # are non-empty and parse_variant(is_nt=False) can read the token back.
+    if (not wt_aa or not mut_aa) and cons['aa_consequence'] != 'frameshift':
+        prot = _translate_codons(nt_sequence).split('*')[0]
+        idx = aa_pos - 1
+        if idx - 1 >= 0 and idx - 1 < len(prot):          # anchor 5' (preferred)
+            anchor = prot[idx - 1]
+            aa_pos, wt_aa, mut_aa = aa_pos - 1, anchor + wt_aa, anchor + mut_aa
+        elif idx < len(prot):                              # at residue 1: anchor 3'
+            anchor = prot[idx + len(cons['wt_aa'])] if idx + len(cons['wt_aa']) < len(prot) else ''
+            if anchor:
+                wt_aa, mut_aa = wt_aa + anchor, mut_aa + anchor
+    return (aa_pos, wt_aa, mut_aa, cons['aa_consequence'])
+
+
+def format_aa_token(aa_pos, wt_aa, mut_aa, aa_consequence=None):
+    """Render an aa-level change as a mapping-CSV `aamutant` token.
+
+    'K541E' for a substitution -- byte-identical to what
+    f"{wt_aa}{aa_pos}{mut_aa}" produces today, so existing rows are unchanged.
+    'KEW541R' for a multi-residue in-frame change, which parse_variant(is_nt=False)
+    reads back correctly and get_mutation_data_bioAccurate does not.
+
+    A frameshift has no bounded wt_aa/mut_aa (see protein_consequence), so it
+    renders in the HGVS style 'K541fs'. That form is deliberately NOT parseable by
+    parse_variant: there is no residue pair to recover, and inventing one would be
+    the fabrication this whole layer exists to prevent. Callers must branch on
+    aa_consequence rather than trying to re-parse it.
+    """
+    if aa_consequence == 'frameshift':
+        # No residue pair exists; carry the position and the class only.
+        return f"{(wt_aa or '')[:1]}{aa_pos}fs"
+    if not wt_aa or not mut_aa:
+        # infer_aavariant_from_nt anchors these, so an empty allele reaching here
+        # means the caller built the tuple by hand without a WT protein. Refuse
+        # rather than emit '' -- an empty token is dropped downstream, silently.
+        raise ValueError(
+            f"cannot format an aa token with an empty allele "
+            f"(pos={aa_pos}, wt={wt_aa!r}, alt={mut_aa!r}); anchor it first")
+    return f"{wt_aa}{aa_pos}{mut_aa}"
+
+
+def _non_snv_mutant_protein(gene_name, token, nt_sequence, non_snp):
+    """Build the mutant PROTEIN for a non-SNV token. Returns (header, seq) or None.
+
+    Returns None when the caller should fall through to the existing SNV path:
+    the token is an SNV, it does not parse, --non-snp is off, or there is no
+    nucleotide sequence to splice.
+
+    An indel's protein consequence cannot be produced by substituting a residue.
+    update_str(aa_sequence, mut_aa, idx) replaces exactly one amino acid, which
+    is right for a missense SNV and meaningless for a length change. The mutant
+    protein is the translation of the edited ORF, so this splices at the
+    NUCLEOTIDE level and retranslates.
+
+    A frameshift is built, not refused: translation to the new stop is
+    well-defined and the DTU tools can score the resulting protein. What is not
+    well-defined is any position-wise WT<->MUT comparison, and that is the
+    consumer's problem to suppress -- see protein_consequence's aa_consequence.
+
+    Raises ValueError on a REF that disagrees with the ORF, so the caller's
+    per-token handler records it by name instead of dropping it silently.
+    """
+    v = parse_variant(token, is_nt=True)
+    if v is None or v.is_snv or not non_snp or not nt_sequence:
+        return None
+    if v.pos0 + len(v.ref) > len(nt_sequence):
+        raise ValueError(
+            f"{token}: REF spans past the ORF ({v.pos0 + len(v.ref)} > {len(nt_sequence)})")
+    observed = nt_sequence[v.pos0:v.pos0 + len(v.ref)].upper()
+    if observed != v.ref.upper():
+        raise ValueError(
+            f"{token}: REF mismatch, ORF has {observed!r} at 0-based {v.pos0}")
+    mut_nt = splice_seq(nt_sequence, v.pos0, v.ref, v.alt, validate=False)
+    # Truncate at the FIRST stop, not just trailing ones. translate_orf_sequence
+    # uses to_stop=False and .rstrip('*'), which is fine for an SNV but leaves an
+    # internal '*' embedded after a frameshift -- a real run produced 'MKNG*PVI'.
+    # Handing that to a DTU tool scores four residues that translation never
+    # reaches. A frameshift ends at its new stop.
+    #
+    # Trim to a whole number of codons first: a frameshift leaves a partial
+    # trailing codon, which makes Biopython emit a BiopythonWarning.
+    mut_nt = mut_nt[:len(mut_nt) - len(mut_nt) % 3]
+    mut_aa_seq = translate_orf_sequence(mut_nt).split('*')[0]
+    if not mut_aa_seq:
+        raise ValueError(
+            f"{token}: mutant ORF translates to nothing before the first stop")
+    return f"{gene_name}-{token}", mut_aa_seq
+
+
 def build_mutant_sequences_for_gene(
     gene_name: str,
     nt_sequence,
@@ -1484,6 +2400,7 @@ def build_mutant_sequences_for_gene(
     log_path,
     failure_map,
     input_type: str = 'nt',
+    non_snp: bool = False,
 ):
     """
     Return a dict of {header: sequence} for all mutants of a given gene.
@@ -1514,6 +2431,19 @@ def build_mutant_sequences_for_gene(
             allowed_mutations = None
 
     mutant_sequences = {}
+    # Per-token failures are collected, not raised. A malformed token must cost
+    # its own row and nothing else -- the outer try below still returns {} for
+    # file-level failures (unreadable file, malformed CSV header), which is a
+    # genuinely gene-wide problem.
+    skipped_tokens = []
+    # Intronic tokens are gated HERE, at the single chokepoint through which
+    # netNglyc, netphos, netMHC and NetSurfP3 all obtain their mutant proteins
+    # (gitnexus: direct callers NetSurfP3.main, netMHC.main, synthesize_gene_fastas;
+    # netNglyc calls it from _synthesize_gene_fastas_non_snv). Gating once here
+    # rather than four times in the pipelines keeps the four from drifting, and it
+    # sits well before any DTU/Docker invocation -- a warning emitted after the
+    # binary has already been handed a sequence is not a gate.
+    intronic_tokens = []
     try:
         with open(mapping_file, 'r') as handle:
             lines = handle.readlines()
@@ -1534,36 +2464,49 @@ def build_mutant_sequences_for_gene(
                 if not mutant_id or mutant_id.lower() == 'mutant':
                     continue
 
-                mutant_clean = mutant_id.replace(" ", "")
-                if allowed_mutations and mutant_clean.upper() not in allowed_mutations:
-                    continue
-                if should_skip_mutation(gene_name, mutant_clean, failure_map):
-                    continue
+                try:
+                    mutant_clean = mutant_id.replace(" ", "")
+                    if is_intronic_token(mutant_clean):
+                        intronic_tokens.append(mutant_clean)
+                        continue
+                    if allowed_mutations and mutant_clean.upper() not in allowed_mutations:
+                        continue
+                    if should_skip_mutation(gene_name, mutant_clean, failure_map):
+                        continue
 
-                pos = None
-                wt_aa = mut_aa = None
+                    built = _non_snv_mutant_protein(gene_name, mutant_clean,
+                                                    nt_sequence, non_snp)
+                    if built is not None:
+                        mutant_sequences[built[0]] = built[1]
+                        continue
 
-                if input_type == 'aa':
-                    aa_info = get_mutation_data_bioAccurate(mutant_clean, is_nt=False)
-                    if aa_info[0] is not None and aa_info[1]:
-                        pos = aa_info[0]
-                        wt_aa, mut_aa = aa_info[1]
-                else:
-                    inferred = infer_aamutation_from_nt(mutant_clean, nt_sequence)
-                    if inferred is not None:
-                        pos, wt_aa, mut_aa = inferred
+                    pos = None
+                    wt_aa = mut_aa = None
 
-                if pos is None or not wt_aa or not mut_aa:
+                    if input_type == 'aa':
+                        aa_info = get_mutation_data_bioAccurate(mutant_clean, is_nt=False)
+                        if aa_info[0] is not None and aa_info[1]:
+                            pos = aa_info[0]
+                            wt_aa, mut_aa = aa_info[1]
+                    else:
+                        inferred = infer_aamutation_from_nt(mutant_clean, nt_sequence)
+                        if inferred is not None:
+                            pos, wt_aa, mut_aa = inferred
+
+                    if pos is None or not wt_aa or not mut_aa:
+                        continue
+
+                    idx = int(pos) - 1
+                    if idx < 0 or idx >= len(aa_sequence):
+                        continue
+                    if wt_aa and aa_sequence[idx].upper() != wt_aa.upper():
+                        continue
+
+                    header = f"{gene_name}-{mutant_clean}"
+                    mutant_sequences[header] = update_str(aa_sequence, mut_aa, idx)
+                except Exception as exc:
+                    skipped_tokens.append((mutant_id, f"{type(exc).__name__}: {exc}"))
                     continue
-
-                idx = int(pos) - 1
-                if idx < 0 or idx >= len(aa_sequence):
-                    continue
-                if wt_aa and aa_sequence[idx].upper() != wt_aa.upper():
-                    continue
-
-                header = f"{gene_name}-{mutant_clean}"
-                mutant_sequences[header] = update_str(aa_sequence, mut_aa, idx)
 
         else:
             with open(mapping_file, 'r') as handle:
@@ -1578,51 +2521,80 @@ def build_mutant_sequences_for_gene(
                     if not mutant_id:
                         continue
 
-                    mutant_clean = mutant_id.replace(" ", "")
-                    if allowed_mutations and mutant_clean.upper() not in allowed_mutations:
+                    try:
+                        mutant_clean = mutant_id.replace(" ", "")
+                        if is_intronic_token(mutant_clean):
+                            intronic_tokens.append(mutant_clean)
+                            continue
+                        if allowed_mutations and mutant_clean.upper() not in allowed_mutations:
+                            continue
+                        if should_skip_mutation(gene_name, mutant_clean, failure_map):
+                            continue
+
+                        built = _non_snv_mutant_protein(gene_name, mutant_clean,
+                                                        nt_sequence, non_snp)
+                        if built is not None:
+                            mutant_sequences[built[0]] = built[1]
+                            continue
+
+                        aa_string = ""
+                        for key in aa_keys:
+                            if key in row and row[key]:
+                                aa_string = row[key].strip()
+                                break
+
+                        pos = None
+                        wt_aa = mut_aa = None
+                        if aa_string:
+                            pos, nts = get_mutation_data_bioAccurate(aa_string, is_nt=False)
+                            if pos is not None and nts:
+                                wt_aa, mut_aa = nts
+
+                        if pos is None or not wt_aa or not mut_aa:
+                            if input_type == 'aa':
+                                aa_info = get_mutation_data_bioAccurate(mutant_clean, is_nt=False)
+                                if aa_info[0] is not None and aa_info[1]:
+                                    pos = aa_info[0]
+                                    wt_aa, mut_aa = aa_info[1]
+                            else:
+                                inferred = infer_aamutation_from_nt(mutant_clean, nt_sequence)
+                                if inferred is not None:
+                                    pos, wt_aa, mut_aa = inferred
+
+                        if pos is None or not wt_aa or not mut_aa:
+                            continue
+
+                        idx = int(pos) - 1
+                        if idx < 0 or idx >= len(aa_sequence):
+                            continue
+                        if wt_aa and aa_sequence[idx].upper() != wt_aa.upper():
+                            continue
+
+                        header = f"{gene_name}-{mutant_clean}"
+                        mutant_sequences[header] = update_str(aa_sequence, mut_aa, idx)
+                    except Exception as exc:
+                        skipped_tokens.append((mutant_id, f"{type(exc).__name__}: {exc}"))
                         continue
-                    if should_skip_mutation(gene_name, mutant_clean, failure_map):
-                        continue
-
-                    aa_string = ""
-                    for key in aa_keys:
-                        if key in row and row[key]:
-                            aa_string = row[key].strip()
-                            break
-
-                    pos = None
-                    wt_aa = mut_aa = None
-                    if aa_string:
-                        pos, nts = get_mutation_data_bioAccurate(aa_string, is_nt=False)
-                        if pos is not None and nts:
-                            wt_aa, mut_aa = nts
-
-                    if pos is None or not wt_aa or not mut_aa:
-                        if input_type == 'aa':
-                            aa_info = get_mutation_data_bioAccurate(mutant_clean, is_nt=False)
-                            if aa_info[0] is not None and aa_info[1]:
-                                pos = aa_info[0]
-                                wt_aa, mut_aa = aa_info[1]
-                        else:
-                            inferred = infer_aamutation_from_nt(mutant_clean, nt_sequence)
-                            if inferred is not None:
-                                pos, wt_aa, mut_aa = inferred
-
-                    if pos is None or not wt_aa or not mut_aa:
-                        continue
-
-                    idx = int(pos) - 1
-                    if idx < 0 or idx >= len(aa_sequence):
-                        continue
-                    if wt_aa and aa_sequence[idx].upper() != wt_aa.upper():
-                        continue
-
-                    header = f"{gene_name}-{mutant_clean}"
-                    mutant_sequences[header] = update_str(aa_sequence, mut_aa, idx)
 
     except Exception as exc:
+        # File-level failure only. Per-token failures never reach here.
         print(f"Warning: Failed to synthesize mutants for {gene_name} ({mapping_file}): {exc}")
         return {}
+
+    warn_intronic_unsupported(
+        'protein_synthesis', gene_name, intronic_tokens,
+        "An intron has no reading frame and no residue, so no mutant protein "
+        "exists to score. This excludes them from netNglyc, netphos, netMHC, "
+        "NetSurfP3 and EVmutation. Score intronic variants with RNAfold, miranda, "
+        "genesplicer or AlphaFold3 instead.")
+
+    if skipped_tokens:
+        shown = ", ".join(f"{tok} ({why})" for tok, why in skipped_tokens[:5])
+        more = f" (+{len(skipped_tokens) - 5} more)" if len(skipped_tokens) > 5 else ""
+        print(
+            f"Warning: {gene_name}: skipped {len(skipped_tokens)} unparseable "
+            f"mutation(s), kept {len(mutant_sequences)}: {shown}{more}"
+        )
 
     return mutant_sequences
 
@@ -1669,6 +2641,13 @@ def synthesize_gene_fastas(wt_sequences, mapping_lookup, sequence_root, log_path
         write_fasta(wt_path, {wt_header: aa_seq})
 
         mapping_file = mapping_lookup.get(gene_name.upper())
+        # non_snp=True is REQUIRED here, not optional. This is the only route by
+        # which netNglyc, netphos, netMHC and NetSurfP3 obtain their mutant
+        # proteins, and without it build_mutant_sequences_for_gene never reaches
+        # _non_snv_mutant_protein -- every indel dies at synthesis, before any of
+        # those pipelines' own non-SNV handling can see it. An SNV token is
+        # unaffected: the non-SNV branch returns None for it and the original
+        # path runs unchanged.
         mutant_sequences = build_mutant_sequences_for_gene(
             gene_name,
             nt_for_build,
@@ -1677,6 +2656,7 @@ def synthesize_gene_fastas(wt_sequences, mapping_lookup, sequence_root, log_path
             log_path,
             failure_map,
             input_type=build_input_type,
+            non_snp=True,
         )
 
         mut_path = None

@@ -112,8 +112,19 @@ def resolveMutationCsv(gene_id) {
     }
     if (matched) return matched
 
+    // Fuzzy fallback, but anchored. `contains` matched SMN2.csv for gene SMN
+    // (verified under nextflow), so a gene whose name is a prefix of another
+    // silently scored against the wrong gene's mutation list. Require the stem
+    // to BE the gene, or to start with the gene followed by a separator, so
+    // SMN2_variants.csv still resolves for SMN2 and never for SMN.
     def files = (mut_base.listFiles() ?: []) as List
-    def fuzzy = files.find { it.name.toLowerCase().contains(gene_id.toLowerCase()) && it.name.endsWith('.csv') }
+    def g = gene_id.toLowerCase()
+    def fuzzy = files.find { f ->
+        def n = f.name.toLowerCase()
+        if (!n.endsWith('.csv')) return false
+        def stem = n.substring(0, n.length() - 4)
+        return stem == g || stem.startsWith(g + '.') || stem.startsWith(g + '_') || stem.startsWith(g + '-')
+    }
     return fuzzy ? fuzzy.getAbsolutePath() : null
 }
 
@@ -123,9 +134,14 @@ def resolveMsaFile(msa_param, gene_id, extensions) {
     if (base.isFile()) return base.getAbsolutePath()
 
     // Directory: search for gene-matching file. findResult returns the first non-null match.
+    // Anchored on a '.' boundary for the same reason as resolveMutationCsv:
+    // `startsWith` matched SMN2.msa.a2m for gene SMN, so SMN would have been
+    // scored against SMN2's Potts model with no warning. Files are named
+    // {GENE}.msa.a2m / {GENE}.codon.msa.fasta, so requiring "{gene}." is exact.
     def files = (base.listFiles() ?: []) as List
+    def g = gene_id.toLowerCase()
     return extensions.findResult { ext ->
-        def m = files.find { it.name.toLowerCase().startsWith(gene_id.toLowerCase()) && it.name.endsWith(ext) }
+        def m = files.find { it.name.toLowerCase().startsWith(g + '.') && it.name.endsWith(ext) }
         m ? m.getAbsolutePath() : null
     }
 }

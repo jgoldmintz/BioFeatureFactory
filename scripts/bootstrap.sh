@@ -45,9 +45,10 @@ set -euo pipefail
 #   --exclude-nextflow        Skip installing Nextflow + OpenJDK.
 #   --exclude-cg-cotrans      Skip downloading cg_cotrans.
 #   --exclude-netsurfp3       Skip cloning NetSurfP-3.0.
-#   --exclude-signalp         Skip cloning SignalP 6.0.
+#   --exclude-signalp         Skip the SignalP 6.0 presence check.
 #   --exclude-miranda         Skip conda install of miranda.
-#   --exclude-genesplicer     Skip downloading/building GeneSplicer.
+#   --exclude-spliceai        Skip conda install of spliceai.
+#   --exclude-genesplicer     Skip downloading/building GeneSplicer from JHU source.
 #   --exclude-clone-af3       Skip cloning AlphaFold3.
 #   --exclude-uniref90        Skip UniRef90 FTP download.
 #   --exclude-idmapping       Skip UniProt idmapping FTP download.
@@ -63,6 +64,7 @@ DOWNLOAD_CG_COTRANS=1
 CLONE_NETSURFP3=1
 INSTALL_SIGNALP=1
 INSTALL_MIRANDA=1
+INSTALL_SPLICEAI=1
 BUILD_GENESPLICER=1
 INSTALL_NEXTFLOW=1
 CLONE_AF3=1
@@ -155,6 +157,7 @@ while [[ $# -gt 0 ]]; do
     --exclude-netsurfp3)     CLONE_NETSURFP3=0 ;;
     --exclude-signalp)       INSTALL_SIGNALP=0 ;;
     --exclude-miranda)       INSTALL_MIRANDA=0 ;;
+    --exclude-spliceai)      INSTALL_SPLICEAI=0 ;;
     --exclude-genesplicer)   BUILD_GENESPLICER=0 ;;
     --exclude-clone-af3)     CLONE_AF3=0 ;;
     --exclude-uniref90)      DOWNLOAD_UNIREF90=0 ;;
@@ -397,12 +400,36 @@ if [[ "$CLONE_NETSURFP3" -eq 1 ]]; then
 fi
 
 # ── Step 5: SignalP 6.0 ─────────────────────────────────────────────────
-echo "[5/12] SignalP 6.0 (netNglyc dependency)..."
+# CHECK ONLY. SignalP 6.0 is a licensed manual install like the other DTU tools
+# (netNglyc, netphos, netMHC) -- see the step 11 checklist. It is deliberately NOT
+# pip-installed here, for three measured reasons:
+#
+#   1. github.com/fteufel/signalp-6.0 is the TRAINING repo, not the prediction
+#      distribution. Its package is src/signalp6/ (training_utils, no predict.py),
+#      its setup.py declares NO entry_points and NO package_data, so no install of
+#      it can ever create the `signalp6` executable that SignalP6Handler shells out
+#      to, and it ships no model weights. The licensed DTU tarball is a DIFFERENT
+#      package (module `signalp`, entry_points signalp6=signalp:predict,
+#      package_data model_weights/*) and is self-sufficient.
+#   2. That repo's requirements.txt pins scikit-learn==0.23.1 / scipy==1.5.0 /
+#      sklearn==0.0 / torch==1.7.0. `pip install -r` on it FAILS
+#      ("Failed to build 'scikit-learn'"), and because this script runs under
+#      `set -euo pipefail` that aborted the entire bootstrap here at step 5 of 12 --
+#      before miranda, mmseqs2, hmmer, spliceai, genesplicer, nextflow, the AF3
+#      clone, the editable installs and build_db.sh.
+#   3. SignalP 6.0 requires torch<2 (installation_instructions.md: "SignalP 6.0 is
+#      not compatible with PyTorch 2.0+"). nsp3 and AlphaFold3 require modern
+#      torch. The pin is mutually exclusive with the rest of this env, so SignalP
+#      MUST live in its own environment. netnglyc_pipeline.py only ever invokes it
+#      as a subprocess and reads prediction_results.txt, so a separate env is a
+#      supported configuration, not a workaround.
+echo "[5/12] SignalP 6.0 (netNglyc dependency, licensed manual install)..."
 if [[ "$INSTALL_SIGNALP" -eq 1 ]]; then
-  clone_or_update "https://github.com/fteufel/signalp-6.0" "$BFF_DIR/netNglyc/signalp-6.0"
-  if [[ "$PIP_INSTALL" -eq 1 ]] && [[ -f "$BFF_DIR/netNglyc/signalp-6.0/requirements.txt" ]]; then
-    echo "  PIP install SignalP 6.0 requirements"
-    python -m pip install -r "$BFF_DIR/netNglyc/signalp-6.0/requirements.txt"
+  if command -v signalp6 >/dev/null 2>&1; then
+    echo "  OK signalp6 on PATH: $(command -v signalp6)"
+  else
+    echo "  MISSING signalp6 not on PATH — see the step 11 checklist for install steps."
+    echo "          netNglyc runs will FAIL at SignalP6Handler until it is present."
   fi
 fi
 
@@ -411,12 +438,12 @@ echo "[6/12] Miranda (conda)..."
 if [[ "$INSTALL_MIRANDA" -eq 1 ]]; then
   if command -v miranda >/dev/null 2>&1; then
     echo "  OK miranda already on PATH"
-  elif command -v mamba >/dev/null 2>&1; then
-    echo "  MAMBA install miranda"
-    mamba install -y -c bioconda miranda
   elif command -v conda >/dev/null 2>&1; then
     echo "  CONDA install miranda"
     conda install -y -c bioconda miranda
+  elif command -v mamba >/dev/null 2>&1; then
+    echo "  MAMBA install miranda (conda not found)"
+    mamba install -y -c bioconda miranda
   else
     echo "  WARN conda/mamba not found; install miranda manually: conda install -c bioconda miranda"
   fi
@@ -426,12 +453,12 @@ fi
 echo "[6b/12] mmseqs2..."
 if command -v mmseqs >/dev/null 2>&1; then
   echo "  OK mmseqs2 already on PATH"
-elif command -v mamba >/dev/null 2>&1; then
-  echo "  MAMBA install mmseqs2"
-  mamba install -y -c bioconda mmseqs2
 elif command -v conda >/dev/null 2>&1; then
   echo "  CONDA install mmseqs2"
   conda install -y -c bioconda mmseqs2
+elif command -v mamba >/dev/null 2>&1; then
+  echo "  MAMBA install mmseqs2 (conda not found)"
+  mamba install -y -c bioconda mmseqs2
 else
   echo "  WARN conda/mamba not found; install mmseqs2 manually: conda install -c bioconda mmseqs2"
 fi
@@ -440,46 +467,76 @@ fi
 echo "[6c/12] HMMER (jackhmmer)..."
 if command -v jackhmmer >/dev/null 2>&1; then
   echo "  OK jackhmmer already on PATH"
-elif command -v mamba >/dev/null 2>&1; then
-  echo "  MAMBA install hmmer"
-  mamba install -y -c bioconda hmmer
 elif command -v conda >/dev/null 2>&1; then
   echo "  CONDA install hmmer"
   conda install -y -c bioconda hmmer
+elif command -v mamba >/dev/null 2>&1; then
+  echo "  MAMBA install hmmer (conda not found)"
+  mamba install -y -c bioconda hmmer
 else
   echo "  WARN conda/mamba not found; install hmmer manually: conda install -c bioconda hmmer"
 fi
 
-# ── Step 7: GeneSplicer ─────────────────────────────────────────────────
-echo "[7/12] GeneSplicer binary..."
-if [[ "$BUILD_GENESPLICER" -eq 1 ]]; then
-  if command -v genesplicer >/dev/null 2>&1; then
-    echo "  OK genesplicer already on PATH"
-  elif command -v mamba >/dev/null 2>&1; then
-    echo "  MAMBA install genesplicer"
-    mamba install -y -c bioconda genesplicer
+# ── Step 6d: SpliceAI ───────────────────────────────────────────────────
+# Placed here, with the other conda installs, rather than in the steps 10-12
+# block where the spliceai CHECK lives: that block is skipped under `env-only`,
+# and env-only is documented as "only run pip and conda installs". A conda
+# package belongs in the phase that installs conda packages.
+echo "[6d/12] SpliceAI (conda)..."
+if [[ "$INSTALL_SPLICEAI" -eq 1 ]]; then
+  if command -v spliceai >/dev/null 2>&1; then
+    echo "  OK spliceai already on PATH"
   elif command -v conda >/dev/null 2>&1; then
-    echo "  CONDA install genesplicer"
-    conda install -y -c bioconda genesplicer
+    echo "  CONDA install spliceai"
+    conda install -y -c bioconda spliceai
   else
-    echo "  WARN conda/mamba not found; falling back to source build"
-    GS_DIR="$BFF_DIR/genesplicer"
-    GS_TAR="$GS_DIR/GeneSplicer.tar.gz"
-    GS_SRC="$GS_DIR/GeneSplicer"
-    if [[ -x "$GS_SRC/sources/genesplicer" ]]; then
-      echo "  EXISTS $GS_SRC/sources/genesplicer"
+    echo "  WARN conda not found; install spliceai manually: conda install -c bioconda spliceai"
+  fi
+fi
+
+# ── Step 7: GeneSplicer ─────────────────────────────────────────────────
+# SOURCE BUILD, not conda. `conda install -c bioconda genesplicer` installs a
+# DIFFERENT binary (md5 b2e2384f..., 70848 bytes) from the one JHU ships
+# (md5 61a8648a..., 53448 bytes). Measured on this stack: identical input and
+# identical human model, the conda build writes NOTHING to stdout and exits 0,
+# while the source build reports splice sites. Both are valid executables with
+# the same six flags (-f -a -d -e -i -h), so nothing about the invocation can
+# recover it -- and genesplicer_ensemble.py cannot tell an empty stdout with
+# rc=0 from a sequence that genuinely has no splice sites, so every gene would
+# be silently reported as site-free.
+echo "[7/12] GeneSplicer binary (source build from JHU)..."
+if [[ "$BUILD_GENESPLICER" -eq 1 ]]; then
+  GS_DIR="$BFF_DIR/genesplicer"
+  GS_TAR="$GS_DIR/GeneSplicer.tar.gz"
+  GS_SRC="$GS_DIR/GeneSplicer"
+  GS_BIN="$GS_SRC/sources/genesplicer"
+
+  if [[ -x "$GS_BIN" ]]; then
+    echo "  EXISTS $GS_BIN"
+  else
+    mkdir -p "$GS_DIR"
+    download_file "ftp://ftp.ccb.jhu.edu/pub/software/genesplicer/GeneSplicer.tar.gz" "$GS_TAR"
+    tar -xzf "$GS_TAR" -C "$GS_DIR"
+    rm -f "$GS_TAR"
+    if [[ -d "$GS_SRC/sources" ]]; then
+      echo "  BUILD GeneSplicer from source"
+      (cd "$GS_SRC/sources" && make)
     else
-      mkdir -p "$GS_DIR"
-      download_file "ftp://ftp.ccb.jhu.edu/pub/software/genesplicer/GeneSplicer.tar.gz" "$GS_TAR"
-      tar -xzf "$GS_TAR" -C "$GS_DIR"
-      rm -f "$GS_TAR"
-      if [[ -d "$GS_SRC/sources" ]]; then
-        echo "  BUILD GeneSplicer from source"
-        (cd "$GS_SRC/sources" && make)
-      else
-        echo "  WARN GeneSplicer source directory not found after extraction"
-      fi
+      echo "  ERROR GeneSplicer sources/ not found after extracting $GS_TAR" >&2
     fi
+  fi
+
+  if [[ -x "$GS_BIN" ]]; then
+    echo "  OK genesplicer built: $GS_BIN"
+    echo "     human model:       $GS_SRC/human"
+    echo "     pass to the pipeline with:"
+    echo "       --genesplicer-dir $GS_SRC/sources --model-dir $GS_SRC/human"
+    if command -v genesplicer >/dev/null 2>&1; then
+      echo "  NOTE a 'genesplicer' is also on PATH ($(command -v genesplicer))."
+      echo "       If it is the bioconda build it emits no sites; prefer the path above."
+    fi
+  else
+    echo "  WARN genesplicer was not built; the GeneSplicer pipeline cannot run." >&2
   fi
 fi
 
@@ -572,12 +629,12 @@ if [[ "$INSTALL_NEXTFLOW" -eq 1 ]]; then
     fi
   else
     echo "  nextflow not found — installing"
-    if command -v mamba >/dev/null 2>&1; then
-      echo "  MAMBA install nextflow"
-      mamba install -y -c bioconda "nextflow>=${NEXTFLOW_MIN}"
-    elif command -v conda >/dev/null 2>&1; then
+    if command -v conda >/dev/null 2>&1; then
       echo "  CONDA install nextflow"
       conda install -y -c bioconda "nextflow>=${NEXTFLOW_MIN}"
+    elif command -v mamba >/dev/null 2>&1; then
+      echo "  MAMBA install nextflow (conda not found)"
+      mamba install -y -c bioconda "nextflow>=${NEXTFLOW_MIN}"
     else
       # Fallback: official installer at https://get.nextflow.io writes the
       # launcher to $PWD/nextflow and chmods +rx. It does NOT place it on
@@ -735,7 +792,9 @@ if [[ -z "$SUBCOMMAND" || "$SUBCOMMAND" == "git-only" ]]; then
   if command -v spliceai >/dev/null 2>&1; then
     echo "  OK spliceai on PATH"
   else
-    echo "  WARN spliceai not found (required by spliceai/README.md)"
+    # Reachable when --exclude-spliceai was passed, when neither conda nor mamba
+    # is available, or when step 6d's install failed.
+    echo "  WARN spliceai not found (installed at step 6d; see --exclude-spliceai)"
   fi
   if command -v nextflow >/dev/null 2>&1; then
     echo "  OK nextflow on PATH"
@@ -749,9 +808,21 @@ Manual installs required (cannot be auto-downloaded):
   - cg_cotrans/: Download from https://shakhnovich.faculty.chemistry.harvard.edu/software/coarse-grained-co-translational-folding-analysis
     Extract into biofeaturefactory/rare_codon/cg_cotrans/
   - netNglyc/: NetNGlyc 1.0 (DTU academic license)
-    SignalP 6.0 is cloned automatically to netNglyc/signalp-6.0/
     Patch NetNGlyc tcsh SIGNALP path to:
       biofeaturefactory/netNglyc/bin/signalp6_adapter
+  - SignalP 6.0 (DTU academic license) -- REQUIRED by netNglyc
+    Download the "fast" package: https://services.healthtech.dtu.dk/service.php?SignalP-6.0
+    Install it in a SEPARATE python env: SignalP 6.0 pins torch<2, while nsp3 and
+    AlphaFold3 need modern torch, so it CANNOT share the BFF env. netNglyc invokes
+    it as a subprocess and reads prediction_results.txt, so a separate env is fine.
+      conda create -n signalp6 python=3.10 && conda activate signalp6
+      pip install signalp-6-package/
+      pip install "numpy<2"                       # required for 6.0h
+      SIGNALP_DIR=$(python3 -c "import signalp, os; print(os.path.dirname(signalp.__file__))")
+      cp -r signalp-6-package/models/* $SIGNALP_DIR/model_weights/
+    Then put that env's `signalp6` on PATH for netNglyc runs.
+    NOTE: github.com/fteufel/signalp-6.0 is the TRAINING repo -- it declares no
+    console_scripts and ships no weights, so it cannot satisfy this dependency.
   - netphos/: NetPhos 3.1 + APE (DTU academic license), requires tcsh
   - netMHC/: NetMHCpan 4.1 / NetMHC 4.0 (DTU academic license)
     NetMHC 4.0 data files: https://services.healthtech.dtu.dk/services/NetMHC-4.0/data.tar.gz
@@ -766,9 +837,9 @@ EOF
   command -v adabmDCA >/dev/null 2>&1                 && echo "  OK adabmDCA CLI on PATH"
   [[ -d "$BFF_DIR/rare_codon/cg_cotrans" ]]         && echo "  OK cg_cotrans"
   [[ -d "$BFF_DIR/NetSurfP3/nsp3" ]]                && echo "  OK NetSurfP3 clone"
-  [[ -d "$BFF_DIR/netNglyc/signalp-6.0" ]]          && echo "  OK SignalP 6.0 clone"
+  command -v signalp6 >/dev/null 2>&1                 && echo "  OK signalp6 on PATH"
   command -v miranda >/dev/null 2>&1                  && echo "  OK miranda on PATH"
-  command -v genesplicer >/dev/null 2>&1              && echo "  OK genesplicer on PATH"
+  [[ -x "$BFF_DIR/genesplicer/GeneSplicer/sources/genesplicer" ]] && echo "  OK genesplicer source build"
   [[ -d "$BFF_DIR/alphafold3/alphafold3" ]]         && echo "  OK AlphaFold3 clone"
 fi
 
