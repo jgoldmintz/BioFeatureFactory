@@ -21,8 +21,9 @@ import os
 import sys
 from pathlib import Path
 
-from biofeaturefactory.utils.utility import (
+from biofeaturefactory.lib.utility import (
     read_fasta,
+    mint_pkey,
     trim_muts,
     get_codon_counts,
     extract_codon_with_bicodons,
@@ -152,7 +153,10 @@ def _row_from_codons(gene, ntposnt, codon_number, position_in_codon,
         qc_flags = (qc_flags + ';NO_BICODON') if qc_flags else 'NO_BICODON'
 
     return {
-        'pkey': f"{gene}-{ntposnt}",
+        # {GENE}-{sha}: trim_muts strips only '*' and whitespace, so ntposnt is the
+        # VERBATIM token variant_mapping hashed. Minting from a normalised spelling
+        # would hash a different string and match no mapping.
+        'pkey': mint_pkey(gene, ntposnt),
         'Gene': gene,
         'codon_number': codon_number,
         'position_in_codon': position_in_codon,
@@ -345,7 +349,6 @@ def process_mutation(gene, ntposnt, sequence, codondata, codonpairdata, cai_gene
 
     mutated_codon, forward_bicodon, reverse_bicodon, poc, pos, codon_number = result
 
-    pkey = f"{gene}-{ntposnt}"
     qc_flags = []
 
     # Determine bicodon context
@@ -618,9 +621,16 @@ Metrics:
 
     # Summary
     if results:
-        n_with_3prime = sum(1 for r in results if r.get('bicodon_3prime'))
-        n_with_5prime = sum(1 for r in results if r.get('bicodon_5prime'))
-        n_with_both = sum(1 for r in results if r.get('bicodon_3prime') and r.get('bicodon_5prime'))
+        # The row keys are bicodon_{3,5}prime_{wt,mut} (_row_from_codons); the bare
+        # 'bicodon_3prime'/'bicodon_5prime' these used to read exist on no row, so
+        # .get() returned None every time and all three counters were structurally
+        # always 0 -- reported as "no bicodon context" while the TSV carried it on
+        # 38/38 and 36/38 rows. Counted on the WT side: the MUT bicodon is present
+        # exactly when the WT one is, since both come from the same splice window.
+        n_with_3prime = sum(1 for r in results if r.get('bicodon_3prime_wt'))
+        n_with_5prime = sum(1 for r in results if r.get('bicodon_5prime_wt'))
+        n_with_both = sum(1 for r in results
+                          if r.get('bicodon_3prime_wt') and r.get('bicodon_5prime_wt'))
 
         # F51: in directory mode `results` spans EVERY gene (results.extend per file),
         # so results[0] is just whichever gene sorted first — printing its CAI/tAI as

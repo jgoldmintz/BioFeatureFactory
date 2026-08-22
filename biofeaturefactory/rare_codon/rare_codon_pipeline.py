@@ -42,8 +42,9 @@ from collections import defaultdict
 SCRIPT_DIR = Path(__file__).resolve().parent
 CG_DIR = SCRIPT_DIR / "cg_cotrans"
 
-from biofeaturefactory.utils.utility import (
+from biofeaturefactory.lib.utility import (
     read_fasta,
+    mint_pkey,
     trim_muts,
     parse_variant,
     extract_gene_from_filename,
@@ -273,7 +274,9 @@ def _rare_codon_row(gene, ntposnt, codon_position, rc_data, window_size, qc_flag
         return value
 
     row = {
-        'pkey': f"{gene}-{ntposnt}",
+        # {GENE}-{sha}. ntposnt comes straight from trim_muts, which strips only
+        # '*' and whitespace, so it is the VERBATIM token variant_mapping hashed.
+        'pkey': mint_pkey(gene, ntposnt),
         'Gene': gene,
         'codon_position': '' if codon_position is None else codon_position,
         'p_enriched': cell('p_enriched'),
@@ -613,15 +616,66 @@ def _build_usage_pgz_from_msa(msa_inputs, usage_path, pseudocount=1.0):
         pickle.dump(usage_obj, f)
 
 
-def _run_single_gene(gene, fasta_file, msa_file, mut_file, args, wt_gi, output_dir):
+def _resolve_wt_gi(seqs, wt_gi, gene):
+    """Which MSA record is the WT/focus sequence.
+
+    Precedence when --wt-gi is None: 'ORF', then the gene name, then the FIRST
+    record. main passes args.wt_gi RAW (not `args.wt_gi or gene`) so that None
+    still means "not given" here -- pre-substituting the gene name made an
+    unrequested value appear in the error text and left this function unable to
+    tell a default from a choice. codon_msa_pipeline names the focus record 'ORF', so defaulting
+    to the gene name alone failed on every MSA it produces -- measured: SMN2
+    MSA, 35 records, first 'ORF', lookup for 'SMN2' missed. The first-record
+    fallback is last because an MSA whose focus row is neither named is still
+    conventionally focus-first.
+
+    An EXPLICIT --wt-gi is never overridden: if the caller named a record, a
+    silent substitution would score a different sequence than they asked for.
+    """
+    if wt_gi:
+        # EXPLICIT --wt-gi. Honour it or fail; never substitute another record.
+        if wt_gi in seqs:
+            return wt_gi, None
+        return None, (f"WT record '{wt_gi}' not in MSA ({len(seqs)} records; "
+                      f"first: {next(iter(seqs), 'none')}).")
+    for cand in ('ORF', gene):
+        if cand in seqs:
+            return cand, None
+    if seqs:
+        return next(iter(seqs)), None
+    return None, "MSA is empty."
+
+
+def _orf_from_msa(msa_file, wt_gi, gene):
+    """The WT ORF, degapped from the MSA's own WT record.
+
+    Read RAW, never through _sanitize_seqs/clean_sequences. Those two rewrite the
+    WT row -- _sanitize_seqs blanks any codon outside codon_to_aa to '---', and
+    clean_sequences truncates from the first stop codon to the end -- so the
+    sanitized row is a TRUNCATED, hole-punched ORF. Validating a mutation token
+    against it would silently reject every position past the first stop.
+
+    Returns (orf, resolved_wt_gi, error_message); error is None on success.
+    """
+    seqs = rc_read_fasta(msa_file)
+    resolved, err = _resolve_wt_gi(seqs, wt_gi, gene)
+    if err:
+        return None, None, f"{err} In {msa_file}. Pass --wt-gi matching the header for {gene}."
+    orf = seqs[resolved].replace('-', '').upper()
+    if not orf:
+        return None, None, f"WT record '{resolved}' in {msa_file} is all gaps; no ORF to score."
+    return orf, resolved, None
+
+
+def _run_single_gene(gene, msa_file, mut_file, args, wt_gi, output_dir):
     """Run rare codon analysis for a single gene and write per-gene output."""
-    fasta = read_fasta(fasta_file)
-
-    if 'ORF' not in fasta:
-        print(f"Error: No 'ORF' found in {fasta_file}", file=sys.stderr)
+    # wt_gi is REBOUND to whatever _orf_from_msa actually used: the ORF and the
+    # enrichment analysis below must index the same MSA row, or the codon
+    # positions the tokens are validated against are not the ones scored.
+    orf_sequence, wt_gi, orf_err = _orf_from_msa(msa_file, wt_gi, gene)
+    if orf_err:
+        print(f"Error: {orf_err}", file=sys.stderr)
         return
-
-    orf_sequence = fasta['ORF']
     failure_map = load_validation_failures(args.validation_log) if args.validation_log else {}
     mut_list = trim_muts(mut_file, log=args.validation_log, gene_name=gene)
 
@@ -733,8 +787,9 @@ Copyright notice:
     parser.add_argument('--wt-gi', help='Identifier for WT/focus sequence in MSA (single-gene mode)')
 
     # Mutation inputs
-    parser.add_argument('--fasta', required=True,
-                        help='FASTA file with ORF sequence, or directory of FASTA files')
+    # --fasta was removed: its only informational job was to supply the WT ORF,
+    # and the MSA already carries it as the wt_gi record. Everything else the flag
+    # did (enumerating genes in directory mode) the MSA resolver does too.
     parser.add_argument('--mutations', required=True,
                         help='Mutations CSV file or directory of CSV files')
     parser.add_argument('--validation-log', help='Validation log for filtering')
@@ -759,22 +814,21 @@ Copyright notice:
     args = parser.parse_args()
     args.usage = _ensure_codon_usage(args)
 
-    fasta_path = Path(args.fasta)
-    if fasta_path.is_dir():
-        fasta_files = sorted(
-            f for ext in ('*.fasta', '*.fa', '*.fna')
-            for f in fasta_path.glob(ext)
-        )
-        if not fasta_files:
-            print(f"Error: No FASTA files found in {args.fasta}", file=sys.stderr)
+    msa_path = Path(args.msa)
+    if msa_path.is_dir():
+        # The MSA is now the gene enumerator. _collect_msa_inputs already globs
+        # *.msa.fasta / *.fasta / *.fa and de-dups, which is exactly the listing
+        # the FASTA glob used to provide.
+        msa_files = _collect_msa_inputs(args.msa)
+        if not msa_files:
+            print(f"Error: No MSA files found in {args.msa}", file=sys.stderr)
             sys.exit(1)
         failed_genes = []
-        for fasta_file in fasta_files:
-            gene = extract_gene_from_filename(str(fasta_file))
-            msa_file = _resolve_per_gene(args.msa, gene, ('.fasta', '.fa', '.msa.fasta'))
+        for msa_file in msa_files:
+            gene = extract_gene_from_filename(str(msa_file))
             mut_file = _resolve_per_gene(args.mutations, gene, ('.csv',))
-            if not msa_file or not mut_file:
-                print(f"  Skipping {gene}: missing MSA or mutations")
+            if not mut_file:
+                print(f"  Skipping {gene}: missing mutations")
                 continue
             # Per-gene guard. _run_single_gene already catches failures of the
             # enrichment analysis itself, but nothing outside that inner try was
@@ -783,22 +837,22 @@ Copyright notice:
             # after it. A gene that fails is now named and counted, and the rest
             # of the directory still runs.
             try:
-                _run_single_gene(gene, str(fasta_file), msa_file, mut_file,
-                                 args, args.wt_gi or gene, args.output)
+                _run_single_gene(gene, str(msa_file), mut_file,
+                                 args, args.wt_gi, args.output)
             except Exception as exc:
                 failed_genes.append((gene, f"{type(exc).__name__}: {exc}"))
                 print(f"Error processing {gene}: {type(exc).__name__}: {exc}",
                       file=sys.stderr)
         if failed_genes:
-            print(f"\n{len(failed_genes)}/{len(fasta_files)} genes failed:", file=sys.stderr)
+            print(f"\n{len(failed_genes)}/{len(msa_files)} genes failed:", file=sys.stderr)
             for gene, reason in failed_genes:
                 print(f"  {gene}: {reason}", file=sys.stderr)
     else:
         # Single-gene mode is deliberately NOT guarded: there is no later gene to
         # protect, and a swallowed exception here would exit 0 with no output.
-        gene = extract_gene_from_filename(args.fasta)
-        _run_single_gene(gene, args.fasta, args.msa, args.mutations,
-                         args, args.wt_gi or gene, args.output)
+        gene = extract_gene_from_filename(args.msa)
+        _run_single_gene(gene, args.msa, args.mutations,
+                         args, args.wt_gi, args.output)
 
 
 if __name__ == "__main__":

@@ -59,12 +59,11 @@ import pandas as pd
 # utility imports
 # -------------------------------------------------------------------------
 HERE = os.path.dirname(os.path.abspath(__file__))
-from biofeaturefactory.utils.exon_aware_mapping import (
+from biofeaturefactory.lib.utility import (
     parse_piece_token,
+    mint_pkey,
     piece_fields,
     split_piece_cell,
-)
-from biofeaturefactory.utils.utility import (
     load_validation_failures,
     should_skip_mutation,
     extract_gene_from_filename,
@@ -429,7 +428,14 @@ def _per_gene_mut_tasks(gene_upper: str,
             _reject(mutant_id, transcript_token, "empty_mapping_row")
             continue
 
-        seq_id = f"{gene_upper}-{mutant_id}-mut"
+        # The seq_id becomes the OUTPUT FILENAME ({seq_id}-miranda.out), so the
+        # token cannot go in it verbatim: a knockout token is unbounded and
+        # overran the 224-char filename cap as [Errno 63] File name too long.
+        # mint_pkey is 18 chars regardless of allele size. The header written to
+        # the temp FASTA is this same id, and no parser reads it back
+        # (parse_miranda_text ignores 'Read Sequence:'), so the id's only job is
+        # to name the file -- and it is now the pkey the rest of the repo joins on.
+        seq_id = f"{mint_pkey(gene_upper, mutant_id)}-mut"
         if seq_id in already_on_disk:
             continue
 
@@ -864,6 +870,11 @@ def build_sites_table_from_outputs(outdir: str,
 
         # Precompute mutant->transcript map once
         mp = dict(zip(mapping_df["mutant"].astype(str), mapping_df["transcript"].astype(str)))
+        # {sha -> verbatim token} for this gene. _per_gene_mut_tasks minted the
+        # filename from gene_key + the same token, so this inverts it exactly.
+        sha_to_token = {}
+        for _t in mp:
+            sha_to_token[mint_pkey(gene_key, _t).rsplit("-", 1)[-1]] = _t
 
         # The projection is built over WT coordinates, so it must span the furthest
         # WT site. Computed once per gene; the variant-dependent part is per pkey.
@@ -886,8 +897,12 @@ def build_sites_table_from_outputs(outdir: str,
             # for a hyphen-containing str (guaranteed by the bucketing filter), so
             # the former try/except fallback (`core.split('-',1)[1]`, first-hyphen
             # unsafe) was dead code and has been removed.
+            # `core` is {gene_key}-{sha}. The sha is not the token, so resolve it
+            # through the per-gene reverse map built from this gene's own mapping;
+            # mp, should_skip_mutation and the `rejected` rows all need the
+            # VERBATIM spelling.
             gene_tok, mut_tok = extract_mutation_from_sequence_name(core)
-            mutation_token = mut_tok
+            mutation_token = sha_to_token.get(mut_tok, mut_tok)
 
             transcript_nt = mp.get(mutation_token, None)
             if not transcript_nt:
@@ -937,7 +952,7 @@ def build_sites_table_from_outputs(outdir: str,
                 # The WT->MUT projection. Identity when ref_len == alt_len.
                 wt_to_mut = align_wt_to_mut(wt_span, tx_pos_1 - 1, ref_len, alt_len)
 
-            pkey = f"{gene}-{mutation_token}"
+            pkey = mint_pkey(gene, mutation_token)
 
             # WT rows for this pkey
             for h in wt_hits:
@@ -1580,7 +1595,7 @@ def _load_substrate_sequences(input_path: str) -> Dict[str, str]:
     """{gene_key: sequence} for every NON-transcript substrate in the input FASTAs.
 
     Reads the pre_mRNA record and each intron<N>|... record that
-    exon_aware_mapping emits. Both are already in TRANSCRIPT orientation, which
+    variant_mapping emits. Both are already in TRANSCRIPT orientation, which
     is the only orientation miranda can use: it scans the strand it is handed and
     does not try the reverse complement. Measured on this machine -- a perfect
     let-7a site scores 200.00 on the forward sequence and returns ZERO hits on its

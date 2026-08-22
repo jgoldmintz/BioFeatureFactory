@@ -25,7 +25,7 @@ from dataclasses import dataclass
 from typing import Dict, Optional, List
 from enum import Enum
 
-from biofeaturefactory.utils.utility import align_wt_to_mut
+from biofeaturefactory.lib.utility import align_wt_to_mut
 
 
 @dataclass(frozen=True)

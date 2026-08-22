@@ -38,7 +38,7 @@ from concurrent.futures import ProcessPoolExecutor, as_completed
 from typing import Optional
 
 # Import utility functions
-from biofeaturefactory.utils.utility import (
+from biofeaturefactory.lib.utility import (
     read_fasta,
     get_mutation_data_bioAccurate,
     split_fasta_into_batches,
@@ -52,6 +52,10 @@ from biofeaturefactory.utils.utility import (
     load_wt_sequences,
     extract_gene_from_filename,
     extract_mutation_from_sequence_name,
+    mint_pkey,
+    token_from_name,
+    load_pkey_map,
+    load_token_pkey_index,
     translate_orf_sequence,
     load_wt_sequence_map,
     infer_aamutation_from_nt,
@@ -539,6 +543,8 @@ def _synthesize_gene_fastas_non_snv(wt_sequences, mapping_lookup, sequence_root,
         wt_orfs[gene_name] = nt_for_build
 
         mapping_file = mapping_lookup.get(gene_name)
+        # Sequence names are {GENE}-{sha}; pkey_map carries name -> token.
+        pkey_map = {}
         mutant_sequences = build_mutant_sequences_for_gene(
             gene_name,
             nt_for_build,
@@ -548,6 +554,7 @@ def _synthesize_gene_fastas_non_snv(wt_sequences, mapping_lookup, sequence_root,
             failure_map,
             input_type=build_input_type,
             non_snp=True,
+            pkey_map=pkey_map,
         )
 
         # Protein WT input: build_mutant_sequences_for_gene's non-SNV path splices
@@ -560,7 +567,7 @@ def _synthesize_gene_fastas_non_snv(wt_sequences, mapping_lookup, sequence_root,
         # there. An SNV never enters this branch, so the existing path is untouched.
         if build_input_type == 'aa':
             for tok in _expected_tokens(gene_name, mapping_file):
-                header = f"{gene_name}-{tok}"
+                header = mint_pkey(gene_name, tok)
                 if header in mutant_sequences:
                     continue
                 v = parse_variant(tok, is_nt=False)
@@ -577,23 +584,32 @@ def _synthesize_gene_fastas_non_snv(wt_sequences, mapping_lookup, sequence_root,
                 built = built.split('*')[0]
                 if built:
                     mutant_sequences[header] = built
+                    pkey_map[header] = tok
 
         produced = set()
-        prefix = f"{gene_name}-"
         for header, seq in mutant_sequences.items():
             # Strip the KNOWN gene prefix rather than splitting on the first '-'.
             # Gene symbols in this repo carry hyphens (HLA-A, NKX2-1), and
             # partitioning "HLA-A-C11G" on the first '-' yields the token
             # "A-C11G", which then matches no pkey and loses the mutant protein.
-            tok = header[len(prefix):] if header.startswith(prefix) else ""
+            tok = token_from_name(header, gene_name, pkey_map)
             if tok:
-                tok_norm = normalize_mutation_id(tok)
-                produced.add(tok_norm)
-                mut_proteins[f"{gene_name}-{tok_norm}"] = seq
+                produced.add(normalize_mutation_id(tok))
+                # Keyed by pkey, per this function's docstring. The header IS the
+                # pkey now, so no second minting from a NORMALISED token -- that
+                # hashed 'GD.G199C' and matched nothing.
+                mut_proteins[header] = seq
 
         expected = _expected_tokens(gene_name, mapping_file)
+        # _expected_tokens NORMALISES (upper-cases), so `tok` here is not the
+        # verbatim spelling and mint_pkey on it would hash 'GD.G199C' rather than
+        # 'gd.G199C' -- a pkey present in no mapping. The index resolves either
+        # spelling to the pkey variant_mapping actually minted; mint_pkey is
+        # the fallback for tokens the mapping has never seen, where the two
+        # spellings are identical anyway.
+        _tok_index = load_token_pkey_index(mapping_file, gene_name)
         for tok in sorted(expected - produced):
-            pkey = f"{gene_name}-{tok}"
+            pkey = _tok_index.get(tok) or mint_pkey(gene_name, tok)
             if should_skip_mutation(gene_name, tok, failure_map):
                 build_failures[pkey] = "FILTERED:validation_log"
             else:
@@ -1793,7 +1809,7 @@ class RobustDockerNetNGlyc:
                         for mutation_id, mutation_data, target_aa in position_mutations[pred_pos]:
                             # Check if amino acid matches (critical fix!)
                             if pred_aa == target_aa:
-                                pkey = f"{gene}-{mutation_id}"
+                                pkey = mint_pkey(gene, mutation_id)
                                 results.append({
                                     'pkey': pkey,
                                     'Gene': gene,
@@ -1883,7 +1899,8 @@ class RobustDockerNetNGlyc:
                 self.error_logger.error(f"WT parser: {gene} missing predictions in provided outputs")
         return wt_sites_by_gene, wt_signalp, site_rows, scored_genes
 
-    def collect_mutant_sites(self, directories, threshold, mutation_index=None, signalp_cache=None):
+    def collect_mutant_sites(self, directories, threshold, mutation_index=None, signalp_cache=None,
+                             pkey_map=None):
         """Collect mutant site predictions keyed by pkey."""
         mut_sites_by_pkey: dict[str, list[dict]] = {}
         mut_signalp: dict[str, dict] = {}
@@ -1906,14 +1923,24 @@ class RobustDockerNetNGlyc:
                 )
                 signalp_map = parse_signalp_summary(str(file_path))
                 for seq_name, predictions in predictions_by_seq.items():
-                    gene_name, mutation_id = extract_mutation_from_sequence_name(seq_name)
+                    # pkey_map resolves a hashed sequence name back to its token;
+                    # without one this is the previous rsplit behaviour, so the
+                    # call is correct against either header format.
+                    gene_name, mutation_id = extract_mutation_from_sequence_name(
+                        seq_name, pkey_map=pkey_map)
                     if not mutation_id:
                         continue
                     gene_key = (gene_name or "").upper()
                     mut_id_norm = normalize_mutation_id(mutation_id)
                     if mutation_index and (gene_key not in mutation_index or mut_id_norm not in mutation_index[gene_key]):
                         continue
-                    pkey = f"{gene_key}-{mut_id_norm}"
+                    # Mint from the VERBATIM token, never the normalized one.
+                    # normalize_mutation_id upper-cases, so 'gd.G199C' becomes
+                    # 'GD.G199C' and hashes to a different digest than the one
+                    # variant_mapping wrote -- the pkey would then exist in no
+                    # mapping and every join for that variant would miss in
+                    # silence. Verified: sha(gd.G199C) != sha(GD.G199C).
+                    pkey = mint_pkey(gene_key, mutation_id)
                     scored_pkeys.add(pkey)
                     seq_signalp = signalp_map.get(seq_name, {})
                     if not seq_signalp:
@@ -2436,9 +2463,13 @@ class RobustDockerNetNGlyc:
         sites_rows = wt_site_rows + mut_site_rows
         expected_pkeys = set(mut_sites_by_pkey.keys())
         for gene, mutation_ids in mutation_index.items():
+            # Same normalisation caveat as the synthesis path: load_mutation_index
+            # upper-cases, so resolve through the index before falling back.
+            _idx = load_token_pkey_index(mapping_lookup.get(gene), gene) if mapping_lookup else {}
             for mut_id in mutation_ids:
-                expected_pkeys.add(f"{gene}-{mut_id}")
-                pkey_gene_map.setdefault(f"{gene}-{mut_id}", gene)
+                _pk = _idx.get(mut_id) or mint_pkey(gene, mut_id)
+                expected_pkeys.add(_pk)
+                pkey_gene_map.setdefault(_pk, gene)
         # A token whose build failure was NAMED must get a row even when
         # mutation_index cannot see it. load_mutation_index reads the mapping file
         # with csv.DictReader, so a headerless single-column file contributes
@@ -2457,6 +2488,14 @@ class RobustDockerNetNGlyc:
                 continue
             expected_pkeys.add(failed_pkey)
             pkey_gene_map.setdefault(failed_pkey, owner)
+        # pkey -> verbatim token, for every mapping this run knows. Sequence names
+        # and pkeys are {GENE}-{sha}, so the token is not recoverable by string
+        # surgery on the pkey; it comes from the mapping variant_mapping wrote.
+        pkey_map_all = {}
+        for _g, _mf in (mapping_lookup or {}).items():
+            for _tok, _pk in load_token_pkey_index(_mf, _g).items():
+                pkey_map_all.setdefault(_pk, _tok)
+
         summary_rows = []
         events_rows = []
         for pkey in sorted(expected_pkeys):
@@ -2469,8 +2508,7 @@ class RobustDockerNetNGlyc:
             mut_sig = mut_signalp.get(pkey)
             # Strip the resolved gene prefix; splitting on the first '-' would
             # return "A-C11G" for a hyphenated symbol such as HLA-A.
-            prefix = f"{gene}-"
-            token = pkey[len(prefix):] if pkey.startswith(prefix) else ""
+            token = token_from_name(pkey, gene, pkey_map_all)
             align = _aa_alignment(
                 token,
                 wt_proteins.get(gene),

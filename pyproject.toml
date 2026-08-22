@@ -1,12 +1,33 @@
 [build-system]
-requires = ["setuptools>=61.0"]
+# setuptools >= 77 for PEP 639 SPDX `license` / `license-files` support.
+requires = ["setuptools>=77.0"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "biofeaturefactory"
 version = "0.1.0"
 description = "BioFeatureFactory — feature extraction for disease-associated mutations"
-requires-python = ">=3.9"
+# Upper bound is load-bearing: numpy is pinned <2 below, and numpy 1.26.4 (the
+# last 1.x) publishes no wheel past cp312. Without the cap, pip on cp313+ falls
+# back to the numpy sdist and tries to compile it. Raise both together or neither.
+requires-python = ">=3.9,<3.13"
+license = "AGPL-3.0-or-later"
+license-files = ["LICENSE"]
+authors = [{ name = "Jacob Goldmintz" }]
+keywords = [
+    "bioinformatics",
+    "genomics",
+    "variant annotation",
+    "feature engineering",
+    "pipelines",
+]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Science/Research",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3",
+    "Topic :: Scientific/Engineering :: Bio-Informatics",
+]
 dependencies = [
     "biopython>=1.79",
     "pandas>=1.3.0",
@@ -16,8 +37,115 @@ dependencies = [
     "scipy>=1.7.0",
 ]
 
+[project.urls]
+Homepage = "https://github.com/jgoldmintz/biofeaturefactory"
+Repository = "https://github.com/jgoldmintz/biofeaturefactory"
+
+# ── Packaging ────────────────────────────────────────────────────────────
+# include-package-data = false is LOAD-BEARING. pyproject.toml defaults it to
+# TRUE, and with it on setuptools treats every file under a package directory as
+# shippable data — including .py files that live in a NON-package subdirectory.
+# scripts/bootstrap.sh clones upstream repos INTO this tree, and none of them have
+# a complete __init__.py chain, so the default silently packaged all of nsp3,
+# alphafold3/src, EVmutation and adabmDCApy as data of their nearest parent
+# package. Measured: 61 packaged directories with the default, 18 with it off.
+# Everything this project actually ships is declared in [tool.setuptools.package-data].
+[tool.setuptools]
+include-package-data = false
+
+# ── Package discovery ────────────────────────────────────────────────────
+# namespaces = false is LOAD-BEARING, not stylistic. Under pyproject.toml the
+# `find` directive defaults to namespaces = true, i.e. find_namespace_packages,
+# which needs no __init__.py and therefore sweeps in every third-party repo that
+# scripts/bootstrap.sh clones INTO this tree (NetSurfP3/nsp3, alphafold3/alphafold3,
+# mutation_effects/{EVmutation,plmc,adabmDCApy}, rare_codon/cg_cotrans) plus
+# transient run output (miranda/<GENE>/, mutation_effects/work/). Measured on this
+# tree: 118 packages with the default, 18 with namespaces = false. The `exclude`
+# list below then pins that intent even if a vendored clone later grows a complete
+# __init__.py chain.
 [tool.setuptools.packages.find]
 include = ["biofeaturefactory*"]
+namespaces = false
+exclude = [
+    # Vendored upstream clones — installed separately (see bootstrap step 8b) or
+    # used from their checkout via sys.path (EVmutation), never redistributed here.
+    "biofeaturefactory.NetSurfP3.nsp3*",
+    "biofeaturefactory.alphafold3.alphafold3*",
+    "biofeaturefactory.mutation_effects.EVmutation*",
+    "biofeaturefactory.mutation_effects.plmc*",
+    "biofeaturefactory.mutation_effects.adabmDCApy*",
+    "biofeaturefactory.rare_codon.cg_cotrans*",
+    "biofeaturefactory.genesplicer.GeneSplicer*",
+    # Run artefacts that can appear inside the tree.
+    "biofeaturefactory.mutation_effects.work*",
+    "biofeaturefactory.*.work*",
+]
+
+# Non-Python runtime assets. Without these the pipelines install but cannot run:
+# the Nextflow entrypoints and the SLURM array template are read from disk at
+# call time, not imported.
+# CAVEAT: wheels do not preserve the executable bit, so netNglyc/bin/signalp6_adapter
+# arrives mode 644 from a wheel install. The netNglyc README's tcsh SIGNALP patch
+# points at this path; chmod +x it after a non-editable install. Editable installs
+# (bootstrap step 2, `pip install -e .`) keep the bit.
+[tool.setuptools.package-data]
+"biofeaturefactory.spliceai.bin" = ["*.nf", "*.config"]
+"biofeaturefactory.mutation_effects.bin" = ["*.nf", "*.config"]
+"biofeaturefactory.alphafold3.bin" = ["*.tmpl", "*.sh"]
+"biofeaturefactory.netNglyc" = ["bin/signalp6_adapter"]
+
+# ── Console entry points ─────────────────────────────────────────────────
+# Layering is lib -> core -> pipelines. `lib/` is import-only and deliberately
+# exposes no scripts. `core/` produces the inputs every pipeline consumes; the
+# rest are consumers.
+#
+# NOT exposed here. A console script that cannot start is worse than an absent
+# one, so each omission below is a measured import failure, not an oversight:
+#
+#   mutEffects_controller.py / spliceai_pipeline_controller.py
+#       No module-level main(). Their guard is `run_controller(parse_args())`,
+#       which is not a zero-argument callable. Run with `python -m` until each
+#       grows a main() wrapper.
+#   evmutation_pipeline.py
+#       :52 sets _BIN_DIR = <pkg>/mutation_effects/bin and inserts THAT on
+#       sys.path, but the EVmutation clone lands one level up at
+#       <pkg>/mutation_effects/EVmutation/ (bootstrap step 3). :69
+#       `from EVmutation.model import ...` therefore raises ModuleNotFoundError
+#       regardless of how it is invoked. Anchor the shim at SCRIPT_DIR instead.
+#   rare_codon_pipeline.py
+#       :61 and :71 import bare siblings (`calc_rare_enrichment`, `codons`),
+#       which resolve only when sys.path[0] is the script's own directory —
+#       true for `python <path>.py`, false for an installed console script.
+#   rare_codon/calc_*.py
+#       Inline-__main__ analysis tools with no main(); invoked by
+#       rare_codon_pipeline.py, not by users.
+#
+# Re-add the two pipeline entries once their sibling/clone imports are anchored
+# on __file__; `scripts/bootstrap.sh` step 8c reports the live resolution state.
+[project.scripts]
+# core — input producers
+bff-variant-mapping = "biofeaturefactory.core.variant_mapping:main"
+bff-vcf-converter   = "biofeaturefactory.core.vcf_converter:main"
+bff-msa-generation  = "biofeaturefactory.core.msa_generation_pipeline:main"
+bff-codon-msa       = "biofeaturefactory.core.codon_msa_pipeline:main"
+# pipelines — consumers
+bff-netnglyc      = "biofeaturefactory.netNglyc.netnglyc_pipeline:main"
+bff-netphos       = "biofeaturefactory.netphos.netphos_pipeline:main"
+bff-netmhc        = "biofeaturefactory.netMHC.netmhc_pipeline:main"
+bff-netsurfp3     = "biofeaturefactory.NetSurfP3.netsurfp3_pipeline:main"
+bff-rnafold       = "biofeaturefactory.RNAfold.run_viennaRNA_pipeline:main"
+bff-miranda       = "biofeaturefactory.miranda.miranda_ensemble:main"
+bff-genesplicer   = "biofeaturefactory.genesplicer.genesplicer_ensemble:main"
+bff-codon-usage   = "biofeaturefactory.codon_usage.codon_usage_pipeline:main"
+bff-adabmdca      = "biofeaturefactory.mutation_effects.adabmdca_pipeline:main"
+# `bff-spliceai` is deliberately NOT this tool: annot_to_spliceai.py converts an
+# annotation table into SpliceAI's input format, it does not run SpliceAI. The
+# bare name is reserved for spliceai_pipeline_controller.py once that grows a
+# main(). A pre-existing local install may still carry a `bff-spliceai` shim
+# pointing here; `pip install -e .` clears it.
+bff-spliceai-annot = "biofeaturefactory.spliceai.annot_to_spliceai:main"
+bff-alphafold3    = "biofeaturefactory.alphafold3.alphafold3_pipeline:main"
+bff-af3-burst     = "biofeaturefactory.alphafold3.burst:main"
 
 [project.optional-dependencies]
 rnafold = ["ViennaRNA"]

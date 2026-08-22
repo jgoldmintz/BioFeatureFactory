@@ -28,7 +28,7 @@ import sys
 from collections import OrderedDict
 from pathlib import Path
 
-from biofeaturefactory.utils.utility import (
+from biofeaturefactory.lib.utility import (
     _collect_failures_from_logs,
     Variant,
     canonical_token,

@@ -49,15 +49,16 @@ import multiprocessing
 import concurrent.futures
 
 # ---------------------------------------------------------------------------
-# imports from biofeaturefactory.utils.utility
+# imports from biofeaturefactory.lib.utility
 # ---------------------------------------------------------------------------
-from biofeaturefactory.utils.utility import (
+from biofeaturefactory.lib.utility import (
     read_fasta,
     parse_variant,
     splice_seq,
     load_validation_failures,
     should_skip_mutation,
     extract_gene_from_filename,
+    mint_pkey,
 )
 
 # ---------------------------------------------------------------------------
@@ -1130,6 +1131,11 @@ def _process_gene(fasta_path: Path,
     # expect 'mutant' and 'genomic'
     mutant_col = cols.get("mutant") or cols.get("mutation") or cols.get("mut")
     genomic_col = cols.get("genomic") or cols.get("genomic_nt") or cols.get("genomic_mut") or cols.get("genomicmutation")
+    # variant_mapping writes the pkey as column 1 of every mapping it emits. Use it
+    # verbatim rather than re-deriving: it is the exact key every other table joins
+    # on, and re-minting would diverge for any token this row spells differently
+    # (case, whitespace) from the one the mapping hashed.
+    pkey_col = cols.get("pkey")
 
     if not mutant_col or not genomic_col:
         return _abandon_gene("mapping_missing_mutant_or_genomic_column")
@@ -1156,7 +1162,9 @@ def _process_gene(fasta_path: Path,
         mutant_tok = str(row[mutant_col]).strip()
         genomic_tok = str(row[genomic_col]).strip()
 
-        pkey = f"{gene_name}-{mutant_tok}"
+        # Mint only when the mapping predates the pkey column.
+        pkey = (str(row[pkey_col]).strip() if pkey_col
+                else mint_pkey(gene_name, mutant_tok))
 
         # skip by validation logs if needed
         if should_skip_mutation(gene_name, mutant_tok, failure_map):

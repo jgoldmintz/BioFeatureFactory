@@ -48,7 +48,9 @@ from concurrent.futures import ThreadPoolExecutor
 # discover_fasta_files, ExtractGeneFromFASTA, parse_predictions_with_mutation_filtering,
 # load_wt_sequences, extract_mutation_from_sequence_name) plus `time`, `logging` and
 # the typing aliases were imported but never referenced anywhere in this module.
-from biofeaturefactory.utils.utility import (
+from biofeaturefactory.lib.utility import (
+    mint_pkey,
+    token_from_name,
     write_fasta,
     write_tsv,
     load_validation_failures,
@@ -574,7 +576,7 @@ def _event_row(gene_name, mutation, variant_class, aa_consequence, allele,
 
     return {
         'Gene': gene_name,
-        'pkey': f"{gene_name}-{mutation}",
+        'pkey': mint_pkey(gene_name, mutation),
         'mutation': mutation,
         'wt_peptide': wt_pred['peptide'] if wt_pred else '',
         'mut_peptide': mut_pred['peptide'] if mut_pred else '',
@@ -707,7 +709,7 @@ def blank_summary_row(gene_name, mutation, qc_flags, variant_class='', aa_conseq
     """
     row = {name: '' for name in SUMMARY_FIELDNAMES}
     row.update({
-        'pkey': f"{gene_name}-{mutation}",
+        'pkey': mint_pkey(gene_name, mutation),
         'Gene': gene_name,
         'mutation': mutation,
         'variant_class': variant_class,
@@ -788,7 +790,7 @@ def summarize_epitope_changes(gene_name, mutation, events, threshold=0.5,
         qc_flags.append("no_aligned_registers")
 
     return {
-        'pkey': f"{gene_name}-{mutation}",
+        'pkey': mint_pkey(gene_name, mutation),
         'Gene': gene_name,
         'mutation': mutation,
         'n_epitopes_wt': n_epitopes_wt,
@@ -1135,9 +1137,12 @@ def main():
         mapping_file = mutation_files.get(gene_name)
         if not mapping_file:
             run_summary["genes_without_mutation_file"].append(gene_name)
+        # Sequence names are {GENE}-{sha}; pkey_map carries name -> token so the
+        # token spelling is recovered from the map, not by parsing the name.
+        pkey_map = {}
         mutant_seqs = build_mutant_sequences_for_gene(
             gene_name, wt_nt_seq, wt_aa_seq, mapping_file, args.log, failure_map,
-            input_type=build_input_type, non_snp=True
+            input_type=build_input_type, non_snp=True, pkey_map=pkey_map
         )
 
         pending_tokens = pending_mutation_tokens(mapping_file, gene_name, args.log, failure_map)
@@ -1150,7 +1155,7 @@ def main():
         # rejecting a token that is perfectly well defined.
         if build_input_type == 'aa':
             for token in pending_tokens:
-                header = f"{gene_name}-{token}"
+                header = mint_pkey(gene_name, token)
                 if header in mutant_seqs:
                     continue
                 variant = parse_variant(token, is_nt=False)
@@ -1175,6 +1180,7 @@ def main():
                 spliced = spliced.split('*')[0]
                 if spliced:
                     mutant_seqs[header] = spliced
+                    pkey_map[header] = token
 
         if args.verbose:
             print(f"  Generated {len(mutant_seqs)} mutant sequences")
@@ -1229,10 +1235,10 @@ def main():
             # serial process-spawn cost.
             def _process_mutant(item):
                 mut_header, mut_aa_seq = item
-                # Key is f"{gene_name}-{mutant_clean}" (utility.py); strip the exact
+                # Key is the {GENE}-{sha} sequence name (utility.py mint_pkey);
                 # gene-name prefix so hyphenated genes (NKX2-1, HLA-A, MT-CO1)
                 # parse correctly instead of split('-',1) corrupting the token.
-                mutation = mut_header[len(gene_name) + 1:] if mut_header.startswith(f"{gene_name}-") else mut_header
+                mutation = token_from_name(mut_header, gene_name, pkey_map)
                 try:
                     # Bounded stem, not the raw token: an indel token can be
                     # hundreds of characters and blew past NAME_MAX (see
@@ -1249,7 +1255,7 @@ def main():
                     if args.verbose:
                         print(f"  {mutation}: {len(mut_predictions)} predictions")
                     site_rows = [
-                        {'Gene': gene_name, 'pkey': f"{gene_name}-{mutation}",
+                        {'Gene': gene_name, 'pkey': mint_pkey(gene_name, mutation),
                          'sequence_type': 'mut', **pred}
                         for pred in mut_predictions
                     ]

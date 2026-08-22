@@ -160,6 +160,42 @@ class TestBuildMutantSequencesForGene:
         assert result["TEST-C3F"] == "MKFD"
         assert result["TEST-D4E"] == "MKCE"
 
+    def test_one_poison_token_does_not_discard_the_gene(self, tmp_path):
+        """A token that raises must cost its own row and nothing else.
+
+        Before the per-token guard, the single try/except around the whole loop
+        turned any raising token into `return {}` -- every valid mutant for the
+        gene was discarded at exit 0. An indel token raises in int() on the
+        token interior, so it is the cheapest way to reproduce that.
+        """
+        mut_file = _write(tmp_path / "muts.csv", "mutant\nK2R\nACAA7A\nC3F\nD4E\n")
+        result = build_mutant_sequences_for_gene(
+            gene_name="TEST",
+            nt_sequence=self.WT_NT,
+            aa_sequence=self.WT_AA,
+            mapping_file=mut_file,
+            log_path=None,
+            failure_map=None,
+            input_type="aa",
+        )
+        assert len(result) == 3, f"poison token discarded valid mutants: {result}"
+        assert {"TEST-K2R", "TEST-C3F", "TEST-D4E"} == set(result)
+        assert result["TEST-K2R"] == "MRCD"
+
+    def test_file_level_failure_still_returns_empty(self, tmp_path):
+        """The outer guard must survive: a directory is not a readable mapping file."""
+        d = tmp_path / "not_a_file"
+        d.mkdir()
+        assert build_mutant_sequences_for_gene(
+            gene_name="TEST",
+            nt_sequence=self.WT_NT,
+            aa_sequence=self.WT_AA,
+            mapping_file=d,
+            log_path=None,
+            failure_map=None,
+            input_type="aa",
+        ) == {}
+
     def test_header_line_skipped_single_column(self, tmp_path):
         mut_file = _write(tmp_path / "muts.csv", "mutant\nK2R\n")
         result = build_mutant_sequences_for_gene(

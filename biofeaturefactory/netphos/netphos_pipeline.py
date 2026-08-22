@@ -35,7 +35,9 @@ import json
 import platform
 from pathlib import Path
 
-from biofeaturefactory.utils.utility import (
+from biofeaturefactory.lib.utility import (
+    mint_pkey,
+    token_from_name,
     split_fasta_into_batches,
     combine_batch_outputs,
     discover_mapping_files,
@@ -846,9 +848,10 @@ def synthesize_with_context(wt_sequences, mapping_lookup, sequence_root,
                             log_path=None, failure_map=None):
     """Write WT/MUT protein FASTAs and return the accounting needed to compare them.
 
-    Returns (wt_dir, mut_dir, summary, variant_ctx, rejected):
+    Returns (wt_dir, mut_dir, summary, variant_ctx, rejected, pkey_map):
       summary      per-gene dict, same shape synthesize_gene_fastas returned
       variant_ctx  (gene, token) -> _alignment_context dict, for every mutant built
+      pkey_map     sequence name ({GENE}-{sha}) -> verbatim mutation token
       rejected     (gene, token) -> reason string, for every requested token that
                    was not built
 
@@ -864,6 +867,9 @@ def synthesize_with_context(wt_sequences, mapping_lookup, sequence_root,
 
     summary = []
     variant_ctx = {}
+    # Sequence names are {GENE}-{sha}; this carries name -> token so the
+    # prediction parser can recover the spelling without parsing the name.
+    pkey_map = {}
     rejected = {}
 
     for gene_name, wt_seq in wt_sequences.items():
@@ -917,7 +923,7 @@ def synthesize_with_context(wt_sequences, mapping_lookup, sequence_root,
         # length-changing is a fact of the record, decided per token.
         mutant_sequences = build_mutant_sequences_for_gene(
             gene_name, nt_for_build, aa_seq, mapping_file, log_path, failure_map,
-            input_type=build_input_type, non_snp=True,
+            input_type=build_input_type, non_snp=True, pkey_map=pkey_map,
         )
 
         # Protein WT input only: recover the non-SNV aa tokens the shared builder
@@ -927,26 +933,26 @@ def synthesize_with_context(wt_sequences, mapping_lookup, sequence_root,
         # existing aa path is untouched.
         if build_input_type == 'aa':
             for token in requested:
-                header = f"{gene_name}-{token}"
+                header = mint_pkey(gene_name, token)
                 if header in mutant_sequences:
                     continue
                 built = _aa_level_non_snv_protein(token, aa_seq)
                 if built:
                     mutant_sequences[header] = built
+                    pkey_map[header] = token
 
         mut_path = None
         if mutant_sequences:
             mut_path = mut_dir / f"{gene_name}_aa.fasta"
             write_fasta(mut_path, mutant_sequences)
 
-        prefix = f"{gene_name}-"
         for header, mut_prot in mutant_sequences.items():
-            token = header[len(prefix):] if header.startswith(prefix) else header
+            token = token_from_name(header, gene_name, pkey_map)
             variant_ctx[(gene_key, token)] = _alignment_context(
                 token, nt_for_build, aa_seq, mut_prot, build_input_type == 'nt')
 
         for token in requested:
-            if f"{gene_name}-{token}" in mutant_sequences:
+            if mint_pkey(gene_name, token) in mutant_sequences:
                 continue
             rejected[(gene_key, token)] = _rejection_reason(
                 token, nt_for_build, build_input_type == 'nt')
@@ -958,7 +964,7 @@ def synthesize_with_context(wt_sequences, mapping_lookup, sequence_root,
             "mutant_count": len(mutant_sequences),
         })
 
-    return wt_dir, mut_dir, summary, variant_ctx, rejected
+    return wt_dir, mut_dir, summary, variant_ctx, rejected, pkey_map
 
 
 # ---------------------------------------------------------------------------
@@ -1106,7 +1112,7 @@ def build_netphos_ensemble(wt_preds_by_gene, mut_preds_by_mutation, variant_ctx,
         return sum(1 for p in wt_map.values() if p['score'] >= threshold)
 
     for (gene, nt_mutation), mut_preds in mut_preds_by_mutation.items():
-        pkey = f"{gene}-{nt_mutation}"
+        pkey = mint_pkey(gene, nt_mutation)
         wt_preds = wt_preds_by_gene.get(gene, [])
         ctx = variant_ctx.get((gene, nt_mutation)) if variant_ctx else None
         wt_to_mut, mut_to_wt = _residue_projection(ctx)
@@ -1370,7 +1376,7 @@ def build_netphos_ensemble(wt_preds_by_gene, mut_preds_by_mutation, variant_ctx,
             qc_flags.append(reason)
 
         summary_rows.append(_eventless_summary_row(
-            f"{gene}-{nt_mutation}", gene, _wt_site_count(wt_map), qc_flags,
+            mint_pkey(gene, nt_mutation), gene, _wt_site_count(wt_map), qc_flags,
             mut_measured=reason is None))
 
     return summary_rows, events_rows, sites_rows
@@ -1499,7 +1505,7 @@ def _run_netphos_on_directory(fasta_dir, output_dir, args, executor_fn, ape_bin)
     return outputs
 
 
-def _pair_predictions_with_mutations(wt_dir, mut_dir):
+def _pair_predictions_with_mutations(wt_dir, mut_dir, pkey_map=None):
     """Parse WT and MUT output directories and pair predictions by gene/mutation.
 
     Gene keys are normalized here and in synthesize_with_context by the same
@@ -1520,7 +1526,7 @@ def _pair_predictions_with_mutations(wt_dir, mut_dir):
     mut_preds_by_mutation = {}
     mut_raw = _parse_directory_predictions(mut_dir)
     for seq_name, preds in mut_raw.items():
-        gene, mutation = extract_mutation_from_sequence_name(seq_name)
+        gene, mutation = extract_mutation_from_sequence_name(seq_name, pkey_map=pkey_map)
         gene = gene.upper().replace('_AA', '')
         gene_clean = extract_gene_from_filename(gene) or gene
         if mutation:
@@ -1565,7 +1571,7 @@ def run_full_pipeline_mode(args, executor_fn, ape_bin):
     # mode has to be selected.
     work_dir = tempfile.mkdtemp(prefix="netphos_pipeline_")
     seq_root = os.path.join(work_dir, "sequences")
-    wt_dir, mut_dir, synth_summary, variant_ctx, rejected = synthesize_with_context(
+    wt_dir, mut_dir, synth_summary, variant_ctx, rejected, pkey_map = synthesize_with_context(
         wt_sequences, mapping_lookup, seq_root,
         log_path=args.log, failure_map=failure_map,
     )
@@ -1601,7 +1607,7 @@ def run_full_pipeline_mode(args, executor_fn, ape_bin):
 
     # Parse and pair predictions
     wt_preds_by_gene, mut_preds_by_mutation = _pair_predictions_with_mutations(
-        str(wt_output_dir), str(mut_output_dir))
+        str(wt_output_dir), str(mut_output_dir), pkey_map)
 
     # Build ensemble
     summary, events, sites = build_netphos_ensemble(

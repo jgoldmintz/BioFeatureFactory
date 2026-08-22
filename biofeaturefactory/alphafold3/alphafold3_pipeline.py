@@ -50,7 +50,7 @@ from biofeaturefactory.alphafold3.bin.binding_metrics import (
     format_events_rows, format_sites_rows
 )
 
-from biofeaturefactory.utils.utility import (
+from biofeaturefactory.lib.utility import (
     read_fasta, trim_muts, get_mutation_data_bioAccurate,
     extract_gene_from_filename, subseq, load_mapping,
     _collect_failures_from_logs, write_tsv,

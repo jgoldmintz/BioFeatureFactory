@@ -16,4 +16,4 @@
 
 """BioFeatureFactory utilities package."""
 
-from biofeaturefactory.utils.utility import *
+from biofeaturefactory.lib.utility import *

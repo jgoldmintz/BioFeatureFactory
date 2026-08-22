@@ -42,7 +42,7 @@ import tempfile
 import json
 from pathlib import Path
 import numpy as np
-from biofeaturefactory.utils.utility import (
+from biofeaturefactory.lib.utility import (
     read_fasta,
     write_fasta,
     codon_to_aa,
@@ -408,7 +408,7 @@ def _find_best_coding_offset(protein_seq_aligned, nt_seq):
 
 def _load_focus_nt_from_fasta(focus_nt_fasta):
     """
-    Load focus ORF nucleotide sequence from a FASTA produced by exon_aware_mapping.
+    Load focus ORF nucleotide sequence from a FASTA produced by variant_mapping.
 
     Preference:
       1) Record named exactly ORF (case-insensitive)
@@ -786,16 +786,59 @@ def generate_codon_msa_from_focus(
     hit_nt_id     = {}  # acc -> nucleotide_seq_id from CDS file
     hit_cand_meta = {}  # acc -> candidate dict
 
+    # Rows for hits dropped BEFORE alignment. Every other failure path writes a
+    # manifest row; these two did not, so a CDS discarded here was
+    # indistinguishable from a hit mmseqs never returned.
+    predrop_rows = []
+
+    def _predrop(acc, status, reason, cand=None, nt_len=''):
+        predrop_rows.append({
+            'protein_seq_id': acc, 'raw_extracted_id': acc, 'lookup_protein_id': acc,
+            'nucleotide_seq_id': (cand or {}).get('nucleotide_seq_id', ''),
+            'status': status, 'reason': reason,
+            'source_assembly': (cand or {}).get('source_assembly', ''),
+            'matched_protein_id': (cand or {}).get('nucleotide_seq_id', ''),
+            'min_seqid_threshold': min_backtranslation_seqid,
+            'observed_seqid': '', 'compared_positions': '',
+            'translation_mismatch_count': '', 'protein_alignment_length': '',
+            'protein_residue_count': '', 'nucleotide_length': nt_len,
+            'nucleotide_codon_count': (nt_len // 3) if isinstance(nt_len, int) else '',
+            'expected_coding_nt': '', 'remaining_nt_after_backtranslation': '',
+        })
+
+    # Hits whose CDS could not be resolved at all. _resolve_nt_from_assemblies
+    # builds a specific reason for each of these and the return value was
+    # previously bound and never read, so all four reasons were thrown away.
+    for acc, reason in (assembly_unresolved or {}).items():
+        _predrop(acc, 'FAIL_NO_CDS_RESOLVED', reason)
+
     for acc, candidates in assembly_matches.items():
         if not candidates:
+            _predrop(acc, 'FAIL_NO_CDS_RESOLVED', 'No candidate CDS records')
             continue
         cand = candidates[0]
+        if len(candidates) > 1:
+            # Only candidates[0] is used. Say which alternatives were dropped and
+            # whether they actually differ, instead of picking silently: the order
+            # comes from filesystem iteration, so on disagreement the choice is
+            # arbitrary.
+            others = [f"{c.get('nucleotide_seq_id','')}@{c.get('source_assembly','')}"
+                      for c in candidates[1:]]
+            distinct = len({c['nucleotide_seq'] for c in candidates})
+            print(f"Warning: {acc}: {len(candidates)} CDS candidates, "
+                  f"{distinct} distinct sequence(s); using "
+                  f"{cand.get('nucleotide_seq_id','')}@{cand.get('source_assembly','')}, "
+                  f"ignoring {', '.join(others)}", file=sys.stderr)
         nt_seq = cand['nucleotide_seq']
         translated = _translate_nt_to_aa(nt_seq)
         if translated.endswith('*'):
             translated = translated[:-1]
         if '*' in translated:
-            continue  # internal stop codon — corrupted/frameshifted CDS
+            _predrop(acc, 'FAIL_INTERNAL_STOP',
+                     f'Internal stop codon in translated CDS '
+                     f'({translated.count("*")} stop(s)); corrupted or frameshifted',
+                     cand, len(nt_seq))
+            continue
         hit_proteins[acc]  = translated
         hit_cds[acc]       = nt_seq
         hit_assembly[acc]  = cand.get('source_assembly', '')
@@ -814,8 +857,8 @@ def generate_codon_msa_from_focus(
 
     # 7. Back-translate each row.
     codon_msa     = {}
-    manifest_rows = []
-    failed        = []
+    manifest_rows = list(predrop_rows)
+    failed        = [r['protein_seq_id'] for r in predrop_rows]
 
     # Focus sequence first.
     focus_aligned = aligned_proteins.get(focus_seq_id, focus_protein_ungapped)
@@ -984,7 +1027,9 @@ def generate_codon_msa_from_focus(
 
     # Compute and write stats JSON (mirrors msa_generation_pipeline.py output)
     focus_id = focus_seq_id
-    query_length = len(focus_nt_seq) // 3  # codon positions
+    # Residue count, NOT len(nt)//3: focus_protein_ungapped strips a trailing
+    # stop above, so counting the stop here made n_eff_ratio one codon light.
+    query_length = len(focus_protein_ungapped)  # codon positions
     n_seqs = len(codon_msa)
     neff = compute_neff(codon_msa, identity_threshold=0.8, codon_mode=True)
     neff_ratio = neff / query_length if query_length > 0 else 0.0
@@ -1040,7 +1085,7 @@ Example:
     )
 
     parser.add_argument('--fasta', required=True,
-                        help='FASTA with focus ORF nt sequence (exon_aware_mapping output)')
+                        help='FASTA with focus ORF nt sequence (variant_mapping output)')
 
     parser.add_argument('--db-root', required=True,
                         help='Bio_DBs root directory produced by scripts/build_db.sh '

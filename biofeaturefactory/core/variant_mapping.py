@@ -56,7 +56,7 @@ from pathlib import Path
 import pysam
 import warnings
 
-from biofeaturefactory.utils.utility import (
+from biofeaturefactory.lib.utility import (
     trim_muts,
     extract_gene_from_filename,
     get_genome_loc,
@@ -496,12 +496,6 @@ def write_dict_csv(path: Path, fieldnames: list[str], rows: list[dict]) -> None:
             w.writerow({k: r.get(k, "") for k in fieldnames})
 
 
-def write_mapping_csv(path: Path, header_label: str, rows: list[tuple[str, str]]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with open(path, "w", newline="") as f:
-        w = csv.writer(f)
-        w.writerow(["mutant", header_label])
-        w.writerows(rows)
 
 
 # Core builders
@@ -1016,88 +1010,12 @@ def check_pre_mrna_splices_to_transcript(tx_map: dict) -> tuple[bool, str]:
     )
 
 
-PIECE_RE = re.compile(r"^(?:(intron\d+):)?([ACGTU]+)(\d+)(?:([ACGTU]+)|del)$", re.I)
 
 
-def parse_piece_token(token: str):
-    """Read one decomposed piece back: 'CAG79A', 'GTGAGGTCG1del', 'intron1:T501A'.
-
-    Returns {record, ref, pos, alt, deleted} or None. `alt` is '' when the piece
-    is wholly deleted, and `deleted` says so explicitly rather than making the
-    caller test for an empty string.
-
-    This is deliberately NOT parse_variant. A piece is a FRAGMENT of one edit,
-    not a variant: a spanning deletion retains a single anchor base that belongs
-    to exactly one piece, so the others have no ALT at all. Variant refuses an
-    empty allele at construction (utility.py:342) precisely so that a pure
-    deletion cannot be represented without the VCF anchor convention -- which is
-    right for whole variants and impossible for pieces.
-
-    Keeping them separate preserves the fail-closed property: parse_variant
-    returns None for 'GTGAGGTCG1del', so a pipeline that does not understand
-    decomposition drops the piece instead of scoring a fragment as if it were
-    the whole edit.
-    """
-    if not isinstance(token, str):
-        return None
-    m = PIECE_RE.match(token.strip())
-    if not m:
-        return None
-    record, ref, pos, alt = m.group(1), m.group(2).upper(), int(m.group(3)), m.group(4)
-    if pos < 1:
-        return None
-    return {"record": record, "ref": ref, "pos": pos,
-            "alt": (alt or "").upper(), "deleted": alt is None}
 
 
-def piece_fields(token: str):
-    """(pos1, ref, alt, kind, length_delta) for a piece token, or None.
-
-    The Variant-shaped view of a piece, so a consumer can treat a decomposed
-    piece and a whole variant through one code path. `kind` uses exactly the
-    vocabulary of Variant.kind (utility.py) -- snv, mnv, insertion, deletion,
-    delins -- with one extension: Variant cannot hold an empty allele, so its
-    rule for 'deletion' is len(alt) == 1, whereas a wholly deleted piece has
-    len(alt) == 0. Both are deletions.
-    """
-    d = parse_piece_token(token)
-    if d is None:
-        return None
-    ref, alt = d["ref"], d["alt"]
-    if len(ref) == 1 and len(alt) == 1:
-        kind = "snv"
-    elif len(ref) == len(alt):
-        kind = "mnv"
-    elif len(ref) == 1:
-        kind = "insertion"
-    elif len(alt) <= 1:
-        kind = "deletion"
-    else:
-        kind = "delins"
-    return d["pos"], ref, alt, kind, len(alt) - len(ref)
 
 
-def split_piece_cell(cell: str) -> list[str]:
-    """Split one mapping cell into its pieces: 'a' -> ['a'], '[a,b]' -> ['a','b'].
-
-    A variant spanning several features occupies several addresses in the orf,
-    intron and pre-mRNA columns, written as a bracketed list. Reading a cell is
-    therefore two steps -- split, then parse_piece_token each piece -- and the
-    split half was reimplemented per consumer (miranda inline, RNAfold in
-    _load_intron_premrna) while only parse_piece_token was shared. Two readers
-    of one format drift; this is the half that was missing.
-
-    Order is TRANSCRIPT order, matching classify_genomic_span, so the first
-    piece is the one carrying the edit's retained anchor base.
-    """
-    if not isinstance(cell, str):
-        return []
-    cell = cell.strip()
-    if not cell:
-        return []
-    if cell.startswith("[") and cell.endswith("]"):
-        return [p.strip() for p in cell[1:-1].split(",") if p.strip()]
-    return [cell]
 
 
 def genomic_to_orf(g_pos: int, tx_map: dict):
@@ -1295,6 +1213,31 @@ def map_genomic_variants(tokens: list[str], tx_map: dict, intron_index: list[dic
 
 # CLI
 
+# Output layout: <out>/<GENE>/<subdirs>. Everything this file writes is grouped
+# by gene, matching the rest of the system. It used to write
+# <out>/mappings/{type}/{file}_{GENE}.csv -- type-first, with the gene encoded
+# only in the filename -- so it was the one producer that did not group by gene.
+#
+# There is deliberately NO tool-name level here. The consumer pipelines nest
+# <GENE>/<Tool>/ because several of them write into one shared output tree and
+# need to not collide; this file is the source those pipelines read FROM, not
+# another tool writing alongside them.
+#
+# FILENAMES ARE UNCHANGED. Every downstream reader recovers the gene with
+# extract_gene_from_filename (discover_mapping_files, load_transcript_mappings,
+# _load_substrate_sequences all key on it), so renaming the files to bare
+# 'transcript.csv' would strip the gene out of the one place those readers look.
+
+
+def gene_out(output: Path, gene: str, *parts) -> Path:
+    """<output>/<GENE>/<parts...>, with parent directories created."""
+    path = Path(output) / gene
+    for part in parts:
+        path = path / part
+    path.parent.mkdir(parents=True, exist_ok=True)
+    return path
+
+
 def main(argv=None):
     p = argparse.ArgumentParser(
         description="Generate exon-aware mapping CSVs and FASTAs (ORF/transcript/genomic) per gene."
@@ -1331,6 +1274,7 @@ def main(argv=None):
 
     capture_verbose = args.verbose
     verbose_log: list[str] | None = [] if capture_verbose else None
+    gene_log_slices: dict[str, list[str]] = {}
     gene_metrics = {
         "total_genes": 0,
         "passed_genes": 0,
@@ -1380,6 +1324,11 @@ def main(argv=None):
         try:
             gene = extract_gene_from_filename(str(f))
             print(f"\n== {gene} ==")
+            # Where this gene's verbose messages start. emit_verbose appends to
+            # one flat list from deep inside the call stack, so slicing on entry
+            # and exit is what lets the log be written per gene without changing
+            # that contract.
+            _log_start = len(verbose_log) if verbose_log is not None else 0
 
             # Load mutations, then separate coordinate spaces BEFORE any ORF work.
             muts = trim_muts(str(f))
@@ -1490,8 +1439,7 @@ def main(argv=None):
             # whitespace-delimited word, so '>intron 5|...' collapses every
             # intron onto the key 'intron' and silently keeps only the last --
             # measured: 6 records written, 4 parsed back.
-            fasta_path = output / "fastas" / f"{gene}.fasta"
-            fasta_path.parent.mkdir(parents=True, exist_ok=True)
+            fasta_path = gene_out(output, gene, "fastas", f"{gene}.fasta")
 
             # pre_mRNA is the genomic span with the strand applied. Both records
             # are emitted: 'genomic' stays genomic-forward for tools that take a
@@ -1547,28 +1495,28 @@ def main(argv=None):
             # address exists. A variant spanning a splice site carries several,
             # bracketed.
             if do_chrom:
-                chrom_csv = output / "mappings" / "chromosome" / f"chr_mapping_{gene}.csv"
+                chrom_csv = gene_out(output, gene, "mappings", "chromosome", f"chr_mapping_{gene}.csv")
                 write_dict_csv(chrom_csv, ["pkey", "mutant", "orf", "chromosome"],
                                [{**r, "pkey": pkey_of.get(r["mutant"], ""),
                                  "chromosome": r["value"]} for r in chrom_dicts])
                 print(f"  Chromosome mapping: {chrom_csv}  ({len(chrom_dicts)} rows)")
 
             if do_genomic:
-                gdna_csv = output / "mappings" / "gDNA" / f"genomic_mapping_{gene}.csv"
+                gdna_csv = gene_out(output, gene, "mappings", "gDNA", f"genomic_mapping_{gene}.csv")
                 write_dict_csv(gdna_csv, ["pkey", "mutant", "orf", "genomic"],
                                [{**r, "pkey": pkey_of.get(r["mutant"], ""),
                                  "genomic": r["value"]} for r in gdna_dicts])
                 print(f"  Genomic mapping: {gdna_csv}  ({len(gdna_dicts)} rows)")
 
             if do_transcript:
-                tx_csv = output / "mappings" / "transcript" / f"transcript_mapping_{gene}.csv"
+                tx_csv = gene_out(output, gene, "mappings", "transcript", f"transcript_mapping_{gene}.csv")
                 write_dict_csv(tx_csv, ["pkey", "mutant", "transcript"],
                                [{"pkey": pkey_of.get(m, ""), "mutant": m,
                                  "transcript": v} for m, v in tx_rows])
                 print(f"  Transcript mapping: {tx_csv}  ({len(tx_rows)} rows)")
 
             if do_aa:
-                aa_csv = output / "mappings" / "aa" / f"{gene}_aa_mapping.csv"
+                aa_csv = gene_out(output, gene, "mappings", "aa", f"{gene}_aa_mapping.csv")
                 write_dict_csv(aa_csv, ["pkey", "mutant", "aamutant"],
                                [{"pkey": pkey_of.get(m, ""), "mutant": m,
                                  "aamutant": v} for m, v in aa_rows])
@@ -1581,8 +1529,8 @@ def main(argv=None):
             # piece of every class has a coordinate, so that column is always
             # populated.
             if do_premrna and ipm_dicts:
-                ipm_csv = (output / "mappings" / "intron_premRNA"
-                           / f"intron_premRNA_mapping_{gene}.csv")
+                ipm_csv = gene_out(output, gene, "mappings", "intron_premRNA",
+                                   f"intron_premRNA_mapping_{gene}.csv")
                 write_dict_csv(ipm_csv,
                                ["pkey", "mutant", "orf", "intron", "pre-mRNA-Transcript"],
                                [{**r, "pkey": pkey_of.get(r["mutant"], ""),
@@ -1597,13 +1545,12 @@ def main(argv=None):
             # rglobs a tree and keys purely on gene name, so a sixth mapping file
             # sharing a directory with the coordinate mappings would overwrite
             # one of them at random.
-            pkey_csv = output / "mappings" / "pkey" / f"pkey_mapping_{gene}.csv"
+            pkey_csv = gene_out(output, gene, "mappings", "pkey", f"pkey_mapping_{gene}.csv")
             write_dict_csv(pkey_csv, ["pkey", "mutant"],
                            [{"pkey": pkey_of[t], "mutant": t} for t in muts])
             print(f"  Pkey mapping: {pkey_csv}  ({len(muts)} rows)")
 
-            mut_dest = output / "mappings" / "mutations" / f"{gene}_mutations.csv"
-            mut_dest.parent.mkdir(parents=True, exist_ok=True)
+            mut_dest = gene_out(output, gene, "mappings", "mutations", f"{gene}_mutations.csv")
             shutil.copy2(f, mut_dest)
             print(f"  Mutations copy: {mut_dest}")
             total_mut = len(muts)
@@ -1655,6 +1602,14 @@ def main(argv=None):
             elif verbose_log is not None:
                 label = gene or extract_gene_from_filename(str(f)) or f.name
                 verbose_log.append(f"{label}: processing failed ('{fail_msg}').")
+        finally:
+            # Every exit from this gene -- success, validation failure, or
+            # exception -- lands here, so the slice is captured exactly once and
+            # no gene's messages are lost to an early continue.
+            if verbose_log is not None and gene:
+                _sl = verbose_log[_log_start:]
+                if _sl:
+                    gene_log_slices.setdefault(gene, []).extend(_sl)
 
     print(f"\nDone. Success: {ok}/{len(files)}")
     if fail:
@@ -1665,14 +1620,31 @@ def main(argv=None):
     if verbose_log:
         from datetime import datetime
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        log_path = output / f"validation_{timestamp}.log"
-        try:
-            log_path.parent.mkdir(parents=True, exist_ok=True)
-            with open(log_path, "w") as log_file:
-                log_file.write("\n".join(verbose_log) + "\n")
-            print(f"Verbose validation log written to {log_path}")
-        except Exception as exc:
-            print(f"Warning: Unable to write verbose log ({exc})", file=sys.stderr)
+        # One log PER GENE, under that gene's directory, so the whole output
+        # tree is grouped by gene with nothing loose at the root. A run-level
+        # file at <out>/validation_*.log was the only artifact this file wrote
+        # outside <out>/<GENE>/.
+        for _gene, _lines in (gene_log_slices or {}).items():
+            if not _lines:
+                continue
+            log_path = gene_out(output, _gene, f"validation_{timestamp}.log")
+            try:
+                with open(log_path, "w") as log_file:
+                    log_file.write("\n".join(_lines) + "\n")
+                print(f"Verbose validation log written to {log_path}")
+            except Exception as exc:
+                print(f"Warning: Unable to write verbose log for {_gene} ({exc})",
+                      file=sys.stderr)
+        _unassigned = [ln for ln in verbose_log
+                       if not any(ln in v for v in (gene_log_slices or {}).values())]
+        if _unassigned:
+            log_path = output / f"validation_{timestamp}.log"
+            try:
+                with open(log_path, "w") as log_file:
+                    log_file.write("\n".join(_unassigned) + "\n")
+                print(f"Run-level validation log written to {log_path}")
+            except Exception as exc:
+                print(f"Warning: Unable to write run-level log ({exc})", file=sys.stderr)
 
     if gene_metrics["total_genes"] > 0:
         print("\nGrand totals:")

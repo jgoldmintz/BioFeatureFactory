@@ -29,19 +29,53 @@ from urllib.parse import unquote
 from Bio.Seq import Seq
 from typing import Dict, Optional, Tuple
 
-chromosome_map = {
-    "GRCh37": {"1": "NC_000001.10", "2": "NC_000002.11", "3": "NC_000003.11", "4": "NC_000004.11", "5": "NC_000005.9",
-               "6": "NC_000006.11", "7": "NC_000007.13", "8": "NC_000008.10", "9": "NC_000009.11", "10": "NC_000010.10",
-               "11": "NC_000011.9", "12": "NC_000012.11", "13": "NC_000013.10", "14": "NC_000014.8",
-               "15": "NC_000015.9", "16": "NC_000016.9", "17": "NC_000017.10", "18": "NC_000018.9", "19": "NC_000019.9",
-               "20": "NC_000020.10", "21": "NC_000021.8", "22": "NC_000022.10", "X": "NC_000023.10",
-               "Y": "NC_000024.9"},
-    "GRCh38": {"1": "NC_000001.11", "2": "NC_000002.12", "3": "NC_000003.12", "4": "NC_000004.12", "5": "NC_000005.10",
-               "6": "NC_000006.12", "7": "NC_000007.14", "8": "NC_000008.11", "9": "NC_000009.12", "10": "NC_000010.11",
-               "11": "NC_000011.10", "12": "NC_000012.12", "13": "NC_000013.11", "14": "NC_000014.9",
-               "15": "NC_000015.10", "16": "NC_000016.10", "17": "NC_000017.11", "18": "NC_000018.10",
-               "19": "NC_000019.10", "20": "NC_000020.11", "21": "NC_000021.9", "22": "NC_000022.11",
-               "X": "NC_000023.11", "Y": "NC_000024.10"}}
+from biofeaturefactory.lib.primitives import (
+    chromosome_map,
+    codon_table,
+    codon_to_aa,
+    read_fasta,
+    get_mutation_data_bioAccurate,
+    PKEY_HASH_HEX,
+    mint_pkey,
+    PKEY_HEX_RE,
+    load_pkey_map,
+    load_token_pkey_index,
+    token_from_name,
+    INTRONIC_PREFIX,
+    CHROM_PREFIX,
+    NON_ORF_PREFIXES,
+    is_intronic_token,
+    ExtractGeneFromFASTA,
+    extract_mutation_from_sequence_name,
+    should_skip_mutation,
+    HUMAN_TAI_WEIGHTS,
+    HUMAN_REFERENCE_W,
+    CODON_ENCODED_ALPHABET,
+    _CODON_ONLY_MARKERS,
+    detect_alphabet,
+)
+
+# Re-exported so `from ...utility import X` keeps working for every caller.
+# Plain, eager imports: the package is acyclic (core -> siblings -> utility),
+# so nothing here needs deferring.
+from biofeaturefactory.lib.msa import (
+    prepare_protein_query, run_jackhmmer, parse_stockholm, stockholm_to_a2m,
+    filter_msa_by_gaps, compute_sequence_weights, compute_neff, _chunk_codons, write_a2m,
+)
+from biofeaturefactory.lib.codon_metrics import (
+    get_codon_counts, compute_cai, compute_tai, get_codon_tai, get_codon_cai_w,
+    extract_codon_with_bicodons,
+)
+from biofeaturefactory.lib.dtu_outputs import (
+    _combine_glycosylation_outputs, _combine_phosphorylation_outputs,
+    process_single_mutation_for_sequence, parse_predictions_with_mutation_filtering,
+)
+from biofeaturefactory.lib.annotation import (
+    _detect_annotation_format, _parse_attributes, _normalize_chrom_name, _split_multi_value,
+    _infer_transcript_priority, _prepare_custom_annotation, _prepare_structured_annotation,
+    get_genome_loc,
+)
+
 
 w2n = {'zero': '0', 'one': '1', 'two': '2', 'three': '3', 'four': '4', 'five': '5', 'six': '6', 'seven': '7',
        'eight': '8', 'nine': '9', "ten": '10', "eleven": '11', "twelve": '12', 'thirteen': '13', 'fourteen': '14',
@@ -56,65 +90,7 @@ STOPWORDS = {
     "notes","draft","report","summary","v","ver","version"
 }
 
-codon_table = {'I': ['ATT', 'ATC', 'ATA'],
-               'L': ['CTT', 'CTC', 'CTA', 'CTG', 'TTA', 'TTG'],
-               'V': ['GTT', 'GTC', 'GTA', 'GTG'],
-               'F': ['TTT', 'TTC'],
-               'M': ['ATG'],
-               'C': ['TGT', 'TGC'],
-               'A': ['GCT', 'GCC', 'GCA', 'GCG'],
-               'G': ['GGT', 'GGC', 'GGA', 'GGG'],
-               'P': ['CCT', 'CCC', 'CCA', 'CCG'],
-               'T': ['ACT', 'ACC', 'ACA', 'ACG'],
-               'S': ['TCT', 'TCC', 'TCA', 'TCG', 'AGT', 'AGC'],
-               'Y': ['TAT', 'TAC'],
-               'W': ['TGG'],
-               'Q': ['CAA', 'CAG'],
-               'N': ['AAT', 'AAC'],
-               'H': ['CAT', 'CAC'],
-               'E': ['GAA', 'GAG'],
-               'D': ['GAT', 'GAC'],
-               'K': ['AAA', 'AAG'],
-               'R': ['CGT', 'CGC', 'CGA', 'CGG', 'AGA', 'AGG'],
-               'Stop': ['TAA', 'TAG', 'TGA'],
-               '-': ['---']}
-codon_to_aa = {codon: aa for aa, v in codon_table.items() for codon in v}
 
-def read_fasta(inf, aformat="FIRST", duplicate="replace"):
-    """Load sequences from a FASTA file into a name->sequence dictionary."""
-    data = {}
-    with open(inf, "r") as fa:
-        name = ""
-        for line in fa.readlines():
-            if "#" in line:
-                continue
-            if ">" in line:
-                if aformat.upper() == "NCBI":
-                    name = re.search(r">[a-zA-Z]+_?\d+(\.\d+)*", line).group(0)
-                elif aformat.upper() in ["FIRST", "WORD"]:
-                    name = line.split()[0]
-                else:
-                    name = line.strip()
-                name = name[1:].strip()
-                if name in data.keys():
-                    if duplicate.lower() in ["append", "a"]:  # simply add to existing sequence
-                        pass
-                    elif duplicate.lower() in ["replace", "r"]:  # reset sequence to empty
-                        data[name] = ""
-                    elif duplicate.lower() in ["separate", "s"]:  # add underscore+number to end of sequence name
-                        matches = re.findall(r"/_\d+$/", name)
-                        if matches != None and len(matches) > 0:
-                            num = int(max(matches)[1:])
-                            name = name[:-len(str(num))] + str(num + 1)
-                            data[name] = ""
-                        else:
-                            name = name + "_2"
-                            data[name] = ""
-                else:
-                    data[name] = ""
-            else:
-                data[name] = data[name] + line.strip()
-    return data
 
 def write_fasta(path: Path, name_to_seq: dict[str, str]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -243,43 +219,6 @@ def get_mutation_data(ntposnt):
     position = int(ntposnt[1:-1]) - 1  # Convert 1-based token position to 0-based index
     return position, (original_nt, mutant_nt)
 
-def get_mutation_data_bioAccurate(ntposnt, is_nt):
-    """Return one-based position and nucleotides for a mutation string; skips stop codons.
-
-    is_nt is REQUIRED (no default): pass True for a nucleotide mutation token
-    (e.g. G123A) or False for an amino-acid token (e.g. R213W). When True, a token
-    whose ref/alt are not nucleotides (ACGTU) returns (None, None) instead of
-    silently coercing an off-alphabet character into a position/ref/alt — this
-    closes the input-level validation gap (F45). Callers MUST state intent
-    explicitly; a missing argument is a TypeError by design (fail-loud, no silent
-    wrong default). alphafold3 opts out (is_nt=False) pending its own custom guard.
-    """
-
-    # Skip stop codons (for the case of aa)
-    if 'Stop' in ntposnt or 'Sto' in ntposnt:
-        return None, None
-
-    # gDNA/intronic token. Same reasoning as get_mutation_data above: this is
-    # unreachable for any currently-working input. Note the F45 alphabet guard
-    # below does NOT catch it -- 'g' and the trailing base are both legal
-    # nucleotide letters, so it falls through to int('d.T5000') and raises.
-    # Returning (None, None) matches this function's existing contract for
-    # "recognised but not scoreable here", which it already uses for stop codons
-    # and off-alphabet tokens.
-    #
-    # This is a floor, not a fix: it converts a crash into a SILENT drop. A
-    # pipeline that must report intronic tokens has to gate them at ingest with
-    # warn_intronic_unsupported BEFORE reaching here.
-    if is_intronic_token(ntposnt):
-        return None, None
-
-    original_nt = ntposnt[0]
-    mutant_nt = ntposnt[-1]
-    # F45: reject off-alphabet tokens on nt paths (collapses the former dead if/else).
-    if is_nt and (original_nt.upper() not in "ACGTU" or mutant_nt.upper() not in "ACGTU"):
-        return None, None
-    position = int(ntposnt[1:-1])
-    return position, (original_nt, mutant_nt)
 
 
 # ---------------------------------------------------------------------------
@@ -517,7 +456,7 @@ def canonical_token(variant, seq=None, seq_offset=1):
 
     This exists because BFF's entire cross-pipeline join is exact string equality
     on a concatenated {ref}{pos}{alt} token -- see the three mapping identities in
-    exon_aware_mapping.py and the pkey mint in spliceai/bin/spliceai-parser.py.
+    variant_mapping.py and the pkey mint in spliceai/bin/spliceai-parser.py.
     Two textual spellings of one deletion therefore become two primary keys and
     the miss is silent (the lookup returns None and the row is dropped).
 
@@ -538,81 +477,116 @@ def canonical_token(variant, seq=None, seq_offset=1):
     return f"{ref}{pos}{alt}"
 
 
-PKEY_HASH_HEX = 12
 
 
-def mint_pkey(gene: str, token: str) -> str:
-    """The bounded primary key for one (gene, token) pair: '{GENE}-{sha1[:12]}'.
 
-    The key used to be '{GENE}-{token}', and the token spells out the whole REF
-    allele, so key length was the length of the variant. Measured across the
-    19,305 genes in grch38.txt, for a whole-gene deletion:
 
-        mean gene span 57,992 nt; largest CNTNAP2 2,304,640 nt (a 2.3 MB key)
-        99.3% exceed the 255-byte NAME_MAX that filenames are built against
-        89.2% exceed PostgreSQL's ~2,704 B btree limit
-        88.0% exceed MySQL InnoDB's 3,072 B index prefix
-        22.9% exceed VARCHAR's 65,535 entirely
 
-    Those are not hypothetical: miranda lost 6 runs to '[Errno 63] File name
-    too long', and netMHC's workdir_stem already exists to route around the
-    same wall. Length here is constant at len(gene) + 13 for every variant
-    class, SNV through knockout.
 
-    sha1 is a content digest, not a security primitive. 12 hex = 48 bits; the
-    gene travels in the clear, so a collision must occur between two variants
-    of the SAME gene, and the population per prefix is one gene's variants
-    rather than the whole corpus.
 
-    The digest is over the VERBATIM token -- what every existing cross-pipeline
-    join already keys on -- so this changes key LENGTH and nothing else. It
-    therefore inherits the property that two textual spellings of one deletion
-    remain two keys. canonical_token above collapses those, but applying it
-    first needs the per-space sequence for left-alignment, which does not exist
-    at the point tokens are read from the mutations CSV.
+
+# ---------------------------------------------------------------------------
+# Decomposed-piece format.
+#
+# These live here, not beside the code that MINTS the cells, because they are
+# pure string grammar with no genome access -- and variant_mapping imports
+# pysam, so a consumer that only needed to READ a mapping cell was pulling a
+# htslib dependency it never used. They are also unreferenced by that file:
+# it writes pieces, it never parses them back.
+# ---------------------------------------------------------------------------
+PIECE_RE = re.compile(r"^(?:(intron\d+):)?([ACGTU]+)(\d+)(?:([ACGTU]+)|del)$", re.I)
+
+
+def parse_piece_token(token: str):
+    """Read one decomposed piece back: 'CAG79A', 'GTGAGGTCG1del', 'intron1:T501A'.
+
+    Returns {record, ref, pos, alt, deleted} or None. `alt` is '' when the piece
+    is wholly deleted, and `deleted` says so explicitly rather than making the
+    caller test for an empty string.
+
+    This is deliberately NOT parse_variant. A piece is a FRAGMENT of one edit,
+    not a variant: a spanning deletion retains a single anchor base that belongs
+    to exactly one piece, so the others have no ALT at all. Variant refuses an
+    empty allele at construction (utility.py:342) precisely so that a pure
+    deletion cannot be represented without the VCF anchor convention -- which is
+    right for whole variants and impossible for pieces.
+
+    Keeping them separate preserves the fail-closed property: parse_variant
+    returns None for 'GTGAGGTCG1del', so a pipeline that does not understand
+    decomposition drops the piece instead of scoring a fragment as if it were
+    the whole edit.
     """
-    digest = hashlib.sha1(token.encode("utf-8")).hexdigest()[:PKEY_HASH_HEX]
-    return f"{gene.upper()}-{digest}"
+    if not isinstance(token, str):
+        return None
+    m = PIECE_RE.match(token.strip())
+    if not m:
+        return None
+    record, ref, pos, alt = m.group(1), m.group(2).upper(), int(m.group(3)), m.group(4)
+    if pos < 1:
+        return None
+    return {"record": record, "ref": ref, "pos": pos,
+            "alt": (alt or "").upper(), "deleted": alt is None}
 
 
-INTRONIC_PREFIX = "gd."
-CHROM_PREFIX = "ch."
+def piece_fields(token: str):
+    """(pos1, ref, alt, kind, length_delta) for a piece token, or None.
+
+    The Variant-shaped view of a piece, so a consumer can treat a decomposed
+    piece and a whole variant through one code path. `kind` uses exactly the
+    vocabulary of Variant.kind (utility.py) -- snv, mnv, insertion, deletion,
+    delins -- with one extension: Variant cannot hold an empty allele, so its
+    rule for 'deletion' is len(alt) == 1, whereas a wholly deleted piece has
+    len(alt) == 0. Both are deletions.
+    """
+    d = parse_piece_token(token)
+    if d is None:
+        return None
+    ref, alt = d["ref"], d["alt"]
+    if len(ref) == 1 and len(alt) == 1:
+        kind = "snv"
+    elif len(ref) == len(alt):
+        kind = "mnv"
+    elif len(ref) == 1:
+        kind = "insertion"
+    elif len(alt) <= 1:
+        kind = "deletion"
+    else:
+        kind = "delins"
+    return d["pos"], ref, alt, kind, len(alt) - len(ref)
+
+
+def split_piece_cell(cell: str) -> list[str]:
+    """Split one mapping cell into its pieces: 'a' -> ['a'], '[a,b]' -> ['a','b'].
+
+    A variant spanning several features occupies several addresses in the orf,
+    intron and pre-mRNA columns, written as a bracketed list. Reading a cell is
+    therefore two steps -- split, then parse_piece_token each piece -- and the
+    split half was reimplemented per consumer (miranda inline, RNAfold in
+    _load_intron_premrna) while only parse_piece_token was shared. Two readers
+    of one format drift; this is the half that was missing.
+
+    Order is TRANSCRIPT order, matching classify_genomic_span, so the first
+    piece is the one carrying the edit's retained anchor base.
+    """
+    if not isinstance(cell, str):
+        return []
+    cell = cell.strip()
+    if not cell:
+        return []
+    if cell.startswith("[") and cell.endswith("]"):
+        return [p.strip() for p in cell[1:-1].split(",") if p.strip()]
+    return [cell]
+
+
+
+
+
+
 # Every prefix that means "NOT ORF-relative". Kept as one tuple so the gates in
 # codon_usage / rare_codon / evmutation / build_mutant_sequences_for_gene and the
-# router in exon_aware_mapping cannot disagree about which spaces exist.
-NON_ORF_PREFIXES = (INTRONIC_PREFIX, CHROM_PREFIX)
+# router in variant_mapping cannot disagree about which spaces exist.
 
 
-def is_intronic_token(token) -> bool:
-    """True for any NON-ORF-space token: 'gd.T5000C' (gDNA) or 'ch.T70050267A'
-    (absolute chromosomal).
-
-    The name is historical -- it predates the chromosomal space and a gd./ch.
-    token can perfectly well be exonic. What it actually tests is "is this token
-    written in a coordinate space other than the ORF", which is the question
-    every caller is really asking: none of them can score a token whose position
-    is not an ORF offset, whichever non-ORF space it came from.
-
-    Intronic (and other non-ORF gDNA) variants carry this prefix because a bare
-    token is ambiguous between ORF and gDNA space whenever a gene's 5'UTR is
-    shorter than its ORF -- SMN2's ORF spans 1-879 and its gDNA slice starts at
-    18, so 'T500C' is a legal coordinate in both.
-
-    parse_variant deliberately does NOT understand the prefix and returns None
-    for it, so a pipeline that never calls this helper still fails closed. What
-    it will NOT do is say anything useful: the legacy parsers raise
-    ValueError("invalid literal for int() with base 10: 'd.T5000'"), which
-    reads as a corrupt input file rather than as a variant class the pipeline
-    cannot score.
-    """
-    # CASE-INSENSITIVE. Tokens are routinely upper-cased before they reach a gate
-    # -- netnglyc's normalize_mutation_id does it to build the pkey, and the same
-    # pattern minted 'TESTG~INTRON1' in miranda -- so a case-sensitive prefix test
-    # silently stops recognising the very tokens it exists to catch, and the
-    # variant resumes being reported as unparseable garbage. Widening is monotone:
-    # it can only classify MORE tokens as non-ORF, never fewer, so no caller
-    # becomes more permissive.
-    return isinstance(token, str) and token.lower().startswith(NON_ORF_PREFIXES)
 
 
 def split_intronic_tokens(tokens):
@@ -944,7 +918,7 @@ def canonical_haplotype_token(variants, seq=None, seq_offset=1):
 def revcomp_seq(seq):
     """Reverse-complement, length-aware and fail-loud on unknown bases.
 
-    rc_base in exon_aware_mapping.py is a single-character dict lookup with a
+    rc_base in variant_mapping.py is a single-character dict lookup with a
     `.get(b, b)` fallback: handed a multi-base string it returns that string
     UNCOMPLEMENTED and UNREVERSED, silently. Harmless while every caller passes
     one character; wrong the moment an indel reaches a minus-strand element.
@@ -962,7 +936,7 @@ def rc_variant(variant, genomic_pos=None):
 
     genomic_pos, when supplied, is the genomic coordinate of the variant's
     FIRST REF BASE IN TRANSCRIPT ORDER -- i.e. exactly what
-    `tx_to_genome[tx_pos - 1]` yields in exon_aware_mapping.py. On the minus
+    `tx_to_genome[tx_pos - 1]` yields in variant_mapping.py. On the minus
     strand transcript order runs 3'->5' along the genome, so that base is the
     RIGHTMOST of the REF span and the genomic (leftmost) start is
     genomic_pos - (len(ref) - 1). Getting this wrong is invisible for an SNV,
@@ -1008,433 +982,20 @@ def get_mutant_aa(ntmut, ntseq, aaseq=None, index=0):
     return (aa_position_1_based, (wtaa, mutaa)), original_codon
 
 
-def _detect_annotation_format(annotation_file):
-    """Infer whether an annotation file resembles GTF, GFF3, or a custom tab format."""
-    suffix = Path(annotation_file).suffix.lower()
-    if suffix == ".gtf":
-        return "gtf"
-    if suffix in {".gff", ".gff3"}:
-        return "gff3"
-
-    try:
-        with open(annotation_file, "r") as handle:
-            for line in handle:
-                if not line.strip() or line.startswith("#"):
-                    continue
-                fields = line.rstrip("\n").split("\t")
-                if len(fields) >= 9:
-                    attr = fields[8]
-                    if '"' in attr:
-                        return "gtf"
-                    if "=" in attr or attr.startswith("ID=") or attr.startswith("Parent="):
-                        return "gff3"
-                    return "gff3"
-                if len(fields) >= 7:
-                    return "custom"
-    except FileNotFoundError:
-        return "custom"
-    return "custom"
 
 
-def _parse_attributes(attr_field, fmt):
-    """Parse the attribute column of a GTF/GFF record into a key/value dict."""
-    attrs = {}
-    text = attr_field.strip().strip(";")
-    if not text:
-        return attrs
-
-    if fmt == "gff3":
-        for part in text.split(";"):
-            part = part.strip()
-            if not part or "=" not in part:
-                continue
-            key, value = part.split("=", 1)
-            key = key.strip()
-            value = unquote(value.strip())
-            attrs[key] = value
-    else:
-        for part in text.split(";"):
-            part = part.strip()
-            if not part:
-                continue
-            if " " not in part:
-                attrs[part] = ""
-                continue
-            key, value = part.split(" ", 1)
-            key = key.strip()
-            value = value.strip().strip('"')
-            attrs[key] = value
-    return attrs
 
 
-def _normalize_chrom_name(raw_name, assembly):
-    """Collapse assorted chromosome labels into bare chromosome numbers for a given assembly."""
-    if not raw_name:
-        return raw_name
-
-    chrom = raw_name.strip()
-    rev_map = {}
-    if assembly in chromosome_map:
-        mapping = chromosome_map[assembly]
-        rev_map = {v: k for k, v in mapping.items()}
-        rev_map.update({v.split('.')[0]: k for k, v in mapping.items()})
-        rev_map.update({f"chr{k}": k for k in mapping.keys()})
-
-    if chrom in rev_map:
-        return rev_map[chrom]
-    chrom_core = chrom.split('.')[0]
-    if chrom_core in rev_map:
-        return rev_map[chrom_core]
-    if chrom.lower().startswith("chr"):
-        chrom = chrom[3:]
-        if chrom in rev_map:
-            return rev_map[chrom]
-        return chrom
-    return chrom
 
 
-def _split_multi_value(value):
-    """Split a semi-colon or comma separated field into a list of trimmed strings."""
-    if not value:
-        return []
-    parts = []
-    for part in value.replace(';', ',').split(','):
-        candidate = part.strip()
-        if candidate:
-            parts.append(candidate)
-    return parts
 
 
-def _infer_transcript_priority(attrs):
-    """Score a transcript based on annotation tags to favour well-supported isoforms."""
-    priority = 0
-    biotype = (
-        attrs.get("transcript_biotype")
-        or attrs.get("biotype")
-        or attrs.get("gene_biotype")
-        or attrs.get("transcript_type")
-        or attrs.get("gbkey")
-        or ""
-    ).lower()
-    if "protein" in biotype or "coding" in biotype or "cds" in biotype:
-        priority = max(priority, 2)
-    elif "mrna" in biotype or "messenger" in biotype:
-        priority = max(priority, 1)
-
-    product = attrs.get("product", "").lower()
-    if "protein" in product:
-        priority = max(priority, 1)
-
-    tag_field = attrs.get("tag") or ""
-    if tag_field:
-        tag_values = {piece.strip().lower() for piece in tag_field.replace(';', ',').split(',') if piece.strip()}
-        if "mane select" in tag_values:
-            priority = max(priority, 4)
-        if "refseq select" in tag_values:
-            priority = max(priority, 3)
-        if "ccds" in tag_values:
-            priority = max(priority, 2)
-
-    return priority
 
 
-def _prepare_custom_annotation(genename, annotation_file):
-    """Load gene coordinates from a simple tab-delimited annotation generated by this project."""
-    with open(annotation_file, 'r') as f:
-        for line in f:
-            if line.startswith('#'):
-                continue
-
-            fields = line.strip().split('\t')
-            if len(fields) < 7:
-                continue
-
-            gene_symbol = fields[0]
-            chrom = fields[1].replace('chr', '')
-            strand = fields[2]
-            tx_start = int(fields[3])
-            tx_end = int(fields[4])
-
-            exon_starts = [int(x) for x in fields[5].strip(',').split(',') if x.strip()]
-            exon_ends = [int(x) for x in fields[6].strip(',').split(',') if x.strip()]
-            exons = list(zip(exon_starts, exon_ends))
-
-            if gene_symbol.upper() == genename.upper():
-                return {
-                    "chrom": chrom,
-                    "strand": strand,
-                    "tx_start": tx_start,
-                    "tx_end": tx_end,
-                    "cds_start": tx_start,
-                    "cds_end": tx_end,
-                    "exons": exons,
-                    "transcript_id": f"{gene_symbol}_transcript",
-                }
-    return None
 
 
-def _prepare_structured_annotation(genename, annotation_file, assembly, fmt, transcript_id=None):
-    """Extract gene and transcript features from RefSeq/Ensembl-style GTF or GFF3 files.
-
-    Args:
-        genename: Gene symbol to look up.
-        annotation_file: Path to annotation file.
-        assembly: Reference assembly.
-        fmt: Detected annotation format ('gtf' or 'gff3').
-        transcript_id: Optional specific transcript ID to force selection of.
-    """
-    gene_upper = genename.upper()
-    target_gene_ids = set()
-    target_transcripts = {}
-    transcript_features = {
-        "transcript",
-        "mrna",
-        "ncrna",
-        "lnc_rna",
-        "primary_transcript",
-        "pre_mrna",
-        "mirna",
-        "trna",
-        "rrna",
-        "snrna",
-        "snorna",
-        "scrna",
-        "sca_rna",
-    }
-    gene_section_active = False
-
-    try:
-        with open(annotation_file, "r") as handle:
-            for line in handle:
-                if not line.strip() or line.startswith("#"):
-                    continue
-
-                cols = line.rstrip("\n").split("\t")
-                if len(cols) < 9:
-                    continue
-
-                seqname, _source, feature, start, end, _score, strand, _frame, attrs_raw = cols
-                feature_lc = feature.lower()
-                attrs = _parse_attributes(attrs_raw, fmt)
-
-                attr_gene_names = {
-                    attrs.get("gene_name"),
-                    attrs.get("gene"),
-                    attrs.get("gene_symbol"),
-                    attrs.get("Name"),
-                }
-                attr_gene_names = {name.upper() for name in attr_gene_names if isinstance(name, str)}
-
-                attr_gene_ids = set()
-                attr_gene_ids.update(_split_multi_value(attrs.get("gene_id")))
-                if feature_lc == "gene":
-                    attr_gene_ids.update(_split_multi_value(attrs.get("ID")))
-                parent_values = _split_multi_value(attrs.get("Parent"))
-                attr_gene_ids.update(parent_values)
-
-                matches_symbol = gene_upper in attr_gene_names
-                matches_gene_id = bool(target_gene_ids.intersection(attr_gene_ids))
-                matches = matches_symbol or matches_gene_id
-
-                if feature_lc == "gene" and matches:
-                    target_gene_ids.update(attr_gene_ids)
-                    target_gene_ids.update(_split_multi_value(attrs.get("ID")))
-                    target_gene_ids.update(_split_multi_value(attrs.get("gene_id")))
-                    target_gene_ids.add(genename)
-                    gene_section_active = True
-                elif feature_lc == "gene" and gene_section_active:
-                    break
-
-                current_tid = None
-
-                if feature_lc in transcript_features:
-                    current_tid = attrs.get("transcript_id") or attrs.get("ID")
-                elif feature_lc == "cds" and not attrs.get("transcript_id") and attrs.get("Parent"):
-                    possible = [val for val in parent_values if not val.startswith("gene-")]
-                    if possible:
-                        current_tid = possible[0]
-
-                if feature_lc == "gene" and matches_symbol and not target_gene_ids:
-                    target_gene_ids.update(attr_gene_ids)
-
-                if feature_lc in transcript_features and (matches or bool(set(parent_values).intersection(target_gene_ids)) or (attrs.get("gene_id") and attrs.get("gene_id") in target_gene_ids)):
-                    if not current_tid:
-                        continue
-                    rec = target_transcripts.setdefault(current_tid, {
-                        "chrom": None,
-                        "strand": strand if strand in "+-" else None,
-                        "exons": [],
-                        "attrs": {},
-                        "matched": False,
-                    })
-                    rec["chrom"] = _normalize_chrom_name(seqname, assembly)
-                    if strand in "+-":
-                        rec["strand"] = strand
-                    rec["attrs"].update(attrs)
-                    rec["matched"] = True
-                    target_gene_ids.update(attr_gene_ids)
-                    continue
-
-                if feature_lc == "exon":
-                    exon_transcript_ids = _split_multi_value(attrs.get("transcript_id"))
-                    if not exon_transcript_ids:
-                        exon_transcript_ids = [val for val in parent_values if val]
-
-                    start_i, end_i = int(start), int(end)
-
-                    for tid in exon_transcript_ids:
-                        rec = target_transcripts.setdefault(tid, {
-                            "chrom": None,
-                            "strand": None,
-                            "exons": [],
-                            "attrs": {},
-                            "matched": False,
-                        })
-
-                        if matches or tid in target_transcripts and target_transcripts[tid]["matched"] or bool(set(parent_values).intersection(target_gene_ids)):
-                            rec["matched"] = rec["matched"] or matches or tid in target_transcripts and target_transcripts[tid]["matched"]
-                            if attrs.get("gene_id"):
-                                target_gene_ids.add(attrs["gene_id"])
-                        elif matches_symbol:
-                            rec["matched"] = True
-
-                        if not rec["matched"]:
-                            continue
-
-                        rec["chrom"] = rec["chrom"] or _normalize_chrom_name(seqname, assembly)
-                        if strand in "+-":
-                            rec["strand"] = strand
-                        rec["exons"].append((start_i, end_i))
-                        rec["attrs"].update(attrs)
-
-                if matches_symbol:
-                    target_gene_ids.update(attr_gene_ids)
-
-    except FileNotFoundError:
-        return None
-
-    candidates = []
-    for tid, rec in target_transcripts.items():
-        if not rec["matched"] or not rec["exons"]:
-            continue
-        if not rec["chrom"] or rec["strand"] not in "+-":
-            continue
-
-        exons_sorted = sorted(rec["exons"], key=lambda x: (x[0], x[1]))
-        unique_exons = []
-        for exon in exons_sorted:
-            if not unique_exons or unique_exons[-1] != exon:
-                unique_exons.append(exon)
-
-        tx_start = min(s for s, _ in unique_exons)
-        tx_end = max(e for _, e in unique_exons)
-        exon_len = sum(e - s + 1 for s, e in unique_exons)
-
-        priority = _infer_transcript_priority(rec["attrs"])
-        score = (priority, exon_len, len(unique_exons), -tx_start)
-
-        candidates.append((score, tid, {
-            "chrom": rec["chrom"],
-            "strand": rec["strand"],
-            "tx_start": tx_start,
-            "tx_end": tx_end,
-            "exons": unique_exons,
-            "attrs": rec["attrs"],
-        }))
-
-    if not candidates:
-        return None
-
-    # If a specific transcript_id is requested, try to find it among candidates
-    if transcript_id:
-        # Try exact match first
-        exact = [c for c in candidates if c[1] == transcript_id]
-        match = exact
-        if not match:
-            # Try matching without version suffix (e.g., NM_022162 matches NM_022162.3)
-            tid_base = transcript_id.rsplit('.', 1)[0]
-            match = [c for c in candidates if c[1].rsplit('.', 1)[0] == tid_base]
-        if match:
-            _, best_tid, best = match[0]
-            # Announce a version substitution. Falling back on the bare accession
-            # is the intended behaviour when the caller supplies no version
-            # ('NM_022162' -> 'NM_022162.3'), but when a version WAS named and a
-            # different one is returned, the caller asked a specific question and
-            # got another answer. Transcript versions can differ in exon
-            # structure, so every coordinate downstream is then computed against
-            # a record the caller did not choose. Measured: --force-cds
-            # NM_022876.3 against GRCh38.p14, which carries only NM_022876.2.
-            if not exact and "." in transcript_id and best_tid != transcript_id:
-                print(
-                    f"WARNING: transcript '{transcript_id}' is not present for gene "
-                    f"'{genename}' in this annotation; using '{best_tid}' instead "
-                    f"(same accession, different version). Exon structure may differ "
-                    f"from the version requested.",
-                    file=sys.stderr,
-                )
-        else:
-            available = sorted(set(c[1] for c in candidates))
-            raise ValueError(
-                f"Transcript '{transcript_id}' not found for gene '{genename}'. "
-                f"Available transcripts: {available}"
-            )
-    else:
-        _, best_tid, best = max(candidates, key=lambda x: x[0])
-
-    return {
-        "chrom": best["chrom"],
-        "strand": best["strand"],
-        "tx_start": best["tx_start"],
-        "tx_end": best["tx_end"],
-        "cds_start": best["tx_start"],
-        "cds_end": best["tx_end"],
-        "exons": best["exons"],
-        "transcript_id": best_tid,
-    }
 
 
-def get_genome_loc(genename, annotation_file, assembly="GRCh38", transcript_id=None):
-    """Return gene coordinates and exon structure from supported annotation formats.
-
-    Args:
-        genename: Gene symbol to look up.
-        annotation_file: Path to annotation file (GTF/GFF3/custom).
-        assembly: Reference assembly (GRCh37 or GRCh38).
-        transcript_id: Optional specific transcript ID to force selection of
-            (e.g., NM_022162.3). If provided and found, this transcript is
-            selected instead of auto-selection based on priority scoring.
-
-    Returns:
-        dict with chrom, strand, tx_start, tx_end, exons, transcript_id, etc.
-    """
-    fmt = _detect_annotation_format(annotation_file)
-
-    if fmt == "custom":
-        # The custom tab-delimited format carries ONE record per gene and no
-        # transcript IDs, so a requested transcript cannot be honoured here.
-        # Saying so matters: the caller printed "Forcing transcript X for all
-        # genes" before reaching this point, and without this line a fabricated
-        # accession produced output byte-identical to an unforced run with no
-        # signal anywhere that the request had been dropped.
-        if transcript_id:
-            print(
-                f"WARNING: requested transcript '{transcript_id}' is ignored for gene "
-                f"'{genename}': '{annotation_file}' is the custom tab-delimited format, "
-                f"which holds a single record per gene and no transcript IDs. Supply a "
-                f"GTF/GFF3 annotation to select a specific transcript.",
-                file=sys.stderr,
-            )
-        try:
-            return _prepare_custom_annotation(genename, annotation_file)
-        except Exception as e:
-            print(f"Error parsing annotation file {annotation_file}: {e}", file=sys.stderr)
-            return None
-
-    try:
-        return _prepare_structured_annotation(genename, annotation_file, assembly, fmt, transcript_id=transcript_id)
-    except Exception as e:
-        print(f"Error parsing annotation file {annotation_file}: {e}", file=sys.stderr)
-        return None
 
 
 def load_mapping(mapping_file: str, mapType: str ='transcript') -> Dict[str, str]:
@@ -1553,199 +1114,9 @@ def combine_batch_outputs(batch_output_files, final_output_file, format_type='ne
         print(f"Error combining batch outputs: {e}")
         return False
 
-def ExtractGeneFromFASTA(file_path,count=False):
-    """Extract gene name from NetNGlyc output file using read_fasta"""
-    sequences = read_fasta(file_path)
-    if sequences:
-        first_seq_name = list(sequences.keys())[0]
-        separators = ['-', '_']
-        for sep in separators:
-            if sep in first_seq_name:
-                if count:
-                    return first_seq_name.rsplit(sep, 1)[0],len(sequences)
-                return first_seq_name.rsplit(sep, 1)[0]
-        return first_seq_name
-    return None
-
-def _combine_glycosylation_outputs(batch_output_files, final_output_file, original_fasta_file=None):
-    """Combine glycosylation prediction batch outputs (NetNGlyc format)"""
-    try:
-        # Count total sequences for header
-        total_sequences = 0
-        all_sequence_sections = []
-        all_prediction_lines = []
-
-        for i, batch_file in enumerate(batch_output_files):
-            try:
-                with open(batch_file, 'r') as f:
-                    content = f.read()
 
 
-                import os
-                seperator = ['-','_']
-                # Use original FASTA file if provided, otherwise fallback to counting Name: lines
-                if original_fasta_file and os.path.exists(original_fasta_file):
-                    try:
-                        #fasta_sequences = read_fasta(original_fasta_file)
-                        gene_name, total_sequences = ExtractGeneFromFASTA(original_fasta_file, count=True)
-                        # Determine if this is wildtype or mutant based on sequence names
-                            # For the first batch, use total sequences from original file
-                        if i == 0:
-                            print(f"Using original FASTA file for sequence count: {total_sequences} sequences from {gene_name}")
-                            # For subsequent batches, the total was previously counted
 
-                    except Exception as e:
-                        print(f"Warning: Error reading original FASTA file {original_fasta_file}: {e}")
-                        # Fallback to counting Name: lines in NetNGlyc output
-                        lines = content.split('\n')
-                        name_count = sum(1 for line in lines if line.startswith('Name:'))
-                        total_sequences += name_count if name_count > 0 else 1
-
-                else:
-                    # Fallback: Count sequences directly from NetNGlyc output
-                    lines = content.split('\n')
-                    name_count = sum(1 for line in lines if line.startswith('Name:'))
-
-                    if name_count > 0:
-                        total_sequences += name_count
-                    else:
-                        # Parse header line for sequence count: ">debug-GENE-aa-netnglyc\t5 amino acids"
-                        for line in lines:
-                            if 'amino acids' in line:
-                                try:
-                                    parts = line.split()
-                                    for j, part in enumerate(parts):
-                                        if part.isdigit() and j+1 < len(parts) and 'amino' in parts[j+1]:
-                                            total_sequences += int(part)
-                                            break
-                                    break
-                                except:
-                                    total_sequences += 1  # Ultimate fallback
-                            else:
-                                total_sequences += 1  # Fallback if no header found
-
-                # Collect sequence display sections and prediction lines
-                in_sequence_section = False
-                in_prediction_section = False
-
-                lines = content.split('\n')
-                for line in lines:
-                    if line.strip().startswith('>') and 'amino acids' in line:
-                        continue  # Skip individual headers
-
-                    if 'SeqName' in line and 'Position' in line:
-                        in_prediction_section = True
-                        continue
-
-                    if line.startswith('    ') and len(line.strip()) > 10:
-                        in_sequence_section = True
-                        all_sequence_sections.append(line)
-                    elif in_prediction_section and line.strip() and not line.startswith('#'):
-                        all_prediction_lines.append(line)
-
-            except Exception as e:
-                print(f"Error reading batch file {batch_file}: {e}")
-                continue
-
-        # Write combined output
-        with open(final_output_file, 'w') as f:
-            # Write header with total sequence count
-            f.write(f">{os.path.basename(final_output_file).replace('.out', '')}\t{total_sequences} amino acids\n\n")
-
-            # Write prediction header
-            f.write("SeqName                 Position  Potential  N-Glyc result  Comment\n")
-            f.write("=" * 70 + "\n")
-
-            # Write all predictions
-            for line in all_prediction_lines:
-                f.write(line + "\n")
-
-            # Write sequence sections
-            if all_sequence_sections:
-                f.write("\n")
-                for line in all_sequence_sections:
-                    f.write(line + "\n")
-
-        print(f"Combined {len(batch_output_files)} batch files into {final_output_file}")
-        print(f"Total sequences: {total_sequences}")
-
-        return True
-
-    except Exception as e:
-        print(f"Error combining glycosylation outputs: {e}")
-        return False
-
-def _combine_phosphorylation_outputs(batch_output_files, final_output_file):
-    """Combine phosphorylation prediction batch outputs (NetPhos format)"""
-    try:
-        total_sequences = 0
-        all_prediction_lines = []
-
-        for i, batch_file in enumerate(batch_output_files):
-            try:
-                with open(batch_file, 'r') as f:
-                    content = f.read()
-
-                # Extract sequences count from header
-                lines = content.split('\n')
-                for line in lines:
-                    if 'amino acids' in line and line.startswith('>'):
-                        try:
-                            seq_count = int(line.split()[1])
-                            total_sequences += seq_count
-                        except:
-                            total_sequences += 1  # Fallback
-                        break
-
-                # Collect prediction lines
-                for line in lines:
-                    if line.startswith('# ') and len(line.split()) >= 7:
-                        # This is a prediction line
-                        all_prediction_lines.append(line)
-
-            except Exception as e:
-                print(f"Error reading phosphorylation batch file {batch_file}: {e}")
-                continue
-
-        # Write combined phosphorylation output
-        with open(final_output_file, 'w') as f:
-            # Write header
-            gene_name = os.path.basename(final_output_file).replace('.out', '').replace('-netphos', '')
-            f.write(f">{gene_name}\t{total_sequences} amino acids\n")
-            f.write("#\n")
-            f.write("#  prediction results\n")
-            f.write("#\n")
-            f.write("# Sequence\t\t   # x   Context     Score   Kinase    Answer\n")
-            f.write("# " + "-" * 67 + "\n")
-
-            # Write all predictions
-            for line in all_prediction_lines:
-                f.write(line + "\n")
-
-        print(f"Combined {len(batch_output_files)} phosphorylation batch files into {final_output_file}")
-        print(f"Total sequences: {total_sequences}")
-
-        return True
-
-    except Exception as e:
-        print(f"Error combining phosphorylation outputs: {e}")
-        return False
-
-def extract_mutation_from_sequence_name(seq_name):
-    """Extract mutation ID from sequence name (e.g., 'ZFP36-C330T' -> 'C330T')
-
-    Args:
-        seq_name: Sequence name in format 'GENE-MUTATION' or just 'GENE'
-
-    Returns:
-        tuple: (gene, mutation_id) or (gene, None) if no mutation found
-    """
-    if '-' in seq_name:
-        parts = seq_name.rsplit('-', 1)
-        if len(parts) == 2:
-            return parts[0], parts[1]  # gene, mutation_id
-
-    return seq_name, None
 
 def load_validation_failures(log_path):
     """
@@ -1757,147 +1128,9 @@ def load_validation_failures(log_path):
     return _collect_failures_from_logs(log_path) if log_path else {}
 
 
-def should_skip_mutation(gene, mutation_id, failure_map):
-    """Return True if the given gene/mutation should be filtered based on validation logs."""
-    if not failure_map or not gene or not mutation_id:
-        return False
-    return mutation_id.upper() in failure_map.get(gene.upper(), set())
 
 
-def process_single_mutation_for_sequence(seq_name, predictions, mapping_dict, is_mutant=True, tool_type='netphos', failure_map=None):
-    """Process predictions for one sequence against its specific mutation
 
-    Args:
-        seq_name: Sequence name (e.g., 'ZFP36-C330T')
-        predictions: List of predictions for this sequence
-        mapping_dict: Dictionary mapping mutation_id -> aaposaa
-        is_mutant: Whether processing mutant sequences (should be True for single-mutation processing)
-        tool_type: 'netphos' or 'netnglyc' for tool-specific field handling
-
-    Returns:
-        list: Filtered predictions with pkeys for the specific mutation
-    """
-    if not is_mutant:
-        raise ValueError("process_single_mutation_for_sequence should only be used for mutant sequences")
-
-    # Extract mutation ID from sequence name
-    gene, mutation_id = extract_mutation_from_sequence_name(seq_name)
-    if mutation_id is None:
-        return []
-
-    # Look up this mutation in the mapping
-    if mutation_id not in mapping_dict:
-        return []
-
-    if should_skip_mutation(gene, mutation_id, failure_map):
-        return []
-
-    aaposaa = mapping_dict[mutation_id]  # e.g., "Y110F"
-
-    # Parse amino acid position and mutation info
-    position_data = get_mutation_data_bioAccurate(aaposaa, is_nt=False)
-    if position_data[0] is None:
-        return []
-
-    aa_pos = position_data[0]  # e.g., 110
-    aa_tuple = position_data[1]  # e.g., ('Y', 'F')
-    target_aa = aa_tuple[1]  # F for mutant
-
-    # Filter predictions for this specific mutation
-    results = []
-    for pred in predictions:
-        # Get position from prediction
-        if tool_type == 'netphos':
-            pred_pos = pred['pos']
-            pred_aa = pred['amino_acid']
-        elif tool_type == 'netnglyc':
-            pred_pos = pred['position']
-            pred_aa = pred['sequon'][0] if pred['sequon'] else None
-        else:
-            raise ValueError(f"Unsupported tool_type: {tool_type}")
-
-        # Check if this prediction matches the mutation position and amino acid
-        if pred_pos == aa_pos and pred_aa == target_aa:
-            # Create pkey for this match
-            pkey = f"{gene}-{mutation_id}"
-
-            # Add pkey and fix Gene field to prediction
-            result_pred = pred.copy()
-            result_pred['pkey'] = pkey
-            # Fix Gene field to just gene name (not gene-mutation)
-            result_pred['Gene'] = gene
-
-            # Map field names to match CSV writer expectations
-            if tool_type == 'netnglyc':
-                # Map NetNGlyc field names to CSV format
-                if 'position' in result_pred:
-                    result_pred['pos'] = result_pred.pop('position')
-                if 'sequon' in result_pred:
-                    result_pred['Sequon'] = result_pred.pop('sequon')
-                # Remove seq_name as it's not needed in CSV
-                if 'seq_name' in result_pred:
-                    result_pred.pop('seq_name')
-
-            results.append(result_pred)
-
-    return results
-
-def parse_predictions_with_mutation_filtering(predictions, mapping_dict, is_mutant, threshold=0.0, yes_only=False, tool_type='netphos', failure_map=None):
-    """Universal prediction filtering logic for both NetPhos and NetNGlyc
-
-    Args:
-        predictions: List of all predictions
-        mapping_dict: Dictionary mapping mutation_id -> aaposaa
-        is_mutant: Whether processing mutant (True) or wildtype (False) sequences
-        threshold: Score threshold for filtering
-        yes_only: Only include predictions with 'YES' answer (NetPhos only)
-        tool_type: 'netphos' or 'netnglyc' for tool-specific handling
-
-    Returns:
-        list: Filtered predictions with pkeys
-    """
-    results = []
-
-    failure_map = failure_map or {}
-
-    if is_mutant:
-        # Group predictions by sequence name for single-mutation processing
-        seq_predictions = {}
-        for pred in predictions:
-            seq_name = pred.get('Gene', '') if tool_type == 'netphos' else pred.get('seq_name', '')
-            if seq_name not in seq_predictions:
-                seq_predictions[seq_name] = []
-            seq_predictions[seq_name].append(pred)
-
-        # Process each sequence separately with its specific mutation
-        for seq_name, seq_preds in seq_predictions.items():
-            seq_results = process_single_mutation_for_sequence(
-                seq_name, seq_preds, mapping_dict, is_mutant=True, tool_type=tool_type,
-                failure_map=failure_map
-            )
-
-            # Apply additional filters
-            for result in seq_results:
-                # Apply threshold filter
-                score_field = 'score' if tool_type == 'netphos' else 'potential'
-                if result[score_field] < threshold:
-                    continue
-
-                if should_skip_mutation(result['Gene'], result.get('pkey', '').split('-')[-1] if 'pkey' in result else None, failure_map):
-                    continue
-
-                # Apply yes_only filter (NetPhos only)
-                if yes_only and tool_type == 'netphos' and result.get('answer') != 'YES':
-                    continue
-
-                results.append(result)
-
-    else:
-        # Wildtype processing - use existing bulk logic (not implemented here)
-        # This should use the existing wildtype processing logic from each pipeline
-        raise NotImplementedError("Wildtype processing should use existing pipeline-specific logic")
-
-    return results
 
 def strip_all_extensions(name: str) -> str:
     # remove .csv, .csv.gz, etc.
@@ -1958,11 +1191,14 @@ def extract_gene_from_filename(filename: str) -> str:
     # Fallback: basename without extensions
     return strip_all_extensions(Path(filename).stem)
 
-def discover_mapping_files(mapping_dir):
+def discover_mapping_files(mapping_dir, map_type=None):
     """Scan directory (or accept a single CSV) for mapping files and extract gene names flexibly.
 
     Args:
         mapping_dir: Directory path containing mapping CSV files, or path to a single CSV file
+        map_type: optional substring the FILENAME must contain ('transcript',
+            'chromosome', 'genomic', 'aa', 'intron_premRNA', 'pkey'). Without it
+            a tree holding several mapping types collapses to one file per gene.
 
     Returns:
         dict: {gene_name: file_path} mapping
@@ -1992,8 +1228,16 @@ def discover_mapping_files(mapping_dir):
             mapping_files[gene_name] = str(p)
         return mapping_files
 
-    # Scan for all CSV files
+    # Scan for all CSV files.
+    #
+    # map_type disambiguates by FILENAME. Without it this keys purely on the
+    # gene and does mapping_files[gene] = path, so scanning a tree holding
+    # several mapping types silently keeps whichever rglob yields last --
+    # measured on one output tree: chromosome/gDNA/transcript/aa/intron_premRNA
+    # for BRCA1 collapsed to chromosome alone, four types lost with no warning.
     for csv_file in Path(mapping_dir).rglob("*.csv"):
+        if map_type and map_type.lower() not in csv_file.stem.lower():
+            continue
         try:
             # Extract gene name from filename
             gene_name = extract_gene_from_filename(csv_file.stem)
@@ -2073,12 +1317,12 @@ def validate_mapping_content(file_path):
             fieldnames = [field.lower() for field in reader.fieldnames] if reader.fieldnames else []
             has_mutation = any(col in fieldnames for col in ['mutant', 'mutation', 'nt_mutation', 'ntmutant'])
             # 'intron' and 'pre_mrna' are the value columns of the two mapping
-            # CSVs exon_aware_mapping emits for intronic variants. fieldnames are
+            # CSVs variant_mapping emits for intronic variants. fieldnames are
             # lower-cased above, so the pre_mRNA header arrives as 'pre_mrna'.
             # Adding to this allow-list can only ACCEPT files that were previously
             # rejected; it cannot reject anything that passes today.
             # 'pkey' is the value column of the mutant->pkey inversion table
-            # exon_aware_mapping emits alongside the coordinate mappings. Without
+            # variant_mapping emits alongside the coordinate mappings. Without
             # it a pkey,mutant file is rejected as single-column and the four
             # pipelines that must invert a FASTA header back to a token cannot
             # load their lookup file.
@@ -2389,7 +1633,11 @@ def _non_snv_mutant_protein(gene_name, token, nt_sequence, non_snp):
     if not mut_aa_seq:
         raise ValueError(
             f"{token}: mutant ORF translates to nothing before the first stop")
-    return f"{gene_name}-{token}", mut_aa_seq
+    # Sequence names are {GENE}-{sha}, not {GENE}-{token}. A knockout token is
+    # unbounded (measured: CNTNAP2 spans 2,304,640 nt), overrunning the 224-char
+    # filename cap, PostgreSQL's 2,704-byte btree key and VARCHAR(65535). The
+    # token is recoverable from the name via token_from_name() + the pkey map.
+    return mint_pkey(gene_name, token), mut_aa_seq
 
 
 def build_mutant_sequences_for_gene(
@@ -2401,6 +1649,7 @@ def build_mutant_sequences_for_gene(
     failure_map,
     input_type: str = 'nt',
     non_snp: bool = False,
+    pkey_map: dict = None,
 ):
     """
     Return a dict of {header: sequence} for all mutants of a given gene.
@@ -2415,6 +1664,14 @@ def build_mutant_sequences_for_gene(
         log_path: Optional validation log path
         failure_map: Optional map of failed mutations to skip
         input_type: 'nt' for nucleotide mutations (e.g., A1002T), 'aa' for amino acid mutations (e.g., M334V)
+        pkey_map: optional dict, populated in place with {header -> token} for
+            every mutant built. This function is the only place holding both
+            halves at the moment a header is minted, so recording the pair here
+            is what lets a consumer recover the token WITHOUT parsing the name.
+            Purely additive: callers that pass nothing are unaffected, and the
+            mapping is correct for the current 'GENE-token' headers as well as
+            for hashed ones, so a consumer can be wired to it before the mint
+            changes and needs no second edit afterwards.
     """
     if not mapping_file or not os.path.exists(mapping_file):
         return {}
@@ -2478,6 +1735,8 @@ def build_mutant_sequences_for_gene(
                                                     nt_sequence, non_snp)
                     if built is not None:
                         mutant_sequences[built[0]] = built[1]
+                        if pkey_map is not None:
+                            pkey_map[built[0]] = mutant_clean
                         continue
 
                     pos = None
@@ -2502,8 +1761,10 @@ def build_mutant_sequences_for_gene(
                     if wt_aa and aa_sequence[idx].upper() != wt_aa.upper():
                         continue
 
-                    header = f"{gene_name}-{mutant_clean}"
+                    header = mint_pkey(gene_name, mutant_clean)
                     mutant_sequences[header] = update_str(aa_sequence, mut_aa, idx)
+                    if pkey_map is not None:
+                        pkey_map[header] = mutant_clean
                 except Exception as exc:
                     skipped_tokens.append((mutant_id, f"{type(exc).__name__}: {exc}"))
                     continue
@@ -2535,6 +1796,8 @@ def build_mutant_sequences_for_gene(
                                                         nt_sequence, non_snp)
                         if built is not None:
                             mutant_sequences[built[0]] = built[1]
+                            if pkey_map is not None:
+                                pkey_map[built[0]] = mutant_clean
                             continue
 
                         aa_string = ""
@@ -2570,8 +1833,10 @@ def build_mutant_sequences_for_gene(
                         if wt_aa and aa_sequence[idx].upper() != wt_aa.upper():
                             continue
 
-                        header = f"{gene_name}-{mutant_clean}"
+                        header = mint_pkey(gene_name, mutant_clean)
                         mutant_sequences[header] = update_str(aa_sequence, mut_aa, idx)
+                        if pkey_map is not None:
+                            pkey_map[header] = mutant_clean
                     except Exception as exc:
                         skipped_tokens.append((mutant_id, f"{type(exc).__name__}: {exc}"))
                         continue
@@ -2678,345 +1943,25 @@ def synthesize_gene_fastas(wt_sequences, mapping_lookup, sequence_root, log_path
 # Codon Usage Functions
 # =============================================================================
 
-def get_codon_counts(seq):
-    """
-    Compute codon and codon-pair statistics from a nucleotide sequence.
-
-    Returns:
-        tuple: (codondata, codonpairdata) dictionaries containing:
-            - codondata['counts']: Raw codon counts
-            - codondata['RSCU']: Relative Synonymous Codon Usage
-            - codondata['W']: Relative adaptiveness (codon frequency / max synonymous frequency)
-            - codonpairdata['counts']: Raw bicodon counts
-            - codonpairdata['RSCPU']: Relative Synonymous Codon Pair Usage
-            - codonpairdata['CPS']: Codon Pair Score (ln of observed/expected)
-            - codonpairdata['noln CPS']: CPS without natural log
-            - codonpairdata['W_CP']: Relative adaptiveness for codon pairs
-    """
-    import numpy as np
-
-    codondata = {
-        "counts": {codon: 0 for codon in codon_to_aa.keys()},
-        "RSCU": {codon: 0 for codon in codon_to_aa.keys()}
-    }
-    codonpairdata = {
-        "counts": {codon1 + codon2: 0 for codon1 in codon_to_aa.keys() for codon2 in codon_to_aa.keys()},
-        "RSCPU": {codon1 + codon2: 0 for codon1 in codon_to_aa.keys() for codon2 in codon_to_aa.keys()},
-        "noln CPS": {},
-        "CPS": {}
-    }
-
-    # Ensure sequence length is a multiple of 3
-    seq_len_multiple_of_3 = (len(seq) // 3) * 3
-
-    for i in range(0, seq_len_multiple_of_3, 3):
-        codon = seq[i:i + 3]
-        if len(codon) == 3 and codon in codondata["counts"]:
-            codondata["counts"][codon] += 1
-
-        if i + 6 <= seq_len_multiple_of_3:
-            bicodon = seq[i:i + 6]
-            if bicodon in codonpairdata["counts"]:
-                codonpairdata["counts"][bicodon] += 1
-
-    # Calculate RSCU for each codon
-    for codon1 in codondata["counts"].keys():
-        aa = codon_to_aa.get(codon1)
-        if not aa or aa == 'Stop' or aa == '-':
-            codondata["RSCU"][codon1] = np.nan
-            continue
-        syn_codons = codon_table.get(aa, [])
-        numsyn = sum(codondata["counts"].get(c, 0) for c in syn_codons)
-        try:
-            codondata["RSCU"][codon1] = codondata["counts"][codon1] / (numsyn / len(syn_codons))
-        except ZeroDivisionError:
-            codondata["RSCU"][codon1] = np.nan
-
-    # Calculate W (relative adaptiveness) for codons
-    codondata["W"] = {}
-    for codon1 in codondata["RSCU"].keys():
-        aa = codon_to_aa.get(codon1)
-        if not aa or aa == 'Stop' or aa == '-' or np.isnan(codondata["RSCU"].get(codon1, np.nan)):
-            codondata["W"][codon1] = np.nan
-            continue
-        syn_codons = codon_table.get(aa, [])
-        max_rscu = max([codondata["RSCU"].get(c, 0) for c in syn_codons] or [1])
-        codondata["W"][codon1] = codondata["RSCU"][codon1] / max_rscu if max_rscu > 0 else np.nan
-
-    # Calculate RSCPU for codon pairs
-    for cp1 in codonpairdata["counts"].keys():
-        codon_a, codon_b = cp1[:3], cp1[3:]
-        aa1 = codon_to_aa.get(codon_a)
-        aa2 = codon_to_aa.get(codon_b)
-
-        if not aa1 or not aa2 or aa1 in ('Stop', '-') or aa2 in ('Stop', '-'):
-            codonpairdata["RSCPU"][cp1] = np.nan
-            continue
-
-        syn_cp_codons1 = codon_table.get(aa1, [])
-        syn_cp_codons2 = codon_table.get(aa2, [])
-
-        numsyn = sum(codonpairdata["counts"].get(cpa + cpb, 0)
-                     for cpa in syn_cp_codons1 for cpb in syn_cp_codons2)
-        syn_cp_count = len(syn_cp_codons1) * len(syn_cp_codons2)
-
-        try:
-            codonpairdata["RSCPU"][cp1] = codonpairdata["counts"][cp1] / (numsyn / syn_cp_count)
-        except ZeroDivisionError:
-            codonpairdata["RSCPU"][cp1] = np.nan
-
-        # Calculate CPS
-        try:
-            expected_count = codondata["counts"].get(codon_a, 0) * codondata["counts"].get(codon_b, 0)
-            if expected_count == 0:
-                raise ZeroDivisionError
-            noln_cps = codonpairdata["counts"][cp1] / expected_count
-            codonpairdata["noln CPS"][cp1] = noln_cps
-            codonpairdata["CPS"][cp1] = math.log(noln_cps)
-        except (ZeroDivisionError, ValueError):
-            codonpairdata["noln CPS"][cp1] = np.nan
-            codonpairdata["CPS"][cp1] = np.nan
-
-    # Calculate W_CP for codon pairs
-    codonpairdata["W_CP"] = {}
-    for cp1 in codonpairdata["RSCPU"].keys():
-        if np.isnan(codonpairdata["RSCPU"].get(cp1, np.nan)):
-            codonpairdata["W_CP"][cp1] = np.nan
-            continue
-        codon_a, codon_b = cp1[:3], cp1[3:]
-        aa1 = codon_to_aa.get(codon_a)
-        aa2 = codon_to_aa.get(codon_b)
-        if not aa1 or not aa2:
-            codonpairdata["W_CP"][cp1] = np.nan
-            continue
-        syn_cp_codons1 = codon_table.get(aa1, [])
-        syn_cp_codons2 = codon_table.get(aa2, [])
-        max_rscpu = max([codonpairdata["RSCPU"].get(cpa + cpb, 0)
-                         for cpa in syn_cp_codons1 for cpb in syn_cp_codons2] or [1])
-        codonpairdata["W_CP"][cp1] = codonpairdata["RSCPU"][cp1] / max_rscpu if max_rscpu > 0 else np.nan
-
-    return codondata, codonpairdata
 
 
 # Human tRNA adaptation weights (tAI)
 # Based on tRNA gene copy numbers and wobble pairing efficiency
 # Sources: dos Reis et al. 2004, Tuller et al. 2010
 # Format: codon -> tAI weight (0-1 scale, normalized)
-HUMAN_TAI_WEIGHTS = {
-    'TTT': 0.344, 'TTC': 1.000, 'TTA': 0.051, 'TTG': 0.344,
-    'TCT': 0.344, 'TCC': 0.688, 'TCA': 0.172, 'TCG': 0.086,
-    'TAT': 0.344, 'TAC': 1.000, 'TAA': 0.000, 'TAG': 0.000,
-    'TGT': 0.344, 'TGC': 1.000, 'TGA': 0.000, 'TGG': 1.000,
-    'CTT': 0.172, 'CTC': 0.516, 'CTA': 0.086, 'CTG': 1.000,
-    'CCT': 0.344, 'CCC': 0.688, 'CCA': 0.344, 'CCG': 0.172,
-    'CAT': 0.344, 'CAC': 1.000, 'CAA': 0.344, 'CAG': 1.000,
-    'CGT': 0.086, 'CGC': 0.344, 'CGA': 0.086, 'CGG': 0.172,
-    'ATT': 0.516, 'ATC': 1.000, 'ATA': 0.086, 'ATG': 1.000,
-    'ACT': 0.344, 'ACC': 1.000, 'ACA': 0.344, 'ACG': 0.172,
-    'AAT': 0.344, 'AAC': 1.000, 'AAA': 0.344, 'AAG': 1.000,
-    'AGT': 0.172, 'AGC': 1.000, 'AGA': 0.172, 'AGG': 0.172,
-    'GTT': 0.344, 'GTC': 0.688, 'GTA': 0.172, 'GTG': 1.000,
-    'GCT': 0.516, 'GCC': 1.000, 'GCA': 0.344, 'GCG': 0.172,
-    'GAT': 0.344, 'GAC': 1.000, 'GAA': 0.344, 'GAG': 1.000,
-    'GGT': 0.344, 'GGC': 1.000, 'GGA': 0.344, 'GGG': 0.344,
-    '---': 0.000,
-}
 
 # Human reference W values for CAI calculation
 # Based on highly expressed genes (Sharp & Li 1987, adapted for human)
-HUMAN_REFERENCE_W = {
-    'TTT': 0.45, 'TTC': 1.00, 'TTA': 0.07, 'TTG': 0.13,
-    'TCT': 0.44, 'TCC': 0.53, 'TCA': 0.26, 'TCG': 0.11,
-    'TAT': 0.43, 'TAC': 1.00, 'TAA': 1.00, 'TAG': 0.23,
-    'TGT': 0.45, 'TGC': 1.00, 'TGA': 0.47, 'TGG': 1.00,
-    'CTT': 0.13, 'CTC': 0.20, 'CTA': 0.07, 'CTG': 1.00,
-    'CCT': 0.52, 'CCC': 0.63, 'CCA': 0.51, 'CCG': 0.18,
-    'CAT': 0.41, 'CAC': 1.00, 'CAA': 0.25, 'CAG': 1.00,
-    'CGT': 0.18, 'CGC': 0.43, 'CGA': 0.14, 'CGG': 0.25,
-    'ATT': 0.36, 'ATC': 1.00, 'ATA': 0.16, 'ATG': 1.00,
-    'ACT': 0.37, 'ACC': 1.00, 'ACA': 0.42, 'ACG': 0.18,
-    'AAT': 0.46, 'AAC': 1.00, 'AAA': 0.42, 'AAG': 1.00,
-    'AGT': 0.29, 'AGC': 1.00, 'AGA': 0.45, 'AGG': 0.42,
-    'GTT': 0.18, 'GTC': 0.29, 'GTA': 0.11, 'GTG': 1.00,
-    'GCT': 0.45, 'GCC': 1.00, 'GCA': 0.38, 'GCG': 0.19,
-    'GAT': 0.46, 'GAC': 1.00, 'GAA': 0.42, 'GAG': 1.00,
-    'GGT': 0.35, 'GGC': 1.00, 'GGA': 0.46, 'GGG': 0.35,
-    '---': 0.00,
-}
 
 
-def compute_cai(seq, w_values=None):
-    """
-    Compute Codon Adaptation Index (CAI) for a sequence.
-
-    CAI = geometric mean of W values across all codons
-    CAI = exp((1/L) * sum(ln(W_i)))
-
-    Args:
-        seq: Nucleotide sequence (in-frame ORF)
-        w_values: Dict of codon -> W values. If None, uses HUMAN_REFERENCE_W
-
-    Returns:
-        float: CAI value (0-1), or None if cannot compute
-    """
-    import numpy as np
-
-    if w_values is None:
-        w_values = HUMAN_REFERENCE_W
-
-    seq = seq.upper().replace('U', 'T')
-    seq_len = (len(seq) // 3) * 3
-
-    log_w_sum = 0.0
-    codon_count = 0
-
-    for i in range(0, seq_len, 3):
-        codon = seq[i:i+3]
-        if codon in ('TAA', 'TAG', 'TGA', '---'):  # Skip stops and gaps
-            continue
-        w = w_values.get(codon)
-        if w is None or w <= 0:
-            continue
-        log_w_sum += np.log(w)
-        codon_count += 1
-
-    if codon_count == 0:
-        return None
-
-    return np.exp(log_w_sum / codon_count)
 
 
-def compute_tai(seq, tai_weights=None):
-    """
-    Compute tRNA Adaptation Index (tAI) for a sequence.
-
-    tAI = geometric mean of tRNA adaptation weights across all codons.
-
-    Args:
-        seq: Nucleotide sequence (in-frame ORF)
-        tai_weights: Dict of codon -> tAI weights. If None, uses HUMAN_TAI_WEIGHTS
-
-    Returns:
-        float: tAI value (0-1), or None if cannot compute
-    """
-    import numpy as np
-
-    if tai_weights is None:
-        tai_weights = HUMAN_TAI_WEIGHTS
-
-    seq = seq.upper().replace('U', 'T')
-    seq_len = (len(seq) // 3) * 3
-
-    log_tai_sum = 0.0
-    codon_count = 0
-
-    for i in range(0, seq_len, 3):
-        codon = seq[i:i+3]
-        if codon in ('TAA', 'TAG', 'TGA', '---'):  # Skip stops and gaps
-            continue
-        w = tai_weights.get(codon)
-        if w is None or w <= 0:
-            continue
-        log_tai_sum += np.log(w)
-        codon_count += 1
-
-    if codon_count == 0:
-        return None
-
-    return np.exp(log_tai_sum / codon_count)
 
 
-def get_codon_tai(codon, tai_weights=None):
-    """Get tAI weight for a single codon."""
-    if tai_weights is None:
-        tai_weights = HUMAN_TAI_WEIGHTS
-    return tai_weights.get(codon.upper().replace('U', 'T'), None)
 
 
-def get_codon_cai_w(codon, w_values=None):
-    """Get CAI W value (reference adaptiveness) for a single codon."""
-    if w_values is None:
-        w_values = HUMAN_REFERENCE_W
-    return w_values.get(codon.upper().replace('U', 'T'), None)
 
 
-def extract_codon_with_bicodons(ntposnt, seq):
-    """
-    Extract codon and bicodons for a given SNP, respecting biological constraints.
-
-    Biology rules:
-    - First codon: only forward bicodon possible (codon1 + codon2)
-    - Last codon: only reverse bicodon possible (codon_n-1 + codon_n)
-    - Middle codons: both forward and reverse bicodons possible
-
-    Args:
-        ntposnt (str): SNP notation (e.g., "A123G") - 1-based position
-        seq (str): DNA sequence
-
-    Returns:
-        tuple: (original_codon, forward_bicodon, reverse_bicodon, pos_in_codon, pos, codon_number)
-               where bicodons may be empty strings if not biologically possible
-    """
-    pos, mut = get_mutation_data_bioAccurate(ntposnt, is_nt=True)
-    if pos is None:
-        return None, "", "", 0, 0, 0
-
-    # Convert to 0-based indexing
-    pos_0_indexed = pos - 1
-
-    # F46: apply the ALT base before slicing. Previously `mut` was bound and never
-    # used, so every codon/bicodon (and every RSCU/W/CAI/tAI derived from them) was
-    # sliced from the unmodified WT ORF while the caller labeled it 'mutated_codon'
-    # — the mutation was invisible on the only CLI-reachable path. Only the mutated
-    # codon changes; neighbouring codons in the bicodons stay WT, which is correct.
-    if pos_0_indexed < 0 or pos_0_indexed >= len(seq):
-        return None, "", "", 0, 0, 0
-    ref_nt, alt_nt = mut
-    # F46 REF GUARD: splicing ALT onto a base that is not REF invents a codon present
-    # in NEITHER the WT nor the true mutant sequence. Measured on the production corpus
-    # (59 genes / 35,089 tokens vs Bio_DBs/fastas ORF records): 1,537 tokens (4.38%)
-    # have a REF that disagrees with the ORF base — concentrated in MECP2 295/423,
-    # NOD2 271/387, FGFR2 215/290, MPZ 195/270 — i.e. an ORF/isoform mismatch, not noise.
-    # Reject rather than fabricate; the caller turns None into a skipped row.
-    if ref_nt and seq[pos_0_indexed].upper() != ref_nt.upper():
-        return None, "", "", 0, 0, 0
-    seq = seq[:pos_0_indexed] + alt_nt.upper() + seq[pos_0_indexed + 1:]
-
-    pos_in_codon = pos_0_indexed % 3
-
-    # Find the codon start position and codon number
-    codon_start_pos = (pos_0_indexed // 3) * 3
-    codon_number = (pos_0_indexed // 3) + 1  # 1-based codon numbering
-
-    # Calculate total number of complete codons in sequence
-    total_codons = len(seq) // 3
-
-    # Extract the original codon containing the mutation
-    original_codon = seq[codon_start_pos:codon_start_pos + 3]
-
-    # Initialize bicodons
-    forward_bicodon = ""
-    reverse_bicodon = ""
-
-    # Determine which bicodons are biologically possible
-    is_first_codon = (codon_number == 1)
-    is_last_codon = (codon_number == total_codons)
-
-    # Forward bicodon (current codon + following codon)
-    # Possible for first and middle codons, but not last codon
-    if not is_last_codon and codon_start_pos + 6 <= len(seq):
-        following_codon = seq[codon_start_pos + 3:codon_start_pos + 6]
-        if len(following_codon) == 3:
-            forward_bicodon = original_codon + following_codon
-
-    # Reverse bicodon (preceding codon + current codon)
-    # Possible for middle and last codons, but not first codon
-    if not is_first_codon and codon_start_pos >= 3:
-        preceding_codon = seq[codon_start_pos - 3:codon_start_pos]
-        if len(preceding_codon) == 3:
-            reverse_bicodon = preceding_codon + original_codon
-
-    return original_codon, forward_bicodon, reverse_bicodon, pos_in_codon, pos, codon_number
 
 
 # =============================================================================
@@ -3028,398 +1973,27 @@ def extract_codon_with_bicodons(ntposnt, seq):
 # 0-9 (10) + '!' '@' (2), plus '-' gap = 65 symbols. Case-sensitive by design
 # ('A' encodes codon AAA, 'a' a different codon), which is why the codon check
 # below runs BEFORE any upper-casing.
-_CODON_ENCODE_CHARS = (
-    [chr(c) for c in range(ord('A'), ord('Z') + 1)]
-    + [chr(c) for c in range(ord('a'), ord('z') + 1)]
-    + [str(d) for d in range(10)]
-    + ['!', '@']
-)
-CODON_ENCODED_ALPHABET = '-' + ''.join(_CODON_ENCODE_CHARS)
 # Symbols that occur ONLY in the codon-encoded alphabet — never in nucleotide
 # (ACGTU/IUPAC) or standard protein (20 aa + BXZUO*) sequences. Their presence
 # is an unambiguous codon-encoding signal.
-_CODON_ONLY_MARKERS = frozenset('0123456789!@')
-
-
-def detect_alphabet(sequence):
-    """Return 'codon', 'nucleotide', or 'protein' based on character composition.
-
-    - 'codon'     : single-character codon-encoded sequence (see
-                    mutation_effects/bin/codon_encoding.py). Reported only when
-                    the sequence carries a codon-only marker (a digit, '!' or
-                    '@') AND every non-gap character lies in the codon alphabet.
-                    Evaluated case-sensitively and BEFORE the nt/protein test,
-                    because the codon alphabet is case-sensitive and its digits
-                    would otherwise be counted as non-nucleotide.
-                    Limitation: a codon-encoded sequence that happens to use only
-                    upper-case-letter codons (no digit/'!'/'@') is
-                    indistinguishable from protein by composition and is reported
-                    as 'protein'. A hard limit of composition-only detection.
-    - 'nucleotide': >=90% of non-gap characters are ACGT + U (RNA) + N (masked
-                    base). IUPAC ambiguity codes are excluded — they collide with
-                    amino-acid letters and do not appear in BFF's ORF/CDS inputs.
-    - 'protein'   : otherwise.
-    """
-    raw = sequence.replace('-', '').replace('.', '')
-    if not raw.replace('*', ''):
-        raise ValueError("Empty sequence.")
-
-    # Codon-encoded check first, case-sensitive.
-    codon_alpha = set(CODON_ENCODED_ALPHABET)
-    if any(c in _CODON_ONLY_MARKERS for c in raw) and all(c in codon_alpha for c in raw):
-        return 'codon'
-
-    seq = raw.upper().replace('*', '')
-    # Bases + U (RNA) + N (masked base) only. IUPAC ambiguity codes
-    # (RYSWKMBDHV) are intentionally EXCLUDED: 10 of them collide with amino-acid
-    # one-letter codes, weakening nt-vs-protein discrimination, and they do not
-    # occur in BFF's ORF/CDS inputs (the only sequences detect_alphabet runs on).
-    nt_chars = set('ACGTUN')
-    nt_count = sum(1 for c in seq if c in nt_chars)
-    return 'nucleotide' if nt_count / len(seq) >= 0.90 else 'protein'
-
-
-def prepare_protein_query(query_fasta):
-    """Return a protein FASTA path suitable for jackhmmer.
-
-    If the query sequence is nucleotide, translates to protein (to stop codon)
-    and writes the result to a temporary file.
-
-    Returns:
-        (protein_fasta_path, tmp_path_or_None)
-        Caller must delete tmp_path when finished if it is not None.
-    """
-    import tempfile
-    from Bio import SeqIO
-    from Bio.SeqRecord import SeqRecord
-
-    record = next(SeqIO.parse(query_fasta, 'fasta'))
-    alphabet = detect_alphabet(str(record.seq))
-
-    if alphabet == 'protein':
-        return query_fasta, None
-
-    print(f"Nucleotide query detected for '{record.id}' — translating to protein.")
-    aa_seq = record.seq.translate(to_stop=True)
-    if not aa_seq:
-        raise ValueError(f"Translation of '{record.id}' produced an empty protein sequence.")
-
-    aa_record = SeqRecord(aa_seq, id=record.id, description='translated')
-    tmp = tempfile.NamedTemporaryFile(mode='w', suffix='.fasta', delete=False)
-    SeqIO.write([aa_record], tmp, 'fasta')
-    tmp.close()
-    print(f"Translated protein length: {len(aa_seq)} aa")
-    return tmp.name, tmp.name
-
-
-def run_jackhmmer(query_fasta, database, output_sto, jackhmmer_binary,
-                  iterations=5, evalue_inclusion=1e-3, threads=4, max_seqs=10000):
-    """
-    Run jackhmmer iterative search against a sequence database.
-
-    Args:
-        query_fasta: Path to query protein sequence (FASTA)
-        database: Path to UniRef90 or similar database
-        output_sto: Path for Stockholm output
-        jackhmmer_binary: Path to jackhmmer executable
-        iterations: Number of search iterations
-        evalue_inclusion: E-value threshold for inclusion
-        threads: Number of CPU threads
-        max_seqs: Maximum number of sequences to include in the alignment (default: 10000).
-                  Prevents profile drift for genes in large superfamilies.
-
-    Returns:
-        Path to Stockholm output file
-    """
-    cmd = [
-        jackhmmer_binary,
-        '-N', str(iterations),
-        '--incE', str(evalue_inclusion),
-        '-A', output_sto,
-        '--cpu', str(threads),
-        '--noali',
-        query_fasta,
-        database
-    ]
-
-    result = subprocess.run(cmd, capture_output=True, text=True)
-
-    if result.returncode != 0:
-        raise RuntimeError(f"jackhmmer failed: {result.stderr}")
-
-    return Path(output_sto)
-
-
-def parse_stockholm(stockholm_file):
-    """
-    Parse Stockholm format MSA file.
-
-    Args:
-        stockholm_file: Path to Stockholm file
-
-    Returns:
-        tuple: (dict {seq_id: sequence}, rf_annotation str or None)
-            rf_annotation is the concatenated #=GC RF string where 'x' marks
-            match columns and '.' marks insert columns. None if absent.
-    """
-    from collections import defaultdict
-    current_seqs = defaultdict(str)
-    rf_parts = []
-
-    with open(stockholm_file, 'r') as f:
-        for line in f:
-            line = line.rstrip()
-
-            # Capture RF column annotation before skipping other # lines
-            if line.startswith('#=GC RF'):
-                parts = line.split()
-                if len(parts) >= 3:
-                    rf_parts.append(parts[2])
-                continue
-
-            # Skip remaining comments and empty lines
-            if line.startswith('#') or line.startswith('//') or not line:
-                continue
-            parts = line.split()
-            if len(parts) >= 2:
-                seq_id = parts[0]
-                seq = parts[1]
-                current_seqs[seq_id] += seq
-
-    rf_annotation = ''.join(rf_parts) if rf_parts else None
-    return dict(current_seqs), rf_annotation
-
-
-def stockholm_to_a2m(msa, focus_seq_id, rf_annotation=None):
-    """
-    Convert Stockholm MSA to A2M format.
-
-    A2M format:
-    - Uppercase: match states (aligned to query)
-    - Lowercase: insertions relative to query
-    - '-': deletions (gaps in sequence, not in query)
-    - '.': gaps in query (insertions in other sequences)
-
-    Args:
-        msa: dict {seq_id: sequence}
-        focus_seq_id: ID of the focus/query sequence
-        rf_annotation: #=GC RF string from parse_stockholm where 'x' = match
-            column and '.' = insert column. When provided, this is used as the
-            authoritative match/insert column definition. Falls back to focus
-            sequence non-gap positions when None.
-
-    Returns:
-        dict: {seq_id: a2m_sequence}
-    """
-    if focus_seq_id not in msa:
-        for seq_id in msa:
-            if focus_seq_id in seq_id or seq_id in focus_seq_id:
-                focus_seq_id = seq_id
-                break
-        else:
-            raise ValueError(f"Focus sequence '{focus_seq_id}' not found in MSA")
-
-    # Identify match columns using RF annotation when available
-    if rf_annotation is not None:
-        match_columns = {i for i, c in enumerate(rf_annotation) if c == 'x'}
-    else:
-        focus_seq = msa[focus_seq_id]
-        match_columns = {i for i, c in enumerate(focus_seq) if c not in '-.'}
-
-    a2m_msa = {}
-    for seq_id, seq in msa.items():
-        a2m_seq = []
-        for i, c in enumerate(seq):
-            if i in match_columns:
-                if c in '-.':
-                    a2m_seq.append('-')
-                else:
-                    a2m_seq.append(c.upper())
-            else:
-                if c in '-.':
-                    a2m_seq.append('.')
-                else:
-                    a2m_seq.append(c.lower())
-        a2m_msa[seq_id] = ''.join(a2m_seq)
-
-    return a2m_msa
-
-
-def filter_msa_by_gaps(msa, max_seq_gaps=0.4, max_col_gaps=0.6, a2m_format=False, focus_id=None):
-    """
-    Filter MSA by removing gappy sequences and columns.
-
-    Args:
-        msa: dict {seq_id: sequence}
-        max_seq_gaps: Maximum fraction of gaps allowed per sequence
-        max_col_gaps: Maximum fraction of gaps allowed per column
-        a2m_format: When True, gap fractions are computed over match-state
-            columns only (uppercase + '-'). Insert columns ('.' and lowercase)
-            are structural in A2M and excluded from gap accounting. Column
-            filtering also operates on match-state columns only.
-        focus_id: When provided, columns where the focus sequence has a residue
-            (non-gap match state) are always retained regardless of gap fraction.
-
-    Returns:
-        dict: Filtered MSA
-    """
-    if not msa:
-        return {}
-
-    if a2m_format:
-        # Identify match-state column indices (uppercase or '-' in any sequence)
-        sample = next(iter(msa.values()))
-        match_cols = [i for i, c in enumerate(sample) if c == '-' or c.isupper()]
-
-        # Remove sequences with too many deletions in match-state columns
-        filtered_seqs = {}
-        for seq_id, seq in msa.items():
-            match_states = [seq[i] for i in match_cols]
-            gap_count = sum(1 for c in match_states if c == '-')
-            gap_frac = gap_count / len(match_states) if match_states else 1.0
-            if gap_frac <= max_seq_gaps:
-                filtered_seqs[seq_id] = seq
-
-        if not filtered_seqs:
-            return {}
-
-        focus_seq = filtered_seqs.get(focus_id) if focus_id else None
-
-        # Remove match-state columns with too many gaps; always retain focus residue columns
-        seq_list = list(filtered_seqs.values())
-        n_seqs = len(seq_list)
-        cols_to_keep = []
-        for i in match_cols:
-            if focus_seq is not None and focus_seq[i] != '-':
-                cols_to_keep.append(i)
-                continue
-            col = [s[i] for s in seq_list]
-            gap_frac = sum(1 for c in col if c == '-') / n_seqs
-            if gap_frac <= max_col_gaps:
-                cols_to_keep.append(i)
-
-        # Reconstruct full sequences keeping only retained match columns;
-        # insert columns are dropped since downstream tools use match states only
-        final_msa = {}
-        for seq_id, seq in filtered_seqs.items():
-            final_msa[seq_id] = ''.join(seq[i] for i in cols_to_keep)
-
-        return final_msa
-
-    # Stockholm / non-A2M path
-    filtered_seqs = {}
-    for seq_id, seq in msa.items():
-        gap_count = seq.count('-') + seq.count('.') + seq.count('!')
-        gap_frac = gap_count / len(seq) if len(seq) > 0 else 1.0
-        if gap_frac <= max_seq_gaps:
-            filtered_seqs[seq_id] = seq
-
-    if not filtered_seqs:
-        return {}
-
-    seq_list = list(filtered_seqs.values())
-    seq_len = len(seq_list[0])
-    n_seqs = len(seq_list)
-
-    cols_to_keep = []
-    for i in range(seq_len):
-        col = [s[i] for s in seq_list]
-        gap_count = sum(1 for c in col if c in '-.')
-        gap_frac = gap_count / n_seqs
-        if gap_frac <= max_col_gaps:
-            cols_to_keep.append(i)
-
-    final_msa = {}
-    for seq_id, seq in filtered_seqs.items():
-        new_seq = ''.join(seq[i] for i in cols_to_keep)
-        final_msa[seq_id] = new_seq
-
-    return final_msa
-
-
-def _chunk_codons(seq):
-    """Split a nucleotide sequence into codon triplets.
-
-    Any triplet containing a gap character ('-' or '.') is normalized to '---'
-    so the gap_tokens filter in compute_sequence_weights treats partial-gap
-    codons as gaps rather than as informative residues. Without this, a column
-    drop in filter_msa_by_gaps that breaks codon alignment leaks partial-gap
-    codons (e.g. 'A-G') into the identity calculation, inflating both the
-    match and aligned counts and skewing N_eff.
-
-    Trailing 1-2 nt that don't complete a codon are dropped (codon MSAs are
-    expected to have lengths that are multiples of 3).
-    """
-    codons = []
-    for i in range(0, len(seq) - len(seq) % 3, 3):
-        c = seq[i:i+3]
-        codons.append('---' if any(ch in '-.' for ch in c) else c)
-    return codons
-
-
-def compute_sequence_weights(msa, identity_threshold=0.8, codon_mode=False):
-    """
-    Compute sequence weights based on clustering at identity threshold.
-
-    Used for N_eff calculation. Weight = 1 / number of neighbors.
-
-    Args:
-        msa: dict {seq_id: sequence}
-        identity_threshold: Clustering threshold (0.8 = 80% identity)
-        codon_mode: If True, compare codon triplets instead of single characters.
-                    Use for codon MSAs where each unit is a 3-nt codon.
-
-    Returns:
-        dict: {seq_id: weight}
-    """
-    seq_ids = list(msa.keys())
-    n_seqs = len(seq_ids)
-
-    if n_seqs == 0:
-        return {}
-
-    if codon_mode:
-        seqs = [_chunk_codons(msa[sid]) for sid in seq_ids]
-        gap_tokens = {'---', '...'}
-    else:
-        seqs = [msa[sid] for sid in seq_ids]
-        gap_tokens = {'-', '.'}
-
-    neighbor_counts = [1] * n_seqs
-
-    for i in range(n_seqs):
-        for j in range(i + 1, n_seqs):
-            matches = sum(1 for a, b in zip(seqs[i], seqs[j])
-                         if a == b and a not in gap_tokens)
-            aligned = sum(1 for a, b in zip(seqs[i], seqs[j])
-                         if a not in gap_tokens and b not in gap_tokens)
-            if aligned > 0:
-                identity = matches / aligned
-                if identity >= identity_threshold:
-                    neighbor_counts[i] += 1
-                    neighbor_counts[j] += 1
-
-    weights = {seq_ids[i]: 1.0 / neighbor_counts[i] for i in range(n_seqs)}
-    return weights
-
-
-def compute_neff(msa, identity_threshold=0.8, codon_mode=False):
-    """
-    Compute effective number of sequences (N_eff).
-
-    N_eff = sum of sequence weights, where weight = 1/n_neighbors.
-    Higher N_eff indicates more diverse MSA with better evolutionary signal.
-
-    Args:
-        msa: dict {seq_id: sequence}
-        identity_threshold: Clustering threshold
-        codon_mode: If True, compare codon triplets instead of single characters.
-
-    Returns:
-        float: N_eff value
-    """
-    weights = compute_sequence_weights(msa, identity_threshold, codon_mode=codon_mode)
-    return sum(weights.values())
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 
@@ -3463,20 +2037,3 @@ def mutation_class(wt_aa, mut_aa):
     if wt_aa == "Stop" and mut_aa != "Stop":
         return "STOP_LOSS"
     return "MISSENSE"
-
-
-def write_a2m(msa, output_path, focus_seq_id=None):
-    """
-    Write MSA to A2M format file.
-
-    Args:
-        msa: dict {seq_id: sequence}
-        output_path: Output file path
-        focus_seq_id: If provided, write focus sequence first
-    """
-    with open(output_path, 'w') as f:
-        if focus_seq_id and focus_seq_id in msa:
-            f.write(f">{focus_seq_id}\n{msa[focus_seq_id]}\n")
-        for seq_id, seq in msa.items():
-            if seq_id != focus_seq_id:
-                f.write(f">{seq_id}\n{seq}\n")

@@ -53,8 +53,10 @@ from pathlib import Path
 import sys
 from typing import Optional, Dict, List, Tuple
 # Import utility functions
-from biofeaturefactory.utils.utility import (
+from biofeaturefactory.lib.utility import (
     read_fasta,
+    mint_pkey,
+    token_from_name,
     get_mutation_data_bioAccurate,
     load_validation_failures,
     should_skip_mutation,
@@ -598,18 +600,7 @@ def _iter_mutation_tokens(mapping_file):
     return tokens
 
 
-def _token_from_key(mut_id, gene_name):
-    """Recover the mutation token from a mutant FASTA key.
-
-    Keys are built as f"{gene_name}-{token}" (utility.py:2293). The exact
-    gene-name prefix is stripped rather than split('-', 1), which would break
-    every hyphenated symbol (NKX2-1, HLA-A, MT-CO1).
-    """
-    prefix = f"{gene_name}-"
-    return mut_id[len(prefix):] if mut_id.startswith(prefix) else mut_id
-
-
-def _build_aa_nonsnv_mutants(gene_name, wt_aa_seq, tokens, failure_map):
+def _build_aa_nonsnv_mutants(gene_name, wt_aa_seq, tokens, failure_map, pkey_map=None):
     """Mutant proteins for non-SNV AMINO-ACID tokens. Returns {header: sequence}.
 
     BLOCKER WORKAROUND. build_mutant_sequences_for_gene cannot do this: its
@@ -641,8 +632,11 @@ def _build_aa_nonsnv_mutants(gene_name, wt_aa_seq, tokens, failure_map):
         # multi-residue REF whose first residue happens to match.
         if wt_aa_seq[variant.pos0:variant.pos0 + len(variant.ref)].upper() != variant.ref.upper():
             continue
-        built[f"{gene_name}-{token}"] = splice_seq(
+        key = mint_pkey(gene_name, token)
+        built[key] = splice_seq(
             wt_aa_seq, variant.pos0, variant.ref, variant.alt, validate=False)
+        if pkey_map is not None:
+            pkey_map[key] = token
     return built
 
 
@@ -997,7 +991,7 @@ def _rejected_summary_row(gene_name, token, reason, edit=None, is_nt=True):
     qc_flags carries the reason.
     """
     row = {
-        'pkey': f"{gene_name}-{token}",
+        'pkey': mint_pkey(gene_name, token),
         'gene': gene_name,
         'qc_flags': reason,
     }
@@ -1289,9 +1283,12 @@ def main():
         # token dies inside utility before this pipeline ever sees it. An indel's
         # mutant protein is the translation of the edited ORF, which is what
         # non_snp=True builds; update_str on the aa sequence cannot express one.
+        # Sequence names are {GENE}-{sha} now; pkey_map carries name -> token so
+        # token_from_name recovers the spelling without parsing the name.
+        pkey_map = {}
         mutant_seqs = build_mutant_sequences_for_gene(
             gene_name, wt_nt_seq, wt_aa_seq, mutation_file, args.log, failure_map,
-            input_type=seq_type, non_snp=True
+            input_type=seq_type, non_snp=True, pkey_map=pkey_map
         )
 
         # The token list is the denominator for "was every mutation accounted
@@ -1304,7 +1301,7 @@ def main():
             # cannot splice a non-SNV amino-acid token, because its non-SNV branch
             # needs an ORF to re-translate and aa mode has none.
             for header, seq in _build_aa_nonsnv_mutants(
-                    gene_name, wt_aa_seq, tokens, failure_map).items():
+                    gene_name, wt_aa_seq, tokens, failure_map, pkey_map).items():
                 mutant_seqs.setdefault(header, seq)
 
         if args.verbose:
@@ -1326,7 +1323,7 @@ def main():
         # carrying '*', on every --log run -- the token was neither built nor
         # reported, which is the silent drop this accounting exists to remove.
         # Verified: 3 tokens in, 2 rows out, T11G gone without a trace.
-        built_tokens = {_token_from_key(mut_id, gene_name) for mut_id in mutant_seqs}
+        built_tokens = {token_from_name(mut_id, gene_name, pkey_map) for mut_id in mutant_seqs}
         for token in tokens:
             if token in built_tokens:
                 continue
@@ -1379,7 +1376,7 @@ def main():
                 # The aa effect needs no prediction to resolve, so it is reported
                 # here too rather than left blank.
                 for mut_id, mut_seq in mutant_seqs.items():
-                    token = _token_from_key(mut_id, gene_name)
+                    token = token_from_name(mut_id, gene_name, pkey_map)
                     summary_rows.append(_rejected_summary_row(
                         gene_name, token, 'NO_WT_PREDICTION',
                         _aa_edit_record(token, wt_nt_seq, wt_aa_seq, mut_seq),
@@ -1391,7 +1388,7 @@ def main():
             # Process each mutant
             is_nt_input = wt_nt_seq is not None
             for mut_id, mut_seq in mutant_seqs.items():
-                mutation_str = _token_from_key(mut_id, gene_name)
+                mutation_str = token_from_name(mut_id, gene_name, pkey_map)
 
                 # Resolved before the prediction check so a mutant that failed
                 # prediction still reports the aa effect it was going to be scored

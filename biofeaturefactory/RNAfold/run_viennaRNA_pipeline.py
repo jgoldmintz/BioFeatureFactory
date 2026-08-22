@@ -33,9 +33,10 @@ import RNA
 
 os.environ["OMP_NUM_THREADS"] = "1"
 
-from biofeaturefactory.utils.exon_aware_mapping import parse_piece_token, split_piece_cell
-from biofeaturefactory.utils.utility import (
+from biofeaturefactory.lib.utility import (
     mint_pkey,
+    parse_piece_token,
+    split_piece_cell,
     _collect_failures_from_logs,
     read_fasta,
     update_str,
@@ -436,7 +437,7 @@ def _load_intron_premrna(path, gene_name):
                     continue
                 # A bracketed cell is a multi-piece variant; each piece is its own
                 # fold against its own record. split_piece_cell is the shared
-                # reader in exon_aware_mapping, beside parse_piece_token, which
+                # reader in variant_mapping, beside parse_piece_token, which
                 # already parses each piece below -- the split half used to be
                 # reimplemented here and in miranda.
                 for piece in split_piece_cell(intron):
@@ -449,8 +450,18 @@ def _load_intron_premrna(path, gene_name):
     return intron_jobs, premrna_jobs
 
 
-def _resolve_map_for_gene(map_root, gene_name, valid_exts):
-    """Pick the mapping file for a gene from a file or a directory."""
+def _resolve_map_for_gene(map_root, gene_name, valid_exts, name_contains=None):
+    """Pick the mapping file for a gene from a file or a directory tree.
+
+    RECURSIVE. variant_mapping groups its output by gene
+    (<out>/<GENE>/mappings/<type>/<file>.csv), matching every other pipeline, so
+    a flat iterdir of the root finds nothing -- the files are three levels down.
+    rglob handles that and the older flat <out>/mappings/<type>/ layout alike.
+
+    name_contains filters by mapping TYPE, which recursion makes necessary: a
+    tree holds transcript, chromosome, gDNA, aa, intron_premRNA and pkey files
+    that all carry the same gene, so without it whichever sorts first wins.
+    """
     if map_root is None:
         return None
     p = Path(map_root)
@@ -458,8 +469,10 @@ def _resolve_map_for_gene(map_root, gene_name, valid_exts):
         return p
     if not p.is_dir():
         return None
-    cands = [m for m in sorted(p.iterdir())
-             if m.suffix in valid_exts and extract_gene_from_filename(str(m)) == gene_name]
+    cands = [m for m in sorted(p.rglob("*"))
+             if m.is_file() and m.suffix in valid_exts
+             and (not name_contains or name_contains.lower() in m.stem.lower())
+             and extract_gene_from_filename(str(m)) == gene_name]
     return cands[0] if cands else None
 
 
@@ -504,7 +517,13 @@ def main():
     if transcpt is None:
         raise ValueError("--transcript-mapping is required")
 
-    maps = [transcpt] if transcpt.is_file() else [t for t in transcpt.iterdir() if t.suffix in valid_exts_map]
+    # Recursive + type-filtered, for the same reason as _resolve_map_for_gene:
+    # the mappings sit at <root>/<GENE>/mappings/transcript/ under the gene-first
+    # layout, and a flat scan of the root sees none of them.
+    maps = ([transcpt] if transcpt.is_file()
+            else [t for t in sorted(transcpt.rglob("*"))
+                  if t.is_file() and t.suffix in valid_exts_map
+                  and "transcript" in t.stem.lower()])
     if not maps:
         raise ValueError(f'No valid transcript maps found in {transcpt.name if hasattr(transcpt, "name") else transcpt}')
     maps_by_gene = {}
@@ -621,7 +640,8 @@ def main():
         # These never appear in the transcript mapping and never can: an intron
         # has no transcript coordinate. They arrive through their own mappings
         # and are folded against BOTH the excised intron and the pre-mRNA.
-        ipm_f = _resolve_map_for_gene(args.intron_premrna_mapping, gene_name, valid_exts_map)
+        ipm_f = _resolve_map_for_gene(args.intron_premrna_mapping, gene_name, valid_exts_map,
+                                      name_contains="intron_premRNA")
         intron_jobs, premrna_jobs = _load_intron_premrna(ipm_f, gene_name)
 
         def _attempt(mut, coord_tok, substrate, seq, seq_key):
@@ -634,7 +654,7 @@ def main():
             as "-2/4 ok" on the first run.
             """
             run_summary["mutations_total"] += 1
-            # Bounded key, identical to the one exon_aware_mapping wrote into the
+            # Bounded key, identical to the one variant_mapping wrote into the
             # mapping's pkey column: both hash the same verbatim token. Minting
             # '{gene}-{mut}' here made the key as long as the variant -- 2,215
             # chars for the 2,209 nt deletion in the test fixture.
@@ -698,12 +718,39 @@ def main():
     run_summary["genes_processed"] = run_summary["genes_total"] - run_summary["genes_skipped"]
     run_summary["mutations_unsuccessful"] = len(run_summary["unsuccessful"])
     run_summary["mutations_successful"] = run_summary["mutations_total"] - run_summary["mutations_unsuccessful"]
+    # Written PER GENE, under <out>/<GENE>/RNAfold/, so the run leaves nothing
+    # loose at the output root -- every other artifact this pipeline emits is
+    # already grouped that way. The per-gene file carries only that gene's
+    # entries, with the counters recomputed for it, so it is readable on its own
+    # rather than being a copy of a run-wide total.
     Path(args.output).mkdir(parents=True, exist_ok=True)
-    with open(Path(args.output) / "rnafold.run_summary.json", "w") as f:
-        json.dump(run_summary, f, indent=2)
+
+    def _gene_of(entry):
+        # Substrate keys are '<GENE>~<SUBSTRATE>'; the summary is per gene.
+        g = str(entry.get("gene", "") or "")
+        return g.split("~", 1)[0]
+
+    genes_seen = {g for g in (
+        [_gene_of(e) for e in run_summary.get("unsuccessful", [])]
+        + [_gene_of(e) for e in run_summary.get("skipped_genes", [])]
+        + list(results_by_gene.keys())
+    ) if g}
+    for gname in sorted(genes_seen):
+        unsucc = [e for e in run_summary.get("unsuccessful", []) if _gene_of(e) == gname]
+        skipped = [e for e in run_summary.get("skipped_genes", []) if _gene_of(e) == gname]
+        per = dict(run_summary)
+        per["gene"] = gname
+        per["unsuccessful"] = unsucc
+        per["skipped_genes"] = skipped
+        per["mutations_unsuccessful"] = len(unsucc)
+        gene_dir = Path(args.output) / gname / "RNAfold"
+        gene_dir.mkdir(parents=True, exist_ok=True)
+        with open(gene_dir / "rnafold.run_summary.json", "w") as f:
+            json.dump(per, f, indent=2)
     print(f"[SUMMARY] genes {run_summary['genes_processed']}/{run_summary['genes_total']}, "
           f"mutations {run_summary['mutations_successful']}/{run_summary['mutations_total']} ok, "
-          f"{run_summary['mutations_unsuccessful']} unsuccessful -> rnafold.run_summary.json")
+          f"{run_summary['mutations_unsuccessful']} unsuccessful "
+          f"-> <gene>/RNAfold/rnafold.run_summary.json")
 
 if __name__ == "__main__":
     main()

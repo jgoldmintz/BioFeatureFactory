@@ -47,7 +47,7 @@ import sys
 from pathlib import Path
 from typing import Dict, List, Optional
 
-from biofeaturefactory.utils.utility import (
+from biofeaturefactory.lib.utility import (
     discover_fasta_files,
     extract_gene_from_filename,
 )

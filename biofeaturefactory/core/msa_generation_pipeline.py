@@ -34,7 +34,7 @@ import numpy as np
 from Bio import SeqIO
 from Bio.Seq import Seq
 
-from biofeaturefactory.utils.utility import (
+from biofeaturefactory.lib.utility import (
     prepare_protein_query, extract_gene_from_filename,
     run_jackhmmer, parse_stockholm, stockholm_to_a2m,
     filter_msa_by_gaps, compute_sequence_weights, compute_neff,
@@ -329,8 +329,12 @@ Quality thresholds:
         print(f"Sequences (filtered): {stats['n_sequences_filtered']}")
         print(f"N_eff: {stats['n_eff']} ({stats['n_eff_ratio']}xL)")
         print(f"Coverage: {stats['coverage']:.1%}")
-    print(f"Mean identity: {stats['mean_identity']:.1%}")
-    print(f"Quality check: {'PASS' if stats['quality_pass'] else 'WARN (low N_eff)'}")
+        # These three were at the OUTER indent, outside the per-gene loop: in
+        # directory mode they printed once, from whichever gene ran last, so every
+        # other gene's quality-gate result was never reported at all.
+        print(f"Mean identity: {stats['mean_identity']:.1%}")
+        print(f"Quality check: {'PASS' if stats['quality_pass'] else 'WARN (low N_eff)'}")
+
     print(f"Output dir: {args.output}")
 
 

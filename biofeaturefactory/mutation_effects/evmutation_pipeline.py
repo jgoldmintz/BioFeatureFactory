@@ -68,7 +68,7 @@ if not hasattr(collections, "Iterable"):
 
 from EVmutation.model import CouplingsModel
 import EVmutation.tools as ev_tools
-from biofeaturefactory.utils.utility import (
+from biofeaturefactory.lib.utility import (
     codon_to_aa,
     discover_fasta_files,
     extract_gene_from_filename,
@@ -337,7 +337,7 @@ def read_orf_sequence(fasta_path):
     """
     Load ORF sequence from FASTA.
 
-    Prefers the 'ORF' key (exon_aware_mapping.py convention).
+    Prefers the 'ORF' key (variant_mapping.py convention).
     Falls back to the first record if 'ORF' is absent.
     """
     seqs = read_fasta(fasta_path)
@@ -1464,7 +1464,7 @@ Examples:
                         help="Skip codon-level scoring; route synonymous + stop variants to the protein TSV "
                              "(synonymous score is 0 by construction; stop has no AA-level score)")
     parser.add_argument("--validation-log",
-                        help="Validation log from exon_aware_mapping for mutation filtering")
+                        help="Validation log from variant_mapping for mutation filtering")
     parser.add_argument("--output", "-o", default=".",
                         help="Output directory (default: current directory)")
     parser.add_argument("--quiet", "-q", action="store_true",
