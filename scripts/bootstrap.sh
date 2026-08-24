@@ -461,7 +461,21 @@ download_file() {
     echo "  EXISTS $out"
     return
   fi
-  if command -v aria2c >/dev/null 2>&1; then
+  # wget FIRST. On the Linux target, GeneSplicer's FTP host
+  # (ftp.ccb.jhu.edu) is only reachable with wget; aria2c and curl fail there.
+  # Both work against it from macOS -- all three fetch the identical 9,274,943
+  # bytes, md5 d6372e42389a56b14c9d69f434af80e6 -- so the difference is the host
+  # or its FTP stack, not the URL. wget leads and the other two remain as
+  # fallbacks for machines that do not ship it.
+  if command -v wget >/dev/null 2>&1; then
+    wget --continue \
+      --tries=20 \
+      --waitretry=10 \
+      --timeout=60 \
+      --read-timeout=60 \
+      -O "$out" \
+      "$url"
+  elif command -v aria2c >/dev/null 2>&1; then
     aria2c --continue=true \
       --max-connection-per-server=4 \
       --split=4 \
@@ -477,7 +491,7 @@ download_file() {
   elif command -v curl >/dev/null 2>&1; then
     curl -L --retry 5 --retry-delay 3 -o "$out" "$url"
   else
-    echo "ERROR: need aria2c or curl to download $url" >&2
+    echo "ERROR: need wget, aria2c or curl to download $url" >&2
     return 1
   fi
 }
