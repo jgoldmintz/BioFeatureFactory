@@ -348,15 +348,21 @@ def analyze_binding(
         contact_threshold: Distance threshold for contacts (A)
 
     Returns:
-        BindingAnalysis with binding metrics
+        BindingAnalysis with binding metrics, or None if either chain is
+        absent from the structure (nothing to analyze). A structure holding
+        both chains with no contacts inside the threshold is a genuine
+        no-interface result and returns n_contacts=0, not None.
     """
+    rna_chain_residues = structure.get_chain(rna_chain)
+    protein_chain_residues = structure.get_chain(protein_chain)
+
+    if not rna_chain_residues or not protein_chain_residues:
+        return None
+
     # Get contacts
     contacts = structure.get_interface_contacts(
         rna_chain, protein_chain, contact_threshold
     )
-
-    if not contacts:
-        return None
 
     # Calculate metrics
     distances = [c[2] for c in contacts]
@@ -364,9 +370,6 @@ def analyze_binding(
     protein_residues = list(set(c[1].res_id for c in contacts))
 
     # Interface pLDDT
-    rna_chain_residues = structure.get_chain(rna_chain)
-    protein_chain_residues = structure.get_chain(protein_chain)
-
     interface_rna = [r for r in rna_chain_residues if r.res_id in rna_residues]
     interface_protein = [r for r in protein_chain_residues if r.res_id in protein_residues]
 
@@ -385,8 +388,10 @@ def analyze_binding(
         rna_chain=rna_chain,
         protein_chain=protein_chain,
         n_contacts=len(contacts),
-        min_contact_distance=min(distances),
-        mean_contact_distance=sum(distances) / len(distances),
+        # With no contacts the true separation is unknown but exceeds the
+        # threshold; the threshold is its tightest available lower bound.
+        min_contact_distance=min(distances) if distances else contact_threshold,
+        mean_contact_distance=sum(distances) / len(distances) if distances else contact_threshold,
         interface_plddt_rna=sum(rna_plddt) / len(rna_plddt) if rna_plddt else 0.0,
         interface_plddt_protein=sum(protein_plddt) / len(protein_plddt) if protein_plddt else 0.0,
         chain_pair_pae_min=chain_pair_pae,
@@ -444,25 +449,28 @@ def aggregate_binding_analyses(
     """
     Aggregate multiple BindingAnalysis objects into mean/std.
 
-    Filters out None entries (samples with no binding).
-    Returns None if all samples have no binding.
+    Non-binding samples carry n_contacts=0 and count toward every mean, toward
+    n_samples and toward the contact-frequency denominator, so the ensemble
+    size stays the true sample count. None entries are samples that could not
+    be analyzed at all (chain absent), and are excluded; returns None when no
+    sample was analyzable.
     """
-    valid = [a for a in analyses if a is not None]
-    if not valid:
+    analyzable = [a for a in analyses if a is not None]
+    if not analyzable:
         return None
 
-    n = len(valid)
+    n = len(analyzable)
 
-    contacts_list = [a.n_contacts for a in valid]
-    min_dist_list = [a.min_contact_distance for a in valid]
-    plddt_rna_list = [a.interface_plddt_rna for a in valid]
-    plddt_prot_list = [a.interface_plddt_protein for a in valid]
-    pae_list = [a.chain_pair_pae_min for a in valid]
+    contacts_list = [a.n_contacts for a in analyzable]
+    min_dist_list = [a.min_contact_distance for a in analyzable]
+    plddt_rna_list = [a.interface_plddt_rna for a in analyzable]
+    plddt_prot_list = [a.interface_plddt_protein for a in analyzable]
+    pae_list = [a.chain_pair_pae_min for a in analyzable]
 
     # Contact frequency: fraction of samples each residue appears as contact
     rna_counter: Counter = Counter()
     prot_counter: Counter = Counter()
-    for a in valid:
+    for a in analyzable:
         rna_counter.update(a.contact_residues_rna)
         prot_counter.update(a.contact_residues_protein)
 
@@ -478,7 +486,7 @@ def aggregate_binding_analyses(
         protein_chain=protein_chain,
         n_contacts=int(statistics.mean(contacts_list)),
         min_contact_distance=statistics.mean(min_dist_list),
-        mean_contact_distance=statistics.mean([a.mean_contact_distance for a in valid]),
+        mean_contact_distance=statistics.mean([a.mean_contact_distance for a in analyzable]),
         interface_plddt_rna=statistics.mean(plddt_rna_list),
         interface_plddt_protein=statistics.mean(plddt_prot_list),
         chain_pair_pae_min=statistics.mean(pae_list),

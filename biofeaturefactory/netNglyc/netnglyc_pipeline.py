@@ -38,7 +38,8 @@ from concurrent.futures import ProcessPoolExecutor, as_completed
 from typing import Optional
 
 # Import utility functions
-from biofeaturefactory.utils.utility import (
+from biofeaturefactory.lib.utility import (
+    derive_mapping_root,
     read_fasta,
     get_mutation_data_bioAccurate,
     split_fasta_into_batches,
@@ -52,13 +53,37 @@ from biofeaturefactory.utils.utility import (
     load_wt_sequences,
     extract_gene_from_filename,
     extract_mutation_from_sequence_name,
+    mint_pkey,
+    token_from_name,
+    load_pkey_map,
+    load_token_pkey_index,
     translate_orf_sequence,
     load_wt_sequence_map,
     infer_aamutation_from_nt,
     build_mutant_sequences_for_gene,
-    synthesize_gene_fastas,
     write_tsv,
+    # Length-aware layer. Non-SNV tokens are handled BY DEFAULT: the nt grammar is
+    # uniquely decodable, so no parser mode has to be selected, and whether a
+    # column survives is decided per column from the record's own allele lengths
+    # rather than from a run-level switch.
+    parse_variant,
+    infer_edit_span,
+    align_wt_to_mut,
+    infer_aavariant_from_nt,
+    format_aa_token,
+    detect_alphabet,
+    write_fasta,
+    is_intronic_token,
+    splice_seq,
 )
+
+# synthesize_gene_fastas is deliberately NOT imported. It hardcodes non_snp=False
+# when calling build_mutant_sequences_for_gene (utility.py:2422-2430) and exposes
+# no parameter to ask for anything else, so every non-SNV token silently loses its
+# mutant protein there. utils/utility.py is out of scope for this change, so this
+# pipeline performs the equivalent synthesis itself -- see
+# _synthesize_gene_fastas_non_snv -- and passes non_snp=True to the already
+# indel-capable build_mutant_sequences_for_gene.
 
 
 # ---------------------------------------------------------------------------
@@ -185,6 +210,433 @@ def normalize_gene_symbol(name: str) -> str:
     cleaned = cleaned.replace("_wt", "").replace("-wt", "").replace("_WT", "").replace("-WT", "")
     gene = extract_gene_from_filename(cleaned) or cleaned
     return gene.upper()
+
+
+def _expected_tokens(gene_name, mapping_file):
+    """Tokens a mapping file asks for, in BOTH formats the builder accepts.
+
+    load_mutation_index reads the file with csv.DictReader keyed on a 'mutant'
+    header, so a HEADERLESS single-column mapping file -- which
+    build_mutant_sequences_for_gene reads perfectly well -- yields an EMPTY set
+    there. Every token in such a file that failed to build would then leave no
+    row, no reason and no counter: the silent drop the named reasons exist to
+    remove, still present for one of the two supported input formats.
+
+    The format test mirrors build_mutant_sequences_for_gene exactly, so the two
+    cannot disagree about which tokens the file contains.
+    """
+    if not mapping_file or not os.path.exists(mapping_file):
+        return set()
+    try:
+        with open(mapping_file, "r") as handle:
+            lines = handle.readlines()
+    except OSError:
+        return set()
+
+    is_single_column = True
+    if lines and ',' in lines[0]:
+        first_line_lower = lines[0].lower()
+        if any(keyword in first_line_lower for keyword in ['mutant', 'mutation', 'aamutant']):
+            is_single_column = False
+    if not is_single_column:
+        return load_mutation_index({gene_name: mapping_file}).get(gene_name, set())
+
+    tokens = set()
+    for line in lines:
+        mutant_id = line.strip()
+        if not mutant_id or mutant_id.lower() == 'mutant':
+            continue
+        tokens.add(normalize_mutation_id(mutant_id.replace(" ", "")))
+    return tokens
+
+
+def _aa_consequence_from_alleles(wt_aa, mut_aa):
+    """Name the protein consequence of an AMINO-ACID token from its two alleles.
+
+    infer_aavariant_from_nt derives the consequence from codon arithmetic, which
+    needs a nucleotide ORF. A protein-input run has none, but an aa token already
+    IS the amino-acid change, so the consequence is a property of the alleles
+    themselves. Same vocabulary as protein_consequence's aa_consequence, so the
+    column means one thing whichever alphabet the run was given.
+    """
+    wt_aa, mut_aa = (wt_aa or "").upper(), (mut_aa or "").upper()
+    if "*" in mut_aa and "*" not in wt_aa:
+        return "stop_gained"
+    if "*" in wt_aa and "*" not in mut_aa:
+        return "stop_lost"
+    if wt_aa == mut_aa:
+        return "synonymous"
+    if len(wt_aa) == len(mut_aa):
+        return "snv" if len(wt_aa) == 1 else "mnv"
+    if len(wt_aa) == 1:
+        return "inframe_ins"
+    if len(mut_aa) == 1:
+        return "inframe_del"
+    return "inframe_delins"
+
+
+def _classify_build_failure(token, nt_seq, aa_seq=None):
+    """Name why a mapped token produced no mutant protein.
+
+    A rejected token must arrive downstream with a reason attached. Returning
+    nothing and letting it surface as a bare `missing_mut` makes a valid indel,
+    a REF mismatch and outright garbage indistinguishable -- which is the exact
+    failure this reporting exists to remove.
+
+    Which grammar applies is decided by the RUN's input alphabet, not by which
+    grammar happens to match. 'A22G' parses as both an nt and an aa token, so
+    trying nt first and falling back would name a protein-input token by the
+    wrong alphabet half the time.
+    """
+    # An out-of-ORF token is WELL FORMED and was refused on scope, not on syntax.
+    # Reporting it as UNPARSEABLE_TOKEN gives it the same reason as actual garbage,
+    # which defeats the point of naming reasons at all: the stderr warning from
+    # build_mutant_sequences_for_gene identifies it correctly, and this column --
+    # the only record that reaches the TSV -- did not.
+    if is_intronic_token(token):
+        return "NON_ORF_TOKEN:no_reading_frame_at_protein_level"
+
+    if nt_seq:
+        variant = parse_variant(token, is_nt=True)
+        if variant is None:
+            return "UNPARSEABLE_TOKEN"
+        end = variant.pos0 + len(variant.ref)
+        # Bound the END of the REF span, not its start: a multi-base REF can begin
+        # inside the ORF and run off the end.
+        if end > len(nt_seq):
+            return f"REF_SPANS_PAST_ORF:{end}>{len(nt_seq)}"
+        # Compare the WHOLE span. Checking nt_seq[pos0] alone passes on a
+        # multi-base REF whose first base happens to match.
+        observed = nt_seq[variant.pos0:end].upper()
+        if observed != variant.ref.upper():
+            return f"REF_MISMATCH:orf_has_{observed}"
+        if variant.is_snv:
+            inferred = infer_aavariant_from_nt(token, nt_seq)
+            if inferred and inferred[3] == "stop_gained":
+                # infer_aamutation_from_nt returns None for a stop-gain, so the
+                # SNV path in build_mutant_sequences_for_gene drops it. Name it.
+                return "STOP_GAINED:no_mutant_protein_synthesized"
+        return "MUTANT_PROTEIN_NOT_BUILT"
+
+    # No nucleotide ORF -> detect_alphabet said 'protein', and the mapping file
+    # carries AMINO-ACID tokens (M334V). The nt grammar refuses those by design,
+    # so reporting them as UNPARSEABLE_TOKEN names a reason that is simply false.
+    aa_variant = parse_variant(token, is_nt=False)
+    if aa_variant is None:
+        return "UNPARSEABLE_TOKEN"
+    if not aa_seq:
+        return "NO_WT_SEQUENCE:cannot_check_ref"
+    end = aa_variant.pos0 + len(aa_variant.ref)
+    if end > len(aa_seq):
+        return f"REF_SPANS_PAST_PROTEIN:{end}>{len(aa_seq)}"
+    observed = aa_seq[aa_variant.pos0:end].upper()
+    if observed != aa_variant.ref.upper():
+        return f"REF_MISMATCH:protein_has_{observed}"
+    if not aa_variant.is_snv:
+        # build_mutant_sequences_for_gene's aa path applies the change with
+        # update_str, which replaces exactly one residue, and there is no ORF to
+        # splice instead. An aa-level length change cannot be built at all here;
+        # say so rather than reporting the generic not-built.
+        return "AA_NON_SNV:no_nt_orf_to_splice"
+    return "MUTANT_PROTEIN_NOT_BUILT"
+
+
+def _aa_alignment(token, wt_protein, mut_protein, orf_seq=None):
+    """Project WT residue indices onto MUT residue indices across a length change.
+
+    Under an indel, residue i of the WT and residue i of the mutant are different
+    residues, so joining the two alleles' predictions on integer position equality
+    reports every site downstream of the edit as simultaneously lost (at its WT
+    position) and gained (at its mutant position). This returns the projection
+    that makes a per-residue comparison well defined.
+
+    The edit is recovered from the two PROTEIN sequences rather than re-derived
+    from the codon arithmetic, because these are the exact sequences NetNGlyc
+    scored -- infer_edit_span exists for precisely this case. A frameshift is
+    declared rather than inferred: prefix/suffix trimming returns the minimal
+    edit, which would pair up residues that are not counterparts, so alt_len is
+    forced to 0 and nothing downstream aligns.
+
+    proj is None when either allele's protein is missing -- a token rejected
+    before synthesis, or a gene whose WT was skipped by the alphabet check.
+    Callers then fall back to the identity join. An equal-length variant still
+    gets a projection here; it simply comes out as the identity map, so SNVs and
+    MNVs take the same code path as everything else.
+
+    n_aa_mut is always set whenever proj is, which the join relies on to bound the
+    projected indices.
+    """
+    # Which grammar applies is decided by the RUN's input alphabet, not by which
+    # grammar happens to match. 'AAT22A' is a valid nt token AND a valid aa token
+    # (Asn-Ala-Thr -> Ala). Read as nt in a protein-input run it declares a 2-base
+    # frameshift, which forces alt_len=0 and unaligns the entire protein.
+    is_nt_run = bool(orf_seq)
+    variant = parse_variant(token, is_nt=is_nt_run)
+    info = {
+        # 'unparsed' is reserved for a token the grammar refuses. A gd./ch. token
+        # parses fine in its own space and is out of SCOPE here, so it gets its own
+        # class -- same distinction as NON_ORF_TOKEN in _classify_build_failure.
+        "variant_class": (
+            variant.kind if variant is not None
+            else ("non_orf" if is_intronic_token(token) else "unparsed")
+        ),
+        "aa_consequence": "",
+        "aa_token": "",
+        "n_aa_wt": len(wt_protein) if wt_protein else None,
+        "n_aa_mut": len(mut_protein) if mut_protein else None,
+        "proj": None,
+        "align_summary": "",
+        "ref_status": "",
+    }
+
+    # The protein consequence is only meaningful once the token's REF is known to
+    # match the ORF. infer_aavariant_from_nt splices unconditionally, so without
+    # this guard a token whose REF disagrees still yields a confident
+    # aa_consequence and aa_token -- a protein effect computed for a variant that
+    # is not the one the ORF carries. Guard the WHOLE span, and bound its END.
+    #
+    # The mismatch is NAMED rather than merely blanked. The SNV synthesis path in
+    # build_mutant_sequences_for_gene reads the codon without checking the REF
+    # base, so a wrong-REF SNV still yields a mutant protein; only the non-SNV
+    # path validates. Without this the two columns would just be empty, with
+    # nothing in the row to say why.
+    ref_ok = False
+    if is_nt_run and variant is not None:
+        end = variant.pos0 + len(variant.ref)
+        if end > len(orf_seq):
+            info["ref_status"] = f"REF_SPANS_PAST_ORF:{end}>{len(orf_seq)}"
+        else:
+            observed = orf_seq[variant.pos0:end].upper()
+            if observed == variant.ref.upper():
+                ref_ok = True
+            else:
+                info["ref_status"] = f"REF_MISMATCH:orf_has_{observed}"
+
+    if ref_ok:
+        inferred = infer_aavariant_from_nt(token, orf_seq)
+        if inferred:
+            aa_pos, wt_aa, mut_aa, consequence = inferred
+            info["aa_consequence"] = consequence
+            try:
+                info["aa_token"] = format_aa_token(aa_pos, wt_aa, mut_aa, consequence)
+            except ValueError:
+                # An empty allele cannot be rendered; leave the token empty
+                # rather than emitting '' as if it were a real token.
+                info["aa_token"] = ""
+    elif not is_nt_run and variant is not None and wt_protein:
+        # Protein-input run: the token is already the amino-acid change, so the
+        # consequence needs no codon arithmetic. Guard the WHOLE residue span
+        # against the WT protein first and bound its END -- checking
+        # wt_protein[pos0] alone passes on any multi-residue REF whose first
+        # residue happens to match, and the aa grammar accepts any letters, so
+        # garbage such as ZZZ9Q parses and only the REF check rejects it.
+        end = variant.pos0 + len(variant.ref)
+        if end > len(wt_protein):
+            info["ref_status"] = f"REF_SPANS_PAST_PROTEIN:{end}>{len(wt_protein)}"
+        else:
+            observed = wt_protein[variant.pos0:end].upper()
+            if observed != variant.ref.upper():
+                info["ref_status"] = f"REF_MISMATCH:protein_has_{observed}"
+            else:
+                consequence = _aa_consequence_from_alleles(variant.ref, variant.alt)
+                info["aa_consequence"] = consequence
+                try:
+                    info["aa_token"] = format_aa_token(
+                        variant.pos, variant.ref, variant.alt, consequence)
+                except ValueError:
+                    info["aa_token"] = ""
+
+    if not wt_protein or not mut_protein:
+        return info
+
+    # Only a NUCLEOTIDE length change that is not a multiple of three shifts the
+    # reading frame. An aa token names residues directly, so a residue-count
+    # change there is an in-frame indel, never a frameshift.
+    frameshift = is_nt_run and variant is not None and variant.length_delta % 3 != 0
+    offset, ref_len, alt_len = infer_edit_span(wt_protein, mut_protein,
+                                               frameshift=frameshift)
+    proj = align_wt_to_mut(len(wt_protein), offset, ref_len, alt_len)
+    info["proj"] = proj
+
+    n_aligned = sum(1 for j in proj if j is not None and 0 <= j < len(mut_protein))
+    n_deleted = len(wt_protein) - n_aligned
+    n_inserted = len(mut_protein) - n_aligned
+    if len(wt_protein) != len(mut_protein):
+        # Count the UNION of both alleles' residues. "aligned N/N" over WT
+        # positions alone reports a 7-residue insertion as fully aligned, because
+        # every WT residue does keep a counterpart -- the residues with no
+        # counterpart are all on the mutant side.
+        info["align_summary"] = (
+            f"length_changed:{len(mut_protein) - len(wt_protein):+d}aa;"
+            f"aligned_{n_aligned}/{len(wt_protein) + n_inserted};"
+            f"deleted_{n_deleted};inserted_{n_inserted}"
+        )
+    return info
+
+
+def _synthesize_gene_fastas_non_snv(wt_sequences, mapping_lookup, sequence_root,
+                                    log_path=None, failure_map=None):
+    """WT/mutant FASTA synthesis that keeps non-SNV tokens.
+
+    Mirrors utility.synthesize_gene_fastas, differing in three ways:
+
+      * non_snp=True is passed to build_mutant_sequences_for_gene, so an indel,
+        MNV or frameshift gets a real mutant protein -- spliced at the NUCLEOTIDE
+        level and retranslated, the only way to express a length change, since
+        update_str replaces exactly one residue.
+      * the WT and mutant PROTEINS are returned, so the ensemble can align the two
+        alleles instead of assuming their coordinates agree.
+      * every mapped token that produced no mutant protein is returned with a
+        NAMED reason, so a rejection is reported rather than silently becoming an
+        unexplained missing_mut.
+
+    utility.synthesize_gene_fastas cannot be used directly: it hardcodes
+    non_snp=False and takes no parameter to override it.
+
+    Returns (wt_dir, mut_dir, summary, ctx). ctx carries the sequences and
+    reasons the ensemble needs, all keyed on the UPPERCASED gene symbol / pkey
+    that the rest of the pipeline uses:
+        wt_proteins    gene  -> WT amino-acid sequence NetNGlyc scored
+        mut_proteins   pkey  -> mutant amino-acid sequence NetNGlyc scored
+        wt_orfs        gene  -> WT nucleotide ORF (None for protein input)
+        build_failures pkey  -> named reason no mutant protein was produced
+    """
+    sequence_root = Path(sequence_root)
+    wt_dir = sequence_root / "wt"
+    mut_dir = sequence_root / "mut"
+    wt_dir.mkdir(parents=True, exist_ok=True)
+    mut_dir.mkdir(parents=True, exist_ok=True)
+
+    summary = []
+    wt_proteins = {}
+    mut_proteins = {}
+    wt_orfs = {}
+    build_failures = {}
+
+    for gene_name, wt_seq in wt_sequences.items():
+        gene_name = gene_name.upper()
+        seq_upper = wt_seq.strip().upper()
+
+        try:
+            detected = detect_alphabet(seq_upper)
+        except ValueError:
+            print(f"Skipping {gene_name}: empty sequence")
+            continue
+        if detected == 'nucleotide':
+            nt_for_build = seq_upper
+            aa_seq = translate_orf_sequence(seq_upper)
+            build_input_type = 'nt'
+            if not aa_seq:
+                print(f"Skipping {gene_name}: unable to translate ORF")
+                continue
+        elif detected == 'protein':
+            nt_for_build = None
+            aa_seq = seq_upper
+            build_input_type = 'aa'
+        else:  # codon-encoded
+            print(f"Skipping {gene_name}: codon-encoded input, expected nt or aa")
+            continue
+
+        wt_header = f"{gene_name}-wt"
+        wt_path = wt_dir / f"{gene_name}-wt.fasta"
+        write_fasta(wt_path, {wt_header: aa_seq})
+        wt_proteins[gene_name] = aa_seq
+        wt_orfs[gene_name] = nt_for_build
+
+        mapping_file = mapping_lookup.get(gene_name)
+        # Sequence names are {GENE}-{sha}; pkey_map carries name -> token.
+        pkey_map = {}
+        mutant_sequences = build_mutant_sequences_for_gene(
+            gene_name,
+            nt_for_build,
+            aa_seq,
+            mapping_file,
+            log_path,
+            failure_map,
+            input_type=build_input_type,
+            non_snp=True,
+            pkey_map=pkey_map,
+        )
+
+        # Protein WT input: build_mutant_sequences_for_gene's non-SNV path splices
+        # at the NUCLEOTIDE level and returns None without an ORF, and its aa
+        # fallback goes through get_mutation_data_bioAccurate, which is
+        # single-residue only -- so every aa-level indel died as
+        # AA_NON_SNV:no_nt_orf_to_splice. The edit is fully expressible on the
+        # protein itself. Same backfill netphos (_aa_level_non_snv_protein) and
+        # netmhc already perform; measured 1/3 valid aa tokens built here vs 3/3
+        # there. An SNV never enters this branch, so the existing path is untouched.
+        if build_input_type == 'aa':
+            for tok in _expected_tokens(gene_name, mapping_file):
+                header = mint_pkey(gene_name, tok)
+                if header in mutant_sequences:
+                    continue
+                v = parse_variant(tok, is_nt=False)
+                if v is None or v.is_snv:
+                    continue
+                try:
+                    # validate=True: the WHOLE REF span must match, or a
+                    # multi-residue REF whose first residue happens to line up
+                    # would splice at a wrong coordinate.
+                    built = splice_seq(aa_seq, v.pos0, v.ref, v.alt, validate=True)
+                except ValueError:
+                    continue
+                # Truncate at the first stop, as the nucleotide path does.
+                built = built.split('*')[0]
+                if built:
+                    mutant_sequences[header] = built
+                    pkey_map[header] = tok
+
+        produced = set()
+        for header, seq in mutant_sequences.items():
+            # Strip the KNOWN gene prefix rather than splitting on the first '-'.
+            # Gene symbols in this repo carry hyphens (HLA-A, NKX2-1), and
+            # partitioning "HLA-A-C11G" on the first '-' yields the token
+            # "A-C11G", which then matches no pkey and loses the mutant protein.
+            tok = token_from_name(header, gene_name, pkey_map)
+            if tok:
+                produced.add(normalize_mutation_id(tok))
+                # Keyed by pkey, per this function's docstring. The header IS the
+                # pkey now, so no second minting from a NORMALISED token -- that
+                # hashed 'GD.G199C' and matched nothing.
+                mut_proteins[header] = seq
+
+        expected = _expected_tokens(gene_name, mapping_file)
+        # _expected_tokens NORMALISES (upper-cases), so `tok` here is not the
+        # verbatim spelling and mint_pkey on it would hash 'GD.G199C' rather than
+        # 'gd.G199C' -- a pkey present in no mapping. The index resolves either
+        # spelling to the pkey variant_mapping actually minted; mint_pkey is
+        # the fallback for tokens the mapping has never seen, where the two
+        # spellings are identical anyway.
+        _tok_index = load_token_pkey_index(mapping_file, gene_name)
+        for tok in sorted(expected - produced):
+            pkey = _tok_index.get(tok) or mint_pkey(gene_name, tok)
+            if should_skip_mutation(gene_name, tok, failure_map):
+                build_failures[pkey] = "FILTERED:validation_log"
+            else:
+                build_failures[pkey] = _classify_build_failure(
+                    tok, nt_for_build, aa_seq=aa_seq)
+
+        mut_path = None
+        if mutant_sequences:
+            mut_path = mut_dir / f"{gene_name}_aa.fasta"
+            write_fasta(mut_path, mutant_sequences)
+
+        summary.append({
+            "gene": gene_name,
+            "wt_path": str(wt_path),
+            "mut_path": str(mut_path) if mut_path else None,
+            "mutant_count": len(mutant_sequences),
+            "unbuilt_count": len(expected - produced),
+        })
+
+    ctx = {
+        "wt_proteins": wt_proteins,
+        "mut_proteins": mut_proteins,
+        "wt_orfs": wt_orfs,
+        "build_failures": build_failures,
+    }
+    return wt_dir, mut_dir, summary, ctx
 
 
 def iter_netnglyc_output_files(directory: Path):
@@ -446,13 +898,12 @@ class RobustDockerNetNGlyc:
     """
 
     def __init__(self, use_signalp=True,
-                 max_workers=4, cache_dir=None, docker_timeout=600, keep_intermediates=False,
+                 max_workers=4, cache_dir=None, docker_timeout=600,
                  verbose=False, native_bin=None, **_ignored):
         self.max_workers = max_workers
         self.temp_dir = tempfile.mkdtemp(prefix="netnglyc_")
         self.use_signalp = use_signalp
         self.docker_timeout = docker_timeout
-        self.keep_intermediates = keep_intermediates
         self.verbose = verbose
         self.native_bin = native_bin
 
@@ -727,7 +1178,7 @@ class RobustDockerNetNGlyc:
                     aamutant = row['aamutant']  # e.g., K541E
                     
                     # Parse amino acid mutation to get position and amino acids
-                    position_data = get_mutation_data_bioAccurate(aamutant)
+                    position_data = get_mutation_data_bioAccurate(aamutant, is_nt=False)
                     if position_data[0] is not None:
                         aa_pos = position_data[0]  # e.g., 541
                         aa_tuple = position_data[1]  # e.g., ('K', 'E')
@@ -823,8 +1274,8 @@ class RobustDockerNetNGlyc:
                 success, output_file, error = self.process_single_fasta(
                     batch_files[0], output_base, worker_id
                 )
-                # Clean up batch file (only if not keeping intermediates)
-                if not self.keep_intermediates and os.path.exists(batch_files[0]):
+                # Clean up batch input file
+                if os.path.exists(batch_files[0]):
                     os.remove(batch_files[0])
                 return success, output_file, error
             
@@ -851,16 +1302,15 @@ class RobustDockerNetNGlyc:
                     else:
                         if self.verbose:
                             print(f"Batch {i+1} failed: {error}")
-                        # Clean up batch files (only if not keeping intermediates)
-                        if not self.keep_intermediates:
-                            for bf in batch_files:
-                                if os.path.exists(bf):
-                                    os.remove(bf)
+                        # Clean up batch input files
+                        for bf in batch_files:
+                            if os.path.exists(bf):
+                                os.remove(bf)
                         return False, output_base, f"Batch {i+1} failed: {error}"
                         
                 finally:
-                    # Clean up this batch file (only if not keeping intermediates)
-                    if not self.keep_intermediates and os.path.exists(batch_file):
+                    # Clean up this batch input file
+                    if os.path.exists(batch_file):
                         os.remove(batch_file)
             
             # Create combined output for backwards compatibility (optional)
@@ -878,9 +1328,9 @@ class RobustDockerNetNGlyc:
                 return False, output_base, "Failed to combine batch outputs"
                 
         except Exception as e:
-            # Clean up any remaining batch files (only if not keeping intermediates)
+            # Clean up any remaining batch input files
             try:
-                if 'batch_files' in locals() and not self.keep_intermediates:
+                if 'batch_files' in locals():
                     for bf in batch_files:
                         if os.path.exists(bf):
                             os.remove(bf)
@@ -899,6 +1349,7 @@ class RobustDockerNetNGlyc:
             
             
             current_sequence = None
+            sequence_names = []
             in_results = False
             skip_next_line = False
             found_first_separator = False
@@ -916,6 +1367,8 @@ class RobustDockerNetNGlyc:
                 if line.startswith('Name:') and len(line.split()) >= 2:
                     current_sequence = line.split()[1]
                     predictions_by_sequence[current_sequence] = []
+                    if current_sequence not in sequence_names:
+                        sequence_names.append(current_sequence)
                     in_results = False
                     found_first_separator = False
                     continue
@@ -942,8 +1395,13 @@ class RobustDockerNetNGlyc:
                         found_first_separator = False
                         continue
                 
-                # Parse prediction lines
-                if in_results and found_first_separator and line and not line.startswith('#'):
+                # Parse prediction lines by CONTENT, not separator state: a data row
+                # has >=5 cols with an integer position at [1] (float potential at [3]
+                # is validated below). This is robust to ---/=== separators and to
+                # batch-combined files where separators are interleaved with data
+                # (see _combine_glycosylation_outputs); the separator/skip_next_line
+                # bookkeeping above is left intact but no longer gates parsing.
+                if line and not line.startswith('#') and len(line.split()) >= 5 and line.split()[1].isdigit():
                     results_lines_found += 1
                     
                     # Check for "No sites predicted" message
@@ -958,7 +1416,14 @@ class RobustDockerNetNGlyc:
                         try:
                             seq_name = parts[0]
                             if seq_name not in predictions_by_sequence:
-                                predictions_by_sequence[seq_name] = []
+                                # The binary truncates SeqName to the results-table column
+                                # width; recover the untruncated id from the 'Name:' headers
+                                # when exactly one of them extends this prefix.
+                                full_names = [n for n in sequence_names if n.startswith(seq_name)]
+                                if len(full_names) == 1:
+                                    seq_name = full_names[0]
+                                else:
+                                    predictions_by_sequence[seq_name] = []
                             position = int(parts[1])
                             sequon = parts[2]  # e.g., NKSE
                             potential = float(parts[3])
@@ -1345,7 +1810,7 @@ class RobustDockerNetNGlyc:
                         for mutation_id, mutation_data, target_aa in position_mutations[pred_pos]:
                             # Check if amino acid matches (critical fix!)
                             if pred_aa == target_aa:
-                                pkey = f"{gene}-{mutation_id}"
+                                pkey = mint_pkey(gene, mutation_id)
                                 results.append({
                                     'pkey': pkey,
                                     'Gene': gene,
@@ -1361,13 +1826,20 @@ class RobustDockerNetNGlyc:
         
         return results
 
-    def collect_wt_sites(self, directories, threshold, signalp_cache=None):
+    def collect_wt_sites(self, directories, threshold, mutation_index=None, signalp_cache=None):
         """Collect WT site predictions across provided directories."""
         wt_sites_by_gene: dict[str, list[dict]] = {}
         wt_signalp: dict[str, dict] = {}
         site_rows = []
+        # Genes NetNGlyc actually scored, whether or not it found a site. Site
+        # presence cannot answer this: a protein with no sequons and a run that
+        # never happened both yield an empty site list, and only one of them
+        # licenses reporting a count of 0. A 'Name:' header in the output is the
+        # binary saying it read that sequence.
+        scored_genes: set[str] = set()
         directories = [Path(d) for d in directories if d]
         signalp_cache = signalp_cache or {}
+        mutation_index = mutation_index or {}
         for directory in directories:
             if not directory.exists():
                 continue
@@ -1378,6 +1850,12 @@ class RobustDockerNetNGlyc:
                 signalp_map = parse_signalp_summary(str(file_path))
                 for seq_name, predictions in predictions_by_seq.items():
                     gene_key = normalize_gene_symbol(seq_name)
+                    # WT twin of the F1451 mut guard: drop WT rows for genes outside the
+                    # single-gene index. WT has no mutation id -> gene-level check only.
+                    # Empty index stays falsy -> no filtering (matches mut-path semantics).
+                    if mutation_index and gene_key not in mutation_index:
+                        continue
+                    scored_genes.add(gene_key)
                     seq_signalp = (
                         signalp_map.get(seq_name)
                         or signalp_cache.get(seq_name)
@@ -1420,14 +1898,17 @@ class RobustDockerNetNGlyc:
         for gene, sites in wt_sites_by_gene.items():
             if not sites and hasattr(self, "error_logger"):
                 self.error_logger.error(f"WT parser: {gene} missing predictions in provided outputs")
-        return wt_sites_by_gene, wt_signalp, site_rows
+        return wt_sites_by_gene, wt_signalp, site_rows, scored_genes
 
-    def collect_mutant_sites(self, directories, threshold, mutation_index=None, signalp_cache=None):
+    def collect_mutant_sites(self, directories, threshold, mutation_index=None, signalp_cache=None,
+                             pkey_map=None):
         """Collect mutant site predictions keyed by pkey."""
         mut_sites_by_pkey: dict[str, list[dict]] = {}
         mut_signalp: dict[str, dict] = {}
         pkey_gene_map: dict[str, str] = {}
         site_rows = []
+        # pkeys NetNGlyc actually scored -- see the note in collect_wt_sites.
+        scored_pkeys: set[str] = set()
         directories = [Path(d) for d in directories if d]
         mutation_index = mutation_index or {}
         signalp_cache = signalp_cache or {}
@@ -1443,15 +1924,25 @@ class RobustDockerNetNGlyc:
                 )
                 signalp_map = parse_signalp_summary(str(file_path))
                 for seq_name, predictions in predictions_by_seq.items():
-                    gene_name, mutation_id = extract_mutation_from_sequence_name(seq_name)
+                    # pkey_map resolves a hashed sequence name back to its token;
+                    # without one this is the previous rsplit behaviour, so the
+                    # call is correct against either header format.
+                    gene_name, mutation_id = extract_mutation_from_sequence_name(
+                        seq_name, pkey_map=pkey_map)
                     if not mutation_id:
                         continue
                     gene_key = (gene_name or "").upper()
                     mut_id_norm = normalize_mutation_id(mutation_id)
-                    if mutation_index and gene_key in mutation_index:
-                        if mut_id_norm not in mutation_index[gene_key]:
-                            continue
-                    pkey = f"{gene_key}-{mut_id_norm}"
+                    if mutation_index and (gene_key not in mutation_index or mut_id_norm not in mutation_index[gene_key]):
+                        continue
+                    # Mint from the VERBATIM token, never the normalized one.
+                    # normalize_mutation_id upper-cases, so 'gd.G199C' becomes
+                    # 'GD.G199C' and hashes to a different digest than the one
+                    # variant_mapping wrote -- the pkey would then exist in no
+                    # mapping and every join for that variant would miss in
+                    # silence. Verified: sha(gd.G199C) != sha(GD.G199C).
+                    pkey = mint_pkey(gene_key, mutation_id)
+                    scored_pkeys.add(pkey)
                     seq_signalp = signalp_map.get(seq_name, {})
                     if not seq_signalp:
                         seq_signalp = signalp_cache.get(seq_name, {})
@@ -1490,7 +1981,7 @@ class RobustDockerNetNGlyc:
         for pkey, sites in mut_sites_by_pkey.items():
             if not sites and hasattr(self, "error_logger"):
                 self.error_logger.error(f"MUT parser: {pkey} missing predictions in provided outputs")
-        return mut_sites_by_pkey, mut_signalp, site_rows, pkey_gene_map
+        return mut_sites_by_pkey, mut_signalp, site_rows, pkey_gene_map, scored_pkeys
 
     def _classify_netnglyc_event(self, wt_site, mut_site, threshold, delta_threshold=0.05):
         wt_potential = wt_site["potential"] if wt_site else None
@@ -1555,6 +2046,11 @@ class RobustDockerNetNGlyc:
             "weakened": -1,
             "no_site": 0,
         }
+        # EMPTY, not 0. Every code in the table is a measured finding, and 0 is
+        # specifically 'stable' -- so encoding an unscored row as 0 would report
+        # "the edit changed nothing" for a variant that was never scored at all.
+        if classification == "not_scored":
+            return None
         return mapping.get(classification, 0)
 
     def _summarize_netnglyc_variant(
@@ -1566,34 +2062,160 @@ class RobustDockerNetNGlyc:
         wt_sig,
         mut_sig,
         threshold,
+        align=None,
+        wt_scored=True,
+        mut_scored=True,
     ):
         events = []
         wt_by_pos = {site["position"]: site for site in wt_sites}
         mut_by_pos = {site["position"]: site for site in mut_sites}
-        all_positions = sorted(set(wt_by_pos.keys()) | set(mut_by_pos.keys()))
-        for pos in all_positions:
-            wt_site = wt_by_pos.get(pos)
-            mut_site = mut_by_pos.get(pos)
+
+        # Cross-allele join through the WT->MUT residue PROJECTION, not integer
+        # position equality. Under an indel, residue i of the WT and residue i of
+        # the mutant are different residues, so an equality join reports every
+        # site downstream of the edit as simultaneously lost (at its WT position)
+        # and gained (at its mutant position).
+        #
+        # wt_to_mut stays None when no projection is available -- either allele's
+        # protein missing, which means a token rejected before synthesis or a gene
+        # whose WT the alphabet check skipped. The join then falls back to the
+        # legacy identity pairing, except where there is no mutant allele at all
+        # (see no_mut_allele below), which identity cannot honestly represent.
+        # An equal-length variant is NOT special-cased: it gets a projection like
+        # everything else, which comes out as the identity map, so SNVs and indels
+        # share one code path.
+        wt_to_mut = None
+        mut_to_wt = None
+        proj = (align or {}).get("proj")
+        n_aa_mut = (align or {}).get("n_aa_mut")
+        if proj is not None:
+            wt_to_mut = {}
+            for i0, j0 in enumerate(proj):
+                # Bound the projected index as well as testing for a deletion: a
+                # variant that truncates the protein (a gained stop) leaves WT
+                # residues projecting past the end of the mutant, and those have
+                # no counterpart either.
+                if j0 is not None and 0 <= j0 < n_aa_mut:
+                    wt_to_mut[i0 + 1] = j0 + 1
+            mut_to_wt = {m: w for w, m in wt_to_mut.items()}
+
+        def _to_mut(wpos):
+            return wpos if wt_to_mut is None else wt_to_mut.get(wpos)
+
+        def _to_wt(mpos):
+            return mpos if mut_to_wt is None else mut_to_wt.get(mpos)
+
+        # Keep the cleavage site in the SAME FRAME as the position it is compared
+        # against. A row keyed on a WT residue is tested against the WT cleavage;
+        # an `inserted` row has no WT coordinate and is keyed on a MUTANT residue,
+        # so testing it against the WT cleavage is off by the insertion length --
+        # the same cross-frame comparison the projection exists to remove, in the
+        # post_cleavage column. The other allele is used only as a fallback when
+        # SignalP produced nothing for the frame in question.
+        wt_cleavage = wt_sig.get("cleavage_site") if wt_sig else None
+        mut_cleavage = mut_sig.get("cleavage_site") if mut_sig else None
+
+        # No mutant allele AT ALL -- the token was rejected before synthesis, so
+        # there is no mutant protein and no mutant prediction. The identity
+        # fallback would then map every WT residue onto a mutant residue that was
+        # never built and report the row as "aligned", making n_events_aligned
+        # count rows that had nothing to align to. Name the absence instead.
+        no_mut_allele = not mut_sites and n_aa_mut is None
+
+        # Every WT site, paired with whatever the edit turned its residue into.
+        pairs = []
+        claimed_mut = set()
+        for wpos in sorted(wt_by_pos):
+            mpos = None if no_mut_allele else _to_mut(wpos)
+            mut_site = mut_by_pos.get(mpos) if mpos is not None else None
+            if mut_site is not None:
+                claimed_mut.add(mpos)
+            if no_mut_allele:
+                status = "no_mutant"
+            else:
+                status = "aligned" if mpos is not None else "deleted"
+            pairs.append((wpos, mpos, wt_by_pos[wpos], mut_site, status))
+        # Mutant sites with no WT counterpart appear in none of the rows above.
+        # Emit them explicitly, keyed on the mutant position with the WT columns
+        # empty -- otherwise an insertion is entirely invisible here, and a site
+        # the edit created is indistinguishable from one that was never scored.
+        for mpos in sorted(mut_by_pos):
+            if mpos in claimed_mut:
+                continue
+            wpos_back = _to_wt(mpos)
+            pairs.append((wpos_back, mpos, None, mut_by_pos[mpos],
+                          "aligned" if wpos_back is not None else "inserted"))
+        # WT-frame order first (identical to the previous sorted-union order when
+        # the join is identity), then the inserted rows, which have no WT
+        # coordinate to interleave on.
+        pairs.sort(key=lambda p: (p[0] is None,
+                                  p[0] if p[0] is not None else 0,
+                                  p[1] if p[1] is not None else 0))
+
+        for wpos, mpos, wt_site, mut_site, align_status in pairs:
             wt_potential = wt_site["potential"] if wt_site else None
             mut_potential = mut_site["potential"] if mut_site else None
+            # A value that cannot be computed is EMPTY with a NAMED REASON, never
+            # 0.0. The old `(mut or 0.0) - (wt or 0.0)` fabricated a
+            # full-magnitude delta for any one-sided site, which reads downstream
+            # as a measured change; it also swallowed a genuine potential of 0.0,
+            # since `0.0 or 0.0` is indistinguishable from `None or 0.0`.
             delta = None
-            if wt_potential is not None or mut_potential is not None:
-                delta = (mut_potential or 0.0) - (wt_potential or 0.0)
-            classification = self._classify_netnglyc_event(wt_site, mut_site, threshold)
-            cleavage = wt_sig.get("cleavage_site") if wt_sig else None
-            if cleavage is None and mut_sig:
-                cleavage = mut_sig.get("cleavage_site")
+            delta_reason = ""
+            if wt_potential is not None and mut_potential is not None:
+                delta = mut_potential - wt_potential
+            elif wt_potential is not None:
+                if align_status == "no_mutant":
+                    # "There is no mutant allele" is not "the mutant lacks a site
+                    # here". Only the second is an observation about the variant.
+                    delta_reason = "wt_only:no_mutant_allele"
+                elif align_status == "deleted":
+                    delta_reason = "wt_only:residue_deleted"
+                else:
+                    delta_reason = "wt_only:no_mut_site"
+            elif mut_potential is not None:
+                delta_reason = ("mut_only:residue_inserted" if align_status == "inserted"
+                                else "mut_only:no_wt_site")
+            # No fourth branch. Every pair carries at least one site by
+            # construction -- the first loop keys on wt_by_pos, the second on
+            # mut_by_pos -- and site["potential"] is float(parts[3]) at both
+            # parser sites, never None. A "neither allele has a site" arm cannot
+            # fire, and an arm that cannot fire is dead weight that reads as
+            # handled coverage.
+            # A row with NO MUTANT ALLELE was never scored, so it has no
+            # classification. _classify_netnglyc_event reaches 'lost' through
+            # `above_wt and not above_mut`, which cannot tell "the mutant was
+            # scored and this site is gone" from "no mutant protein was ever
+            # built" -- so an intronic token this pipeline deliberately refuses to
+            # score reported count_lost=2 and tied for the most damaging variant
+            # in the run. That is the fabricated measurement
+            # warn_intronic_unsupported exists to prevent, reappearing one layer
+            # down where the warning cannot reach. 'not_scored' is absent from
+            # classification_counts, so it contributes to no count.
+            if align_status == "no_mutant":
+                classification = "not_scored"
+            else:
+                classification = self._classify_netnglyc_event(wt_site, mut_site, threshold)
+            if wpos is not None:
+                ref_pos = wpos
+                cleavage = wt_cleavage if wt_cleavage is not None else mut_cleavage
+            else:
+                ref_pos = mpos
+                cleavage = mut_cleavage if mut_cleavage is not None else wt_cleavage
             post_cleavage = None
-            if cleavage is not None:
-                post_cleavage = pos >= cleavage
+            if cleavage is not None and ref_pos is not None:
+                post_cleavage = ref_pos >= cleavage
             events.append(
                 {
                     "pkey": pkey,
                     "Gene": gene,
-                    "position": pos,
+                    "position": wpos if wpos is not None else "",
+                    "mut_position": mpos if mpos is not None else "",
+                    "align_status": align_status,
                     "wt_potential": wt_potential,
                     "mut_potential": mut_potential,
                     "delta": delta,
+                    "delta_reason": delta_reason,
                     "classification": classification,
                     "wt_sequon": wt_site["sequon"] if wt_site else None,
                     "mut_sequon": mut_site["sequon"] if mut_site else None,
@@ -1604,7 +2226,10 @@ class RobustDockerNetNGlyc:
                         mut_potential is not None and mut_potential >= threshold
                     ),
                     "classification_code": self._encode_classification(classification),
-                    "post_cleavage": self._encode_bool(post_cleavage),
+                    # Optional encoding: with no SignalP cleavage there is no
+                    # answer, and _encode_bool(None) reported a definite 0
+                    # ("before the cleavage site") for an unknown.
+                    "post_cleavage": self._encode_optional_bool(post_cleavage),
                 }
             )
         n_sites_wt = sum(1 for site in wt_sites if site["potential"] >= threshold)
@@ -1627,41 +2252,128 @@ class RobustDockerNetNGlyc:
                 deltas.append(abs_delta)
                 if event["post_cleavage"]:
                     post_cleavage_delta += abs_delta
-        sum_abs_delta = sum(deltas)
-        max_abs_delta = max(deltas) if deltas else 0.0
+        # EMPTY, not 0.0, when nothing was comparable. A magnitude of 0.0 over an
+        # empty set of deltas is a fabricated measurement -- byte-identical to a
+        # variant whose sites were all measured and genuinely unchanged. This is
+        # the same coalescence contract C bans on the per-event delta, one level
+        # up: with the per-event zeros removed but these left in place, a
+        # frameshift that deletes four sequons (one of them at 0.8527, classified
+        # lost) reported sum_abs_delta 0.0 / max_abs_delta 0.0. The named reason
+        # is no_comparable_site in qc_flags below.
+        # float() keeps the column's type stable: sum([]) is the int 0, which
+        # would render as "0" where every other row renders "0.0".
+        sum_abs_delta = float(sum(deltas)) if deltas else None
+        max_abs_delta = max(deltas) if deltas else None
+        # Rank only events that HAVE a delta. Ranking by `abs(delta or 0)` over
+        # events whose delta is undefined scores them all 0 and silently returns
+        # the first one, presenting an arbitrary row as the top event. When
+        # nothing is comparable there is no top event, and the columns stay empty.
+        comparable_events = [ev for ev in events if ev["delta"] is not None]
         top_event = None
-        if events:
+        if comparable_events:
             top_event = max(
-                events,
-                key=lambda ev: (abs(ev["delta"] or 0), ev["classification"] == "gained"),
+                comparable_events,
+                key=lambda ev: (abs(ev["delta"]), ev["classification"] == "gained"),
             )
+        # Undefined when nothing was comparable: "0% of the effect falls after the
+        # cleavage site" asserts a measured distribution where no effect was
+        # measured at all. Empty instead, with the reason in qc_flags below.
+        # Falsy rather than `> 0`: sum_abs_delta is now None when no delta exists,
+        # and a magnitude can never be negative, so the two tests agree wherever
+        # the old one was defined.
         frac_post_cleavage = (
-            (post_cleavage_delta / sum_abs_delta) if sum_abs_delta > 0 else 0.0
+            (post_cleavage_delta / sum_abs_delta) if sum_abs_delta else None
+        )
+        n_comparable = sum(1 for ev in events if ev["delta"] is not None)
+        n_events_aligned = sum(1 for ev in events if ev["align_status"] == "aligned")
+        n_events_wt_only = sum(
+            1 for ev in events
+            if ev["wt_potential"] is not None and ev["mut_potential"] is None
+        )
+        n_events_mut_only = sum(
+            1 for ev in events
+            if ev["mut_potential"] is not None and ev["wt_potential"] is None
         )
         qc_flags = []
         if not wt_sites:
             qc_flags.append("missing_wt")
         if not mut_sites:
             qc_flags.append("missing_mut")
-        if sum_abs_delta == 0 and (n_sites_wt or n_sites_mut):
+        # Three mutually exclusive states, because "compared and identical" and
+        # "could not be compared" are opposite findings that both used to surface
+        # as no_delta once the fabricated per-event zeros were removed:
+        #   nothing paired at all            -> no_comparable_site
+        #   some paired, some one-sided      -> uncomparable_sites:Nwt_only,Mmut_only
+        #   everything paired, all deltas 0  -> no_delta
+        # The middle case is the one that mattered: a frameshift deleting four
+        # sequons leaves its one surviving delta at 0.0, and calling that row
+        # "no_delta" asserts the opposite of what the edit did.
+        if n_comparable == 0 and (n_sites_wt or n_sites_mut):
+            qc_flags.append("no_comparable_site")
+        elif n_events_wt_only or n_events_mut_only:
+            qc_flags.append(
+                f"uncomparable_sites:{n_events_wt_only}wt_only,"
+                f"{n_events_mut_only}mut_only"
+            )
+        elif sum_abs_delta == 0 and (n_sites_wt or n_sites_mut):
             qc_flags.append("no_delta")
-        if wt_sig is None and mut_sig is None:
+        # Falsy, not `is None`: the only caller passes `wt_sig or {}` / `mut_sig
+        # or {}`, so an absent SignalP summary arrives as {} and the `is None`
+        # test this replaces could never fire. Without it the empty post_cleavage
+        # column had no named reason anywhere in the row.
+        if not wt_sig and not mut_sig:
             qc_flags.append("no_signalp")
+        # NOT MEASURED is not ZERO. When NetNGlyc emitted no output for an allele --
+        # the binary failed, SignalP was absent, the run never happened -- the site
+        # counts are UNKNOWN, and 0 asserts "this protein has no glycosylation
+        # sites and the variant changed none of them". A run in which the tool
+        # executed 0/1 times wrote six rows of n_sites_wt=0 / count_lost=0 that are
+        # byte-indistinguishable from six real measurements of an unaffected
+        # protein; `missing_wt` was the only trace, in a column no aggregation
+        # reads. This is the contract sum_abs_delta already honours above, applied
+        # to the columns that were left behind.
+        #
+        # A token with no mutant allele (intronic, REF-mismatched, otherwise
+        # rejected) is a DIFFERENT absence: it is named in build_failures and needs
+        # no run-failure flag, but its counts are equally undefined -- there was no
+        # mutant protein to compare against.
+        if not wt_scored:
+            qc_flags.append("NOT_SCORED:wt_no_netnglyc_output")
+        if not mut_scored and not no_mut_allele:
+            qc_flags.append("NOT_SCORED:mut_no_netnglyc_output")
+        if not wt_scored:
+            n_sites_wt = None
+        if not mut_scored:
+            n_sites_mut = None
+        counts_defined = wt_scored and mut_scored
         summary = {
             "pkey": pkey,
             "Gene": gene,
+            "variant_class": (align or {}).get("variant_class", ""),
+            "aa_consequence": (align or {}).get("aa_consequence", ""),
+            "aa_token": (align or {}).get("aa_token", ""),
+            "n_aa_wt": (align or {}).get("n_aa_wt"),
+            "n_aa_mut": (align or {}).get("n_aa_mut"),
+            "n_events_aligned": n_events_aligned,
+            "n_events_wt_only": n_events_wt_only,
+            "n_events_mut_only": n_events_mut_only,
+            "align_summary": (align or {}).get("align_summary", ""),
             "n_sites_wt": n_sites_wt,
             "n_sites_mut": n_sites_mut,
-            "count_gained": classification_counts["gained"],
-            "count_lost": classification_counts["lost"],
-            "count_strengthened": classification_counts["strengthened"],
-            "count_weakened": classification_counts["weakened"],
-            "count_stable": classification_counts["stable"],
+            "count_gained": classification_counts["gained"] if counts_defined else None,
+            "count_lost": classification_counts["lost"] if counts_defined else None,
+            "count_strengthened": (classification_counts["strengthened"]
+                                   if counts_defined else None),
+            "count_weakened": classification_counts["weakened"] if counts_defined else None,
+            "count_stable": classification_counts["stable"] if counts_defined else None,
             "max_abs_delta": max_abs_delta,
             "sum_abs_delta": sum_abs_delta,
             "top_event_type": top_event["classification"] if top_event else None,
             "top_event_delta": top_event["delta"] if top_event else None,
+            # An inserted site has no WT coordinate, so carry the mutant one too
+            # rather than leaving the top event unidentifiable.
             "top_event_position": top_event["position"] if top_event else None,
+            "top_event_mut_position": top_event["mut_position"] if top_event else None,
             "top_event_classification_code": self._encode_classification(
                 top_event["classification"]
             )
@@ -1688,17 +2400,12 @@ class RobustDockerNetNGlyc:
             "frac_effect_post_cleavage": frac_post_cleavage,
             "qc_flags": ",".join(qc_flags) if qc_flags else "",
         }
-        for event in events:
-            event["wt_above_threshold"] = self._encode_bool(
-                event["wt_above_threshold"]
-            )
-            event["mut_above_threshold"] = self._encode_bool(
-                event["mut_above_threshold"]
-            )
-            event["post_cleavage"] = self._encode_optional_bool(event["post_cleavage"])
-            event["classification_code"] = self._encode_classification(
-                event["classification"]
-            )
+        # (No second encoding pass. Every one of those four fields is already
+        # written in its final encoded form above, so re-encoding was idempotent
+        # busywork -- and the post_cleavage line in particular could not do what
+        # it was written to do, because _encode_bool had already collapsed an
+        # unknown None to 0 before it ran. That is now encoded optionally at the
+        # point of construction instead.)
         return summary, events
 
     def build_netnglyc_ensemble(
@@ -1709,26 +2416,87 @@ class RobustDockerNetNGlyc:
         threshold,
         summary_path,
         signalp_cache=None,
+        wt_proteins=None,
+        mut_proteins=None,
+        wt_orfs=None,
+        build_failures=None,
     ):
-        mutation_index = load_mutation_index(mapping_lookup)
+        """Join the two alleles' predictions and write the summary/events/sites TSVs.
+
+        wt_proteins / mut_proteins are the exact amino-acid sequences NetNGlyc
+        scored, keyed by gene and by pkey. They are what makes the cross-allele
+        join well defined under a length change; without them the join falls back
+        to identity, which is correct only when the two alleles have the same
+        coordinates.
+
+        build_failures maps a pkey to the NAMED reason it produced no mutant
+        protein, so a rejected token is reported as itself rather than as an
+        unexplained missing_mut.
+        """
+        wt_proteins = wt_proteins or {}
+        mut_proteins = mut_proteins or {}
+        wt_orfs = wt_orfs or {}
+        build_failures = build_failures or {}
+        # Format-aware, not load_mutation_index: that reads the mapping file with
+        # csv.DictReader keyed on a 'mutant' header, so a HEADERLESS single-column
+        # file -- which build_mutant_sequences_for_gene synthesizes mutants from
+        # perfectly well -- produced {GENE: set()}. That dict is truthy, so the
+        # membership test in collect_mutant_sites (:1742) then rejected EVERY
+        # mutant prediction for the gene, and expected_pkeys learned of none of
+        # them: a whole run's mutant side dropped with no row and no counter.
+        mutation_index = {
+            gene.upper(): _expected_tokens(gene.upper(), path)
+            for gene, path in (mapping_lookup or {}).items()
+        }
         signalp_cache = signalp_cache or load_signalp_cache(self.cache_dir)
-        wt_sites_by_gene, wt_signalp, wt_site_rows = self.collect_wt_sites(
-            wt_dirs, threshold, signalp_cache=signalp_cache
+        wt_sites_by_gene, wt_signalp, wt_site_rows, wt_scored = self.collect_wt_sites(
+            wt_dirs, threshold, mutation_index=mutation_index, signalp_cache=signalp_cache
         )
         (
             mut_sites_by_pkey,
             mut_signalp,
             mut_site_rows,
             pkey_gene_map,
+            mut_scored,
         ) = self.collect_mutant_sites(
             mut_dirs, threshold, mutation_index, signalp_cache=signalp_cache
         )
         sites_rows = wt_site_rows + mut_site_rows
         expected_pkeys = set(mut_sites_by_pkey.keys())
         for gene, mutation_ids in mutation_index.items():
+            # Same normalisation caveat as the synthesis path: load_mutation_index
+            # upper-cases, so resolve through the index before falling back.
+            _idx = load_token_pkey_index(mapping_lookup.get(gene), gene) if mapping_lookup else {}
             for mut_id in mutation_ids:
-                expected_pkeys.add(f"{gene}-{mut_id}")
-                pkey_gene_map.setdefault(f"{gene}-{mut_id}", gene)
+                _pk = _idx.get(mut_id) or mint_pkey(gene, mut_id)
+                expected_pkeys.add(_pk)
+                pkey_gene_map.setdefault(_pk, gene)
+        # A token whose build failure was NAMED must get a row even when
+        # mutation_index cannot see it. load_mutation_index reads the mapping file
+        # with csv.DictReader, so a headerless single-column file contributes
+        # nothing above; without this the reason recorded during synthesis would
+        # have no row to be printed in, and the token would vanish exactly as
+        # before. Longest gene prefix first so HLA-A wins over HLA; a pkey
+        # belonging to another gene's mapping matches nothing and is left alone.
+        genes_known = sorted(mutation_index, key=len, reverse=True)
+        for failed_pkey in build_failures:
+            if failed_pkey in expected_pkeys:
+                continue
+            owner = next(
+                (g for g in genes_known if failed_pkey.startswith(f"{g}-")), None
+            )
+            if owner is None:
+                continue
+            expected_pkeys.add(failed_pkey)
+            pkey_gene_map.setdefault(failed_pkey, owner)
+        # pkey -> verbatim token, for every mapping this run knows. Sequence names
+        # and pkeys are {GENE}-{sha}, so the token is not recoverable by string
+        # surgery on the pkey; it comes from the mapping variant_mapping wrote.
+        pkey_map_all = {}
+        for _g, _mf in (mapping_lookup or {}).items():
+            for _tok, _pk in load_token_pkey_index(_mf, _g).items():
+                pkey_map_all.setdefault(_pk, _tok)
+
         summary_rows = []
         events_rows = []
         for pkey in sorted(expected_pkeys):
@@ -1739,18 +2507,45 @@ class RobustDockerNetNGlyc:
             mut_sites = mut_sites_by_pkey.get(pkey, [])
             wt_sig = wt_signalp.get(gene)
             mut_sig = mut_signalp.get(pkey)
-            summary, events = self._summarize_netnglyc_variant(
-                gene, pkey, wt_sites, mut_sites, wt_sig or {}, mut_sig or {}, threshold
+            # Strip the resolved gene prefix; splitting on the first '-' would
+            # return "A-C11G" for a hyphenated symbol such as HLA-A.
+            token = token_from_name(pkey, gene, pkey_map_all)
+            align = _aa_alignment(
+                token,
+                wt_proteins.get(gene),
+                mut_proteins.get(pkey),
+                orf_seq=wt_orfs.get(gene),
             )
+            summary, events = self._summarize_netnglyc_variant(
+                gene, pkey, wt_sites, mut_sites, wt_sig or {}, mut_sig or {}, threshold,
+                align=align,
+                wt_scored=gene in wt_scored,
+                mut_scored=pkey in mut_scored,
+            )
+            # A token that produced no mutant protein carries the reason it was
+            # rejected, so it is a named row rather than a silent absence. When a
+            # mutant WAS built despite the token's REF disagreeing with the ORF --
+            # which the SNV synthesis path allows -- report that instead, so the
+            # row is not silently trusted.
+            reason = build_failures.get(pkey) or align.get("ref_status")
+            if reason:
+                summary["qc_flags"] = (
+                    f"{summary['qc_flags']},{reason}" if summary["qc_flags"] else reason
+                )
             summary_rows.append(summary)
             events_rows.extend(events)
+        # write_tsv is called with these lists, so a row key absent here is
+        # dropped silently -- add the column here whenever a row dict gains one.
         events_fields = [
             "pkey",
             "Gene",
             "position",
+            "mut_position",
+            "align_status",
             "wt_potential",
             "mut_potential",
             "delta",
+            "delta_reason",
             "classification",
             "classification_code",
             "wt_sequon",
@@ -1762,6 +2557,15 @@ class RobustDockerNetNGlyc:
         summary_fields = [
             "pkey",
             "Gene",
+            "variant_class",
+            "aa_consequence",
+            "aa_token",
+            "n_aa_wt",
+            "n_aa_mut",
+            "n_events_aligned",
+            "n_events_wt_only",
+            "n_events_mut_only",
+            "align_summary",
             "n_sites_wt",
             "n_sites_mut",
             "count_gained",
@@ -1775,6 +2579,7 @@ class RobustDockerNetNGlyc:
             "top_event_classification_code",
             "top_event_delta",
             "top_event_position",
+            "top_event_mut_position",
             "wt_signalp_has_signal",
             "wt_signalp_probability",
             "wt_signalp_cleavage",
@@ -1996,7 +2801,6 @@ class RobustDockerNetNGlyc:
             max_workers=1,  # Each worker handles one file
             cache_dir=self.cache_dir,
             docker_timeout=self.docker_timeout,
-            keep_intermediates=self.keep_intermediates,
             verbose=self.verbose,
             native_bin=getattr(self, 'native_path', None),
         )
@@ -2185,7 +2989,8 @@ class RobustDockerNetNGlyc:
         Process FASTA file by splitting into individual sequences and running
         them in parallel.
         """
-        
+        temp_files = []  # bound before try so the finally cleanup never hits an unbound name
+
         try:
             # Read all sequences
             sequences = read_fasta(fasta_file)
@@ -2198,13 +3003,12 @@ class RobustDockerNetNGlyc:
             
             # Create temporary files for individual sequences (save to outputs directory for troubleshooting)
             outputs_dir = os.path.dirname(output_file)
-            temp_files = []
             output_files = []
             
             for i, (seq_name, sequence) in enumerate(sequences.items()):
                 # Create individual FASTA file (save to outputs directory for troubleshooting)
-                temp_fasta = os.path.join(outputs_dir, f"seq_{i}_{seq_name.replace('/', '_')}.fasta")
-                temp_output = os.path.join(outputs_dir, f"seq_{i}_output.out")
+                temp_fasta = os.path.join(outputs_dir, f"{Path(output_file).stem}_seq_{i}_{seq_name.replace('/', '_')}.fasta")
+                temp_output = os.path.join(outputs_dir, f"{Path(output_file).stem}_seq_{i}_output.out")
                 
                 with open(temp_fasta, 'w') as f:
                     f.write(f">{seq_name}\n")
@@ -2263,15 +3067,14 @@ class RobustDockerNetNGlyc:
         except Exception as e:
             return False, output_file, f"Parallel processing error: {e}"
         finally:
-            # Clean up temporary files (only if not keeping intermediates)
-            if not self.keep_intermediates:
-                for temp_fasta, temp_output, _ in temp_files:
-                    for temp_file in [temp_fasta, temp_output]:
-                        if os.path.exists(temp_file):
-                            try:
-                                os.remove(temp_file)
-                            except:
-                                pass
+            # Clean up temporary files
+            for temp_fasta, temp_output, _ in temp_files:
+                for temp_file in [temp_fasta, temp_output]:
+                    if os.path.exists(temp_file):
+                        try:
+                            os.remove(temp_file)
+                        except:
+                            pass
 
     def combine_parallel_outputs(self, output_files, final_output_file, total_sequences):
         """Combine multiple parallel NetNGlyc outputs into a single file"""
@@ -2413,12 +3216,21 @@ def run_full_pipeline_mode(args, failure_map, parser):
     if not args.input or not args.output:
         parser.error("For full-pipeline mode: both input (FASTA file/directory) and output (TSV file) are required")
 
+    # Directory mode: <root>/<GENE>/mappings/ lives under the same root as the
+    # input FASTAs, so the input supplies the mappings too. Explicit wins.
+    args.mapping_dir = derive_mapping_root(args.mapping_dir, args.input, "transcript",
+                                           label="netnglyc")
     if not args.mapping_dir:
         parser.error("For full-pipeline mode: --mapping-dir is REQUIRED (directory containing mutation mapping CSV files)")
 
     temp_output_dir = tempfile.mkdtemp(prefix="netnglyc_outputs_")
     temp_sequence_dir = tempfile.mkdtemp(prefix="netnglyc_sequences_")
     wt_temp_holder = None
+    # process_directory returns its success/failed tally and NOTHING read it, so a
+    # run in which NetNGlyc executed 0/1 times still printed "completed
+    # successfully" and exited 0. In a batch that is the difference between a
+    # noticed outage and a silent directory of all-empty rows.
+    run_failures = 0
 
     try:
         wt_sequences, wt_temp_holder = load_wt_sequence_map(args.input, wt_header="ORF")
@@ -2431,7 +3243,7 @@ def run_full_pipeline_mode(args, failure_map, parser):
         if not mapping_lookup:
             parser.error(f"No mapping CSV files found in {args.mapping_dir}")
 
-        wt_fasta_dir, mut_fasta_dir, build_summary = synthesize_gene_fastas(
+        wt_fasta_dir, mut_fasta_dir, build_summary, build_ctx = _synthesize_gene_fastas_non_snv(
             wt_sequences,
             mapping_lookup,
             temp_sequence_dir,
@@ -2447,7 +3259,12 @@ def run_full_pipeline_mode(args, failure_map, parser):
         print("\n=== FASTA synthesis summary ===")
         for entry in build_summary:
             mut_msg = f"{entry['mutant_count']} mutants" if entry['mutant_count'] else "no mutants"
-            print(f"  {entry['gene']}: WT -> {entry['wt_path']} | Mutants -> {mut_msg}")
+            # Report unbuilt tokens as a COUNT here and by name in the summary
+            # TSV's qc_flags. A token that produced no mutant must not simply
+            # vanish between the mapping file and the output.
+            unbuilt = entry.get('unbuilt_count') or 0
+            unbuilt_msg = f" | {unbuilt} unbuilt (see qc_flags)" if unbuilt else ""
+            print(f"  {entry['gene']}: WT -> {entry['wt_path']} | Mutants -> {mut_msg}{unbuilt_msg}")
         print("=" * 60)
 
         wt_outputs_dir = Path(temp_output_dir) / "wt"
@@ -2460,7 +3277,6 @@ def run_full_pipeline_mode(args, failure_map, parser):
             max_workers=args.workers,
             cache_dir=args.cache_dir,
             docker_timeout=args.batch_timeout,
-            keep_intermediates=args.keep_intermediates,
             verbose=args.verbose,
             native_bin=args.native_netnglyc_bin,
         ) as processor:
@@ -2471,6 +3287,7 @@ def run_full_pipeline_mode(args, failure_map, parser):
                 str(wt_outputs_dir),
             )
             print(f"WT NetNGlyc runs completed: {wt_results_summary['success']}/{wt_results_summary['total']}")
+            run_failures += wt_results_summary.get("failed", 0)
 
             if mut_fastas:
                 print("\nRunning NetNGlyc on mutant amino acid FASTAs...")
@@ -2479,6 +3296,7 @@ def run_full_pipeline_mode(args, failure_map, parser):
                     str(mut_outputs_dir),
                 )
                 print(f"Mutant NetNGlyc runs completed: {mut_results_summary['success']}/{mut_results_summary['total']}")
+                run_failures += mut_results_summary.get("failed", 0)
             else:
                 print("No mutant FASTA files were generated; skipping mutant NetNGlyc execution")
 
@@ -2496,19 +3314,24 @@ def run_full_pipeline_mode(args, failure_map, parser):
                     threshold=args.threshold,
                     summary_path=gene_summary_path,
                     signalp_cache=signalp_cache,
+                    wt_proteins=build_ctx["wt_proteins"],
+                    mut_proteins=build_ctx["mut_proteins"],
+                    wt_orfs=build_ctx["wt_orfs"],
+                    build_failures=build_ctx["build_failures"],
                 )
                 print(f"NetNGlyc ensemble outputs written for {gene_upper} to {gene_out}")
 
     finally:
         if wt_temp_holder:
             wt_temp_holder.cleanup()
-        if args.keep_intermediates:
-            print(f"WT/Mutant FASTAs saved in {temp_sequence_dir}")
-            print(f"Raw NetNGlyc outputs saved in {temp_output_dir}")
-        else:
-            shutil.rmtree(temp_sequence_dir, ignore_errors=True)
-            shutil.rmtree(temp_output_dir, ignore_errors=True)
+        shutil.rmtree(temp_sequence_dir, ignore_errors=True)
+        shutil.rmtree(temp_output_dir, ignore_errors=True)
 
+    if run_failures:
+        print(f"\n[ERROR] {run_failures} NetNGlyc execution(s) FAILED. Rows for the "
+              f"affected alleles carry NOT_SCORED qc_flags and empty site counts -- "
+              f"they are not measurements of an unaffected protein.", file=sys.stderr)
+        return 1
     return 0
 
 
@@ -2521,27 +3344,25 @@ def main():
     )
     parser.add_argument("input", nargs='?', help="Input FASTA file or directory (required for process/full-pipeline modes)")
     parser.add_argument("output", nargs='?', help="Output base directory (writes {GENE}/NetNglyc/{GENE}.tsv, .events.tsv, .sites.tsv)")
-    parser.add_argument("--workers", type=int, default=4, help="Number of parallel workers (used with --processing-mode parallel, default: 4)")
-    parser.add_argument("--cache-dir", help="Custom cache directory for SignalP/NetNGlyc results")
-    parser.add_argument("--test", action="store_true",
+    parser.add_argument("-w", "--workers", type=int, default=4, help="Number of parallel workers (used with --processing-mode parallel, default: 4)")
+    parser.add_argument("-cd", "--cache-dir", help="Custom cache directory for SignalP/NetNGlyc results")
+    parser.add_argument("-t", "--test", action="store_true",
                         help="Run test with ABCB1 sequence (no other args required)")
-    parser.add_argument("--clear-cache", action="store_true",
+    parser.add_argument("-cc", "--clear-cache", action="store_true",
                         help="Clear all cached results and exit (no other args required)")
-    parser.add_argument("--mapping-dir",
+    parser.add_argument("-md", "--mapping-dir",
                         help="Directory containing mutation mapping CSV files (REQUIRED for parsing modes)")
-    parser.add_argument("--threshold", type=float, default=0.5,
+    parser.add_argument("-th", "--threshold", type=float, default=0.5,
                         help="Minimum glycosylation potential threshold for predictions (default: 0.5)")
-    parser.add_argument("--batch-timeout", type=int, default=5000,
+    parser.add_argument("-bt", "--batch-timeout", type=int, default=5000,
                         help="Timeout in seconds for NetNGlyc execution (default: 5000s)")
-    parser.add_argument("--keep-intermediates", action="store_true",
-                        help="Keep intermediate output files for debugging (don't clean up temporary directories)")
-    parser.add_argument("--verbose", action="store_true",
+    parser.add_argument("-v", "--verbose", action="store_true",
                         help="Enable verbose output showing detailed processing information")
-    parser.add_argument("--log",
+    parser.add_argument("-l", "--log",
                         help="Validation log file or directory to skip failed mutations (mutant modes only)")
 
     # Native execution options
-    parser.add_argument("--native-netnglyc-bin",
+    parser.add_argument("-nnb", "--native-netnglyc-bin",
                         help="Path to native NetNGlyc binary")
 
     args = parser.parse_args()
@@ -2586,6 +3407,11 @@ def main():
             writer.writerow(["mutant", "aamutant"])
             writer.writerow(["G10A", ""])
             writer.writerow(["A22G", "N8D"])
+            # Non-SNV tokens are processed by default -- no flag selects them.
+            writer.writerow(["AAT22A", ""])        # frameshift deletion
+            writer.writerow(["A22AGGG", ""])       # in-frame insertion
+            writer.writerow(["AAAAAA34A", ""])     # frameshift deletion
+            writer.writerow(["GGGG5A", ""])        # REF mismatch -> named row
 
         test_args = argparse.Namespace(**vars(args))
         test_args.input = str(fasta_dir)
@@ -2594,9 +3420,18 @@ def main():
         test_args.test = False
 
         try:
-            run_full_pipeline_mode(test_args, {}, parser)
-            print(f"\nTest pipeline completed successfully. Parsed TSV: {test_output_tsv}")
-            return 0
+            # PROPAGATE the status. Discarding it and returning 0 announced "Test
+            # pipeline completed successfully" for a run in which NetNGlyc executed
+            # 0/1 times -- the same unread-tally bug as in run_full_pipeline_mode,
+            # one level up, and the one a CI job or a batch driver would actually
+            # see.
+            rc = run_full_pipeline_mode(test_args, {}, parser)
+            if rc:
+                print(f"\nTest pipeline FAILED (exit {rc}). Parsed TSV: {test_output_tsv}",
+                      file=sys.stderr)
+            else:
+                print(f"\nTest pipeline completed successfully. Parsed TSV: {test_output_tsv}")
+            return rc
         finally:
             shutil.rmtree(test_root, ignore_errors=True)
 

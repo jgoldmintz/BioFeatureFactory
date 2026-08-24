@@ -142,7 +142,13 @@ def collect_transcripts(gtf_path: Path, chrom_format: str):
             data["chrom"] = chrom_name
             data["gene"] = gene_name
             data["strand"] = strand
-            data["exons"].append((int(start), int(end)))
+            # F41: GTF column-4 start is 1-based; SpliceAI's Annotator (spliceai/utils.py:
+            # tx_starts/exon_starts = df[...].to_numpy()+1) treats annotation starts as
+            # 0-based and re-adds 1. Emit 0-based starts here so the Annotator restores the
+            # true 1-based boundary. Genome-verified (DDX11L1 intron-1 acceptor AG @
+            # NC_000001.11:12611-12612 → EXON_START 12613 is the 1-based first exonic base).
+            # Ends are 1-based inclusive and the Annotator does NOT +1 them → left unchanged.
+            data["exons"].append((int(start) - 1, int(end)))
 
     return transcripts
 

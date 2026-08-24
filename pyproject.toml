@@ -1,33 +1,225 @@
 [build-system]
-requires = ["setuptools>=61.0"]
+# setuptools >= 77 for PEP 639 SPDX `license` / `license-files` support.
+requires = ["setuptools>=77.0"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "biofeaturefactory"
 version = "0.1.0"
 description = "BioFeatureFactory — feature extraction for disease-associated mutations"
-requires-python = ">=3.9"
+# Tracks the numpy pin below; the two move together. The old <3.13 cap existed
+# only because numpy was pinned <2 and 1.26.4 (the last 1.x) publishes no wheel
+# past cp312 -- lifting the numpy floor to 1.26.4 removed that reason. The <3.14
+# cap is a DIFFERENT constraint and still real: pandas 3.0.5 switches to
+# `numpy>=2.3.3` at python_version >= "3.14", which collides with numba's
+# `numpy<2.5` ceiling (see below). Floor is 3.10 because adabmDCA requires it.
+requires-python = ">=3.10,<3.14"
+license = "AGPL-3.0-or-later"
+license-files = ["LICENSE"]
+authors = [{ name = "Jacob Goldmintz" }]
+keywords = [
+    "bioinformatics",
+    "genomics",
+    "variant annotation",
+    "feature engineering",
+    "pipelines",
+]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Science/Research",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3",
+    "Topic :: Scientific/Engineering :: Bio-Informatics",
+]
 dependencies = [
     "biopython>=1.79",
     "pandas>=1.3.0",
-    "numpy>=1.20.0,<2",
+    # Bounds are read off the tightest constraints actually declared by the
+    # installed dependency set, not chosen for caution:
+    #   floor   scipy 1.17.1 and adabmDCA 0.7.8 both require numpy>=1.26.4
+    #   ceiling numba 0.64.0 requires numpy<2.5 -- the only upper bound anywhere
+    #           in the tree (numba arrives via the `evmutation` extra)
+    #
+    # The previous `<2` was not merely conservative, it was UNSATISFIABLE with
+    # this project's own optional deps: scipy's floor is 1.26.4 and numba wants
+    # >=1.22,<2.5, so `pip install -e ".[all]"` resolved to numpy 1.26.4 --
+    # clearing scipy's floor by a single patch release. Meanwhile the working
+    # environment has been running 2.4.6 the whole time; `biofeaturefactory` was
+    # the ONLY installed distribution asking for <2, and pip said so:
+    #   "biofeaturefactory 0.1.0 requires numpy<2,>=1.20.0, but you have numpy
+    #    2.4.6 which is incompatible."
+    # Verified on 2.4.6: numba, tensorflow, torch, torchvision, prody, RNA,
+    # adabmDCA, h5py, scipy, pandas, sklearn, pysam, biopython all import, and
+    # spliceai-parser.py produced byte-identical output to the 1.26.4 run.
+    # NOT verified: numerical equivalence of numba-jitted EVmutation, prody in
+    # rare_codon, ViennaRNA, or adabmDCA under numpy 2.x.
+    "numpy>=1.26.4,<2.5",
     "requests>=2.25.0",
     "pysam>=0.19.0",
     "scipy>=1.7.0",
+    # RUNTIME, and the UPPER bound is the load-bearing half -- not the build
+    # requirement on line 3, which does not put setuptools in the runtime env.
+    #
+    # spliceai/__init__.py:2 does `from pkg_resources import get_distribution`.
+    # pkg_resources ships with setuptools and was REMOVED in setuptools 81
+    # ("The pkg_resources package is slated for removal as early as 2025-11-30.
+    # Refrain from using this package or pin to Setuptools<81" -- setuptools' own
+    # DeprecationWarning). Measured on this env: setuptools 84.0.0 was already
+    # installed and `spliceai -I ...` still died with
+    #   ModuleNotFoundError: No module named 'pkg_resources'
+    # before reading a variant; 80.9.0 imports it fine. So `>=77` alone fixes
+    # nothing -- the pin has to cap the version.
+    #
+    # spliceai is conda-installed by bootstrap step 6d rather than declared here,
+    # so nothing else pulls setuptools into the runtime environment. Revisit when
+    # spliceai stops importing pkg_resources; this cap holds BFF on a setuptools
+    # line that is already deprecated upstream.
+    "setuptools>=77.0,<81",
 ]
 
+[project.urls]
+Homepage = "https://github.com/jgoldmintz/biofeaturefactory"
+Repository = "https://github.com/jgoldmintz/biofeaturefactory"
+
+# ── Packaging ────────────────────────────────────────────────────────────
+# include-package-data = false is LOAD-BEARING. pyproject.toml defaults it to
+# TRUE, and with it on setuptools treats every file under a package directory as
+# shippable data — including .py files that live in a NON-package subdirectory.
+# scripts/bootstrap.sh clones upstream repos INTO this tree, and none of them have
+# a complete __init__.py chain, so the default silently packaged all of nsp3,
+# alphafold3/src, EVmutation and adabmDCApy as data of their nearest parent
+# package. Measured: 61 packaged directories with the default, 18 with it off.
+# Everything this project actually ships is declared in [tool.setuptools.package-data].
+[tool.setuptools]
+include-package-data = false
+
+# ── Package discovery ────────────────────────────────────────────────────
+# namespaces = false is LOAD-BEARING, not stylistic. Under pyproject.toml the
+# `find` directive defaults to namespaces = true, i.e. find_namespace_packages,
+# which needs no __init__.py and therefore sweeps in every third-party repo that
+# scripts/bootstrap.sh clones INTO this tree (NetSurfP3/nsp3, alphafold3/alphafold3,
+# mutation_effects/{EVmutation,plmc,adabmDCApy}, rare_codon/cg_cotrans) plus
+# transient run output (miranda/<GENE>/, mutation_effects/work/). Measured on this
+# tree: 118 packages with the default, 18 with namespaces = false. The `exclude`
+# list below then pins that intent even if a vendored clone later grows a complete
+# __init__.py chain.
 [tool.setuptools.packages.find]
 include = ["biofeaturefactory*"]
+namespaces = false
+exclude = [
+    # Vendored upstream clones — installed separately (see bootstrap step 8b) or
+    # used from their checkout via sys.path (EVmutation), never redistributed here.
+    "biofeaturefactory.NetSurfP3.nsp3*",
+    "biofeaturefactory.alphafold3.alphafold3*",
+    "biofeaturefactory.mutation_effects.EVmutation*",
+    "biofeaturefactory.mutation_effects.plmc*",
+    "biofeaturefactory.mutation_effects.adabmDCApy*",
+    "biofeaturefactory.rare_codon.cg_cotrans*",
+    "biofeaturefactory.genesplicer.GeneSplicer*",
+    # Run artefacts that can appear inside the tree.
+    "biofeaturefactory.mutation_effects.work*",
+    "biofeaturefactory.*.work*",
+]
+
+# Non-Python runtime assets. Without these the pipelines install but cannot run:
+# the Nextflow entrypoints and the SLURM array template are read from disk at
+# call time, not imported.
+# CAVEAT: wheels do not preserve the executable bit, so netNglyc/bin/signalp6_adapter
+# arrives mode 644 from a wheel install. The netNglyc README's tcsh SIGNALP patch
+# points at this path; chmod +x it after a non-editable install. Editable installs
+# (bootstrap step 2, `pip install -e .`) keep the bit.
+[tool.setuptools.package-data]
+"biofeaturefactory.spliceai.bin" = ["*.nf", "*.config"]
+"biofeaturefactory.mutation_effects.bin" = ["*.nf", "*.config"]
+"biofeaturefactory.alphafold3.bin" = ["*.tmpl", "*.sh"]
+"biofeaturefactory.netNglyc" = ["bin/signalp6_adapter"]
+
+# ── Console entry points ─────────────────────────────────────────────────
+# Layering is lib -> core -> pipelines. `lib/` is import-only and deliberately
+# exposes no scripts. `core/` produces the inputs every pipeline consumes; the
+# rest are consumers.
+#
+# NOT exposed here. A console script that cannot start is worse than an absent
+# one, so each omission below is a measured import failure, not an oversight:
+#
+#   mutEffects_controller.py / spliceai_pipeline_controller.py
+#       No module-level main(). Their guard is `run_controller(parse_args())`,
+#       which is not a zero-argument callable. Run with `python -m` until each
+#       grows a main() wrapper.
+#   evmutation_pipeline.py
+#       :52 sets _BIN_DIR = <pkg>/mutation_effects/bin and inserts THAT on
+#       sys.path, but the EVmutation clone lands one level up at
+#       <pkg>/mutation_effects/EVmutation/ (bootstrap step 3). :69
+#       `from EVmutation.model import ...` therefore raises ModuleNotFoundError
+#       regardless of how it is invoked. Anchor the shim at SCRIPT_DIR instead.
+#   rare_codon_pipeline.py
+#       :61 and :71 import bare siblings (`calc_rare_enrichment`, `codons`),
+#       which resolve only when sys.path[0] is the script's own directory —
+#       true for `python <path>.py`, false for an installed console script.
+#   rare_codon/calc_*.py
+#       Inline-__main__ analysis tools with no main(); invoked by
+#       rare_codon_pipeline.py, not by users.
+#
+# Re-add the two pipeline entries once their sibling/clone imports are anchored
+# on __file__; `scripts/bootstrap.sh` step 8c reports the live resolution state.
+[project.scripts]
+# core — input producers
+bff-variant-mapping = "biofeaturefactory.core.variant_mapping:main"
+bff-vcf-converter   = "biofeaturefactory.core.vcf_converter:main"
+bff-msa-generation  = "biofeaturefactory.core.msa_generation_pipeline:main"
+bff-codon-msa       = "biofeaturefactory.core.codon_msa_pipeline:main"
+# pipelines — consumers
+bff-netnglyc      = "biofeaturefactory.netNglyc.netnglyc_pipeline:main"
+bff-netphos       = "biofeaturefactory.netphos.netphos_pipeline:main"
+bff-netmhc        = "biofeaturefactory.netMHC.netmhc_pipeline:main"
+bff-netsurfp3     = "biofeaturefactory.NetSurfP3.netsurfp3_pipeline:main"
+bff-rnafold       = "biofeaturefactory.RNAfold.run_viennaRNA_pipeline:main"
+bff-miranda       = "biofeaturefactory.miranda.miranda_ensemble:main"
+bff-genesplicer   = "biofeaturefactory.genesplicer.genesplicer_ensemble:main"
+bff-codon-usage   = "biofeaturefactory.codon_usage.codon_usage_pipeline:main"
+bff-adabmdca      = "biofeaturefactory.mutation_effects.adabmdca_pipeline:main"
+# `bff-spliceai` is deliberately NOT this tool: annot_to_spliceai.py converts an
+# annotation table into SpliceAI's input format, it does not run SpliceAI. The
+# bare name is reserved for spliceai_pipeline_controller.py once that grows a
+# main(). A pre-existing local install may still carry a `bff-spliceai` shim
+# pointing here; `pip install -e .` clears it.
+bff-spliceai-annot = "biofeaturefactory.spliceai.annot_to_spliceai:main"
+bff-alphafold3    = "biofeaturefactory.alphafold3.alphafold3_pipeline:main"
+bff-af3-burst     = "biofeaturefactory.alphafold3.burst:main"
 
 [project.optional-dependencies]
 rnafold = ["ViennaRNA"]
 evmutation = ["numba>=0.53"]
 rare-codon = ["networkx>=2.6", "prody>=2.0"]
+# adabmDCA pulls in torch, matplotlib, pandas>=2.2, tqdm, wandb, biopython, seaborn
+# transitively (see adabmDCApy setup.py). Requires Python >= 3.10.
+# torch listed explicitly because adabmdca_pipeline.py imports it directly.
+adabmdca = ["adabmDCA>=0.7.5", "torch>=2.0.0"]
+# NetSurfP3 wrapper deps. torch is a DIRECT import in netsurfp3_pipeline.py; the
+# other five are nsp3's own runtime deps (also pulled by `pip install -e nsp3/nsp3`),
+# listed here so `pip install .[all]` / `.[netsurfp3]` is self-sufficient.
+netsurfp3 = [
+    "torch>=2.0.0",
+    "torchvision>=0.15.0",
+    "optuna>=4.8.0",
+    "matplotlib>=3.10.8",
+    "fair-esm>=2.0.0",
+    "h5py>=3.16.0",
+    "click>=8.3.1",
+]
 all = [
     "ViennaRNA",
     "numba>=0.53",
     "networkx>=2.6",
     "prody>=2.0",
+    "adabmDCA>=0.7.5",
+    "torch>=2.0.0",
+    "torchvision>=0.15.0",
+    "optuna>=4.8.0",
+    "matplotlib>=3.10.8",
+    "fair-esm>=2.0.0",
+    "h5py>=3.16.0",
+    "click>=8.3.1",
 ]
 dev = ["pytest>=7.0", "pytest-cov>=4.0"]
 

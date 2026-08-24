@@ -41,8 +41,8 @@ import sys
 import tempfile
 import json
 from pathlib import Path
-
-from biofeaturefactory.utils.utility import (
+import numpy as np
+from biofeaturefactory.lib.utility import (
     read_fasta,
     write_fasta,
     codon_to_aa,
@@ -408,7 +408,7 @@ def _find_best_coding_offset(protein_seq_aligned, nt_seq):
 
 def _load_focus_nt_from_fasta(focus_nt_fasta):
     """
-    Load focus ORF nucleotide sequence from a FASTA produced by exon_aware_mapping.
+    Load focus ORF nucleotide sequence from a FASTA produced by variant_mapping.
 
     Preference:
       1) Record named exactly ORF (case-insensitive)
@@ -786,16 +786,59 @@ def generate_codon_msa_from_focus(
     hit_nt_id     = {}  # acc -> nucleotide_seq_id from CDS file
     hit_cand_meta = {}  # acc -> candidate dict
 
+    # Rows for hits dropped BEFORE alignment. Every other failure path writes a
+    # manifest row; these two did not, so a CDS discarded here was
+    # indistinguishable from a hit mmseqs never returned.
+    predrop_rows = []
+
+    def _predrop(acc, status, reason, cand=None, nt_len=''):
+        predrop_rows.append({
+            'protein_seq_id': acc, 'raw_extracted_id': acc, 'lookup_protein_id': acc,
+            'nucleotide_seq_id': (cand or {}).get('nucleotide_seq_id', ''),
+            'status': status, 'reason': reason,
+            'source_assembly': (cand or {}).get('source_assembly', ''),
+            'matched_protein_id': (cand or {}).get('nucleotide_seq_id', ''),
+            'min_seqid_threshold': min_backtranslation_seqid,
+            'observed_seqid': '', 'compared_positions': '',
+            'translation_mismatch_count': '', 'protein_alignment_length': '',
+            'protein_residue_count': '', 'nucleotide_length': nt_len,
+            'nucleotide_codon_count': (nt_len // 3) if isinstance(nt_len, int) else '',
+            'expected_coding_nt': '', 'remaining_nt_after_backtranslation': '',
+        })
+
+    # Hits whose CDS could not be resolved at all. _resolve_nt_from_assemblies
+    # builds a specific reason for each of these and the return value was
+    # previously bound and never read, so all four reasons were thrown away.
+    for acc, reason in (assembly_unresolved or {}).items():
+        _predrop(acc, 'FAIL_NO_CDS_RESOLVED', reason)
+
     for acc, candidates in assembly_matches.items():
         if not candidates:
+            _predrop(acc, 'FAIL_NO_CDS_RESOLVED', 'No candidate CDS records')
             continue
         cand = candidates[0]
+        if len(candidates) > 1:
+            # Only candidates[0] is used. Say which alternatives were dropped and
+            # whether they actually differ, instead of picking silently: the order
+            # comes from filesystem iteration, so on disagreement the choice is
+            # arbitrary.
+            others = [f"{c.get('nucleotide_seq_id','')}@{c.get('source_assembly','')}"
+                      for c in candidates[1:]]
+            distinct = len({c['nucleotide_seq'] for c in candidates})
+            print(f"Warning: {acc}: {len(candidates)} CDS candidates, "
+                  f"{distinct} distinct sequence(s); using "
+                  f"{cand.get('nucleotide_seq_id','')}@{cand.get('source_assembly','')}, "
+                  f"ignoring {', '.join(others)}", file=sys.stderr)
         nt_seq = cand['nucleotide_seq']
         translated = _translate_nt_to_aa(nt_seq)
         if translated.endswith('*'):
             translated = translated[:-1]
         if '*' in translated:
-            continue  # internal stop codon — corrupted/frameshifted CDS
+            _predrop(acc, 'FAIL_INTERNAL_STOP',
+                     f'Internal stop codon in translated CDS '
+                     f'({translated.count("*")} stop(s)); corrupted or frameshifted',
+                     cand, len(nt_seq))
+            continue
         hit_proteins[acc]  = translated
         hit_cds[acc]       = nt_seq
         hit_assembly[acc]  = cand.get('source_assembly', '')
@@ -814,8 +857,8 @@ def generate_codon_msa_from_focus(
 
     # 7. Back-translate each row.
     codon_msa     = {}
-    manifest_rows = []
-    failed        = []
+    manifest_rows = list(predrop_rows)
+    failed        = [r['protein_seq_id'] for r in predrop_rows]
 
     # Focus sequence first.
     focus_aligned = aligned_proteins.get(focus_seq_id, focus_protein_ungapped)
@@ -983,25 +1026,30 @@ def generate_codon_msa_from_focus(
     _write_manifest(manifest_rows, str(manifest_path))
 
     # Compute and write stats JSON (mirrors msa_generation_pipeline.py output)
-    focus_id = gene
-    query_length = len(focus_nt_seq) // 3  # codon positions
+    focus_id = focus_seq_id
+    # Residue count, NOT len(nt)//3: focus_protein_ungapped strips a trailing
+    # stop above, so counting the stop here made n_eff_ratio one codon light.
+    query_length = len(focus_protein_ungapped)  # codon positions
     n_seqs = len(codon_msa)
-    neff = compute_neff(codon_msa, identity_threshold=0.8)
+    neff = compute_neff(codon_msa, identity_threshold=0.8, codon_mode=True)
     neff_ratio = neff / query_length if query_length > 0 else 0.0
 
-    # Mean identity to focus
+    # Mean identity to focus (codon-level: compare triplets, not single nucleotides)
     focus_seq = codon_msa.get(focus_id, '')
+    focus_codons = [focus_seq[i:i+3] for i in range(0, len(focus_seq) - len(focus_seq) % 3, 3)]
+    gap_codons = {'---', '...'}
     identities = []
     for seq_id, seq in codon_msa.items():
         if seq_id != focus_id and len(seq) == len(focus_seq):
-            matches = sum(1 for a, b in zip(seq, focus_seq) if a == b and a not in '-.')
-            aligned = sum(1 for a, b in zip(seq, focus_seq) if a not in '-.' and b not in '-.')
+            codons = [seq[i:i+3] for i in range(0, len(seq) - len(seq) % 3, 3)]
+            matches = sum(1 for a, b in zip(codons, focus_codons) if a == b and a not in gap_codons)
+            aligned = sum(1 for a, b in zip(codons, focus_codons) if a not in gap_codons and b not in gap_codons)
             if aligned > 0:
                 identities.append(matches / aligned)
     mean_identity = float(np.mean(identities)) if identities else 0.0
 
     stats = {
-        'query_id': focus_id,
+        'query_id': gene,
         'query_length_codons': query_length,
         'n_sequences': n_seqs,
         'n_eff': float(round(neff, 1)),
@@ -1036,34 +1084,34 @@ Example:
 """
     )
 
-    parser.add_argument('--fasta', required=True,
-                        help='FASTA with focus ORF nt sequence (exon_aware_mapping output)')
+    parser.add_argument('-f', '--fasta', required=True,
+                        help='FASTA with focus ORF nt sequence (variant_mapping output)')
 
-    parser.add_argument('--db-root', required=True,
+    parser.add_argument('-d', '--db-root', required=True,
                         help='Bio_DBs root directory produced by scripts/build_db.sh '
                              '(contains refseq_assemblies/ and refseq_proteins_merged.faa)')
 
     parser.add_argument('--output', '-o', required=True,
                         help='Output base directory (writes {GENE}/CodonMSA/{GENE}.codon.msa.fasta and .manifest.tsv)')
-    parser.add_argument('--min-seqid', type=float, default=1.0,
+    parser.add_argument('-ms', '--min-seqid', type=float, default=1.0,
                         help='Minimum observed AA identity for back-translation QC (default: 1.0)')
-    parser.add_argument('--search-min-seqid', type=float, default=0.5,
+    parser.add_argument('-sms', '--search-min-seqid', type=float, default=0.5,
                         help='Minimum sequence identity for mmseqs2 search (default: 0.5)')
-    parser.add_argument('--search-min-qcov', type=float, default=0.5,
+    parser.add_argument('-smq', '--search-min-qcov', type=float, default=0.5,
                         help='Minimum query coverage for mmseqs2 search (default: 0.5)')
-    parser.add_argument('--max-hits', type=int, default=500,
+    parser.add_argument('-mh', '--max-hits', type=int, default=500,
                         help='Max RefSeq hits to retrieve from mmseqs2 (default: 500)')
-    parser.add_argument('--aligner', default='mafft', choices=['mafft', 'muscle'],
+    parser.add_argument('-a', '--aligner', default='mafft', choices=['mafft', 'muscle'],
                         help='Protein aligner (default: mafft)')
-    parser.add_argument('--mmseqs-binary', default='mmseqs',
+    parser.add_argument('-mb', '--mmseqs-binary', default='mmseqs',
                         help='Path to mmseqs2 binary (default: mmseqs)')
-    parser.add_argument('--threads', type=int, default=None,
+    parser.add_argument('-t', '--threads', type=int, default=None,
                         help='Number of threads for mmseqs2 (default: auto)')
-    parser.add_argument('--target-db-base', default=None,
+    parser.add_argument('-tdb', '--target-db-base', default=None,
                         help='Base path for mmseqs2 target DB (default: auto from --db-root)')
-    parser.add_argument('--mmseqs-tmp-dir', default=None,
+    parser.add_argument('-mtd', '--mmseqs-tmp-dir', default=None,
                         help='Temp directory for mmseqs2 (default: system temp)')
-    parser.add_argument('--verbose', action='store_true',
+    parser.add_argument('-v', '--verbose', action='store_true',
                         help='Print progress updates')
 
     args = parser.parse_args()

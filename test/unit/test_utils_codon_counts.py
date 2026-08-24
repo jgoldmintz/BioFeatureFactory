@@ -14,8 +14,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-sys.path.insert(0, str(Path(__file__).parent.parent.parent / "biofeaturefactory" / "utils"))
-from utility import get_codon_counts, codon_to_aa, codon_table
+from biofeaturefactory.lib.utility import get_codon_counts, codon_to_aa, codon_table
 
 
 class TestGetCodonCountsBasicCounting:

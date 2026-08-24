@@ -9,8 +9,8 @@ from pathlib import Path
 
 import pytest
 
-sys.path.insert(0, str(Path(__file__).parent.parent.parent / "biofeaturefactory" / "utils"))
-from utility import build_mutant_sequences_for_gene
+from biofeaturefactory.lib.utility import build_mutant_sequences_for_gene
+from biofeaturefactory.lib.utility import mint_pkey
 
 
 def _write(path, text):
@@ -46,8 +46,8 @@ class TestBuildMutantSequencesForGene:
             input_type="nt",
         )
         # G8A: codon TGC -> TAC => C->Y at AA pos 3
-        assert "TEST-G8A" in result
-        assert result["TEST-G8A"][2] == "Y"  # position 2 (0-indexed) changed from C to Y
+        assert mint_pkey("TEST", "G8A") in result
+        assert result[mint_pkey("TEST", "G8A")][2] == "Y"  # position 2 (0-indexed) changed from C to Y
 
     def test_single_column_aa_mutation(self, tmp_path):
         mut_file = _write(tmp_path / "muts.csv", "mutant\nK2R\n")
@@ -60,8 +60,8 @@ class TestBuildMutantSequencesForGene:
             failure_map=None,
             input_type="aa",
         )
-        assert "TEST-K2R" in result
-        assert result["TEST-K2R"] == "MRCD"
+        assert mint_pkey("TEST", "K2R") in result
+        assert result[mint_pkey("TEST", "K2R")] == "MRCD"
 
     def test_csv_format_with_headers(self, tmp_path):
         mut_file = _write(tmp_path / "muts.csv",
@@ -76,8 +76,8 @@ class TestBuildMutantSequencesForGene:
             failure_map=None,
             input_type="nt",
         )
-        assert "GENE-G7T" in result
-        assert result["GENE-G7T"][2] == "F"
+        assert mint_pkey("GENE", "G7T") in result
+        assert result[mint_pkey("GENE", "G7T")][2] == "F"
 
     def test_skip_mutation_via_failure_map(self, tmp_path):
         mut_file = _write(tmp_path / "muts.csv", "mutant\nK2R\n")
@@ -153,12 +153,48 @@ class TestBuildMutantSequencesForGene:
             failure_map=None,
             input_type="aa",
         )
-        assert "TEST-K2R" in result
-        assert "TEST-C3F" in result
-        assert "TEST-D4E" in result
-        assert result["TEST-K2R"] == "MRCD"
-        assert result["TEST-C3F"] == "MKFD"
-        assert result["TEST-D4E"] == "MKCE"
+        assert mint_pkey("TEST", "K2R") in result
+        assert mint_pkey("TEST", "C3F") in result
+        assert mint_pkey("TEST", "D4E") in result
+        assert result[mint_pkey("TEST", "K2R")] == "MRCD"
+        assert result[mint_pkey("TEST", "C3F")] == "MKFD"
+        assert result[mint_pkey("TEST", "D4E")] == "MKCE"
+
+    def test_one_poison_token_does_not_discard_the_gene(self, tmp_path):
+        """A token that raises must cost its own row and nothing else.
+
+        Before the per-token guard, the single try/except around the whole loop
+        turned any raising token into `return {}` -- every valid mutant for the
+        gene was discarded at exit 0. An indel token raises in int() on the
+        token interior, so it is the cheapest way to reproduce that.
+        """
+        mut_file = _write(tmp_path / "muts.csv", "mutant\nK2R\nACAA7A\nC3F\nD4E\n")
+        result = build_mutant_sequences_for_gene(
+            gene_name="TEST",
+            nt_sequence=self.WT_NT,
+            aa_sequence=self.WT_AA,
+            mapping_file=mut_file,
+            log_path=None,
+            failure_map=None,
+            input_type="aa",
+        )
+        assert len(result) == 3, f"poison token discarded valid mutants: {result}"
+        assert {mint_pkey("TEST", "K2R"), mint_pkey("TEST", "C3F"), mint_pkey("TEST", "D4E")} == set(result)
+        assert result[mint_pkey("TEST", "K2R")] == "MRCD"
+
+    def test_file_level_failure_still_returns_empty(self, tmp_path):
+        """The outer guard must survive: a directory is not a readable mapping file."""
+        d = tmp_path / "not_a_file"
+        d.mkdir()
+        assert build_mutant_sequences_for_gene(
+            gene_name="TEST",
+            nt_sequence=self.WT_NT,
+            aa_sequence=self.WT_AA,
+            mapping_file=d,
+            log_path=None,
+            failure_map=None,
+            input_type="aa",
+        ) == {}
 
     def test_header_line_skipped_single_column(self, tmp_path):
         mut_file = _write(tmp_path / "muts.csv", "mutant\nK2R\n")
@@ -173,4 +209,4 @@ class TestBuildMutantSequencesForGene:
         )
         # "mutant" header should not be treated as a mutation
         assert len(result) == 1
-        assert "TEST-K2R" in result
+        assert mint_pkey("TEST", "K2R") in result

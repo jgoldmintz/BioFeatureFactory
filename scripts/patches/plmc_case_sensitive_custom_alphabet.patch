@@ -1,0 +1,25 @@
+diff -ruN a/src/plm.c b/src/plm.c
+--- a/src/plm.c	2026-05-05 01:09:55
++++ b/src/plm.c	2026-05-05 01:10:12
+@@ -403,6 +403,21 @@
+     /* Protein-specific treatment of '.' */
+     if (alphabet == codesAA) if (c == '.') c = '-';
+ 
++    if (alphabet != codesAA) {
++        /* Case-sensitive direct lookup for custom alphabets.
++         *
++         * Required for alphabets that use both cases as DISTINCT symbols
++         * (e.g. BFF's 65-symbol codon alphabet where 'A' is codon AAA
++         * and 'a' is codon CGC). Upstream's case-insensitive lookup
++         * (the original branch below) collapses lowercase onto
++         * uppercase via the negative-index a2m insertion convention,
++         * which silently throws away half the codon distinctions in
++         * that use case. Protein/a2m behaviour is preserved unchanged. */
++        while ((i < nCodes - 1) && c != alphabet[i]) i++;
++        if (c != alphabet[i]) i = nCodes;     /* out of alphabet */
++        return i;
++    }
++
+     /* Store lowercase characters as down-shifted by nCodes */
+     while ((i < nCodes - 1) && toupper(c) != alphabet[i]) i++;
+     if (c != alphabet[i] && toupper(c) == alphabet[i]) i -= nCodes;

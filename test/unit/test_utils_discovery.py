@@ -9,8 +9,7 @@ from pathlib import Path
 
 import pytest
 
-sys.path.insert(0, str(Path(__file__).parent.parent.parent / "biofeaturefactory" / "utils"))
-from utility import (
+from biofeaturefactory.lib.utility import (
     discover_fasta_files,
     discover_mapping_files,
     validate_fasta_content,
@@ -235,11 +234,21 @@ class TestLoadWtSequences:
         result = load_wt_sequences(str(tmp_path), wt_header="ORF")
         assert result["TP53"] == "CCCC"
 
-    def test_fallback_to_longest(self, tmp_path):
+    def test_no_fallback_when_header_missing_and_multiple_records(self, tmp_path):
+        """F39: refuse to guess. >1 record and no header match -> gene is SKIPPED.
+
+        This asserted a max-by-length fallback, which seeded WT/MUT from an
+        arbitrary isoform with no warning. Absent beats wrong; a single-record
+        file still resolves regardless of its header label (below).
+        """
         _write(tmp_path / "GENE.fasta", ">short\nAA\n>long\nACGTACGTACGT\n")
         result = load_wt_sequences(str(tmp_path), wt_header="nonexistent")
-        assert "GENE" in result
-        assert result["GENE"] == "ACGTACGTACGT"
+        assert "GENE" not in result
+
+    def test_single_record_used_regardless_of_header(self, tmp_path):
+        _write(tmp_path / "SOLO.fasta", ">whatever\nACGTACGTACGT\n")
+        result = load_wt_sequences(str(tmp_path), wt_header="nonexistent")
+        assert result.get("SOLO") == "ACGTACGTACGT"
 
     def test_single_file(self, tmp_path):
         f = _write(tmp_path / "BRCA1.fasta", ">transcript\nACGT\n")

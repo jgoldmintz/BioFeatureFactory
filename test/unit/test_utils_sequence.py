@@ -9,8 +9,7 @@ from pathlib import Path
 
 import pytest
 
-sys.path.insert(0, str(Path(__file__).parent.parent.parent / "biofeaturefactory" / "utils"))
-from utility import (
+from biofeaturefactory.lib.utility import (
     update_str,
     subseq,
     get_mutation_data,
@@ -96,9 +95,12 @@ class TestGetMutationData:
         assert pos == 99
 
     def test_position_one_behavior(self):
-        # position 1 returns 1, not 0 — documents current behavior
+        # Always-decrement: 1-based token -> 0-based index, so G1A is 0.
+        # This asserted 1 while position 1 was special-cased, which collided with
+        # position 2 (both mapped to index 1). genesplicer's bounds check moved
+        # from `< 1` to `< 0` in the same change.
         pos, _ = get_mutation_data("G1A")
-        assert pos == 1
+        assert pos == 0
 
     def test_multi_digit_position(self):
         pos, (ref, alt) = get_mutation_data("C1234G")
@@ -114,22 +116,22 @@ class TestGetMutationData:
 class TestGetMutationDataBioAccurate:
 
     def test_parses_normally(self):
-        pos, (ref, alt) = get_mutation_data_bioAccurate("G123A")
+        pos, (ref, alt) = get_mutation_data_bioAccurate("G123A", is_nt=True)
         assert pos == 123
         assert ref == "G"
         assert alt == "A"
 
     def test_position_one_returns_one(self):
-        pos, _ = get_mutation_data_bioAccurate("G1A")
+        pos, _ = get_mutation_data_bioAccurate("G1A", is_nt=True)
         assert pos == 1
 
     def test_stop_codon_returns_none(self):
-        pos, nts = get_mutation_data_bioAccurate("G123Stop")
+        pos, nts = get_mutation_data_bioAccurate("G123Stop", is_nt=True)
         assert pos is None
         assert nts is None
 
     def test_sto_variant_returns_none(self):
-        pos, nts = get_mutation_data_bioAccurate("A45Sto")
+        pos, nts = get_mutation_data_bioAccurate("A45Sto", is_nt=True)
         assert pos is None
         assert nts is None
 

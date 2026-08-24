@@ -1,3 +1,4 @@
+from biofeaturefactory.lib.utility import mint_pkey
 """
 Unit tests for generate_pkey_with_mapping in spliceai-parser.py.
 
@@ -52,7 +53,7 @@ class TestGeneratePkeyWithMapping:
             chromosome_mapping=self.CHROM_MAP,
             transcript_mapping=self.TRANS_MAP,
         )
-        assert result == "BRCA1-A123G"
+        assert result == mint_pkey("BRCA1", "A123G")
 
     def test_second_mutation(self):
         result = generate_pkey_with_mapping(
@@ -61,7 +62,7 @@ class TestGeneratePkeyWithMapping:
             chromosome_mapping=self.CHROM_MAP,
             transcript_mapping=self.TRANS_MAP,
         )
-        assert result == "BRCA1-C456T"
+        assert result == mint_pkey("BRCA1", "C456T")
 
     def test_no_match_in_chromosome_map(self):
         result = generate_pkey_with_mapping(
@@ -73,6 +74,14 @@ class TestGeneratePkeyWithMapping:
         assert result is None
 
     def test_match_in_chrom_but_not_transcript(self):
+        """A chromosome-mapping hit is sufficient; transcript_mapping is not consulted.
+
+        This asserted None while resolve_pkey still required an entry in
+        transcript_mapping. That mapping carries only the ORF-space subset -- 38 of
+        46 tokens for SMN2 -- so every intronic token died as 'no_orf_id' despite
+        having a perfectly derivable pkey. The pkey is now minted from the
+        chromosome_mapping KEY, which IS the verbatim ORF token mint_pkey hashed.
+        """
         partial_trans = {"A123G": "A123G"}  # missing C456T
         result = generate_pkey_with_mapping(
             pos="87505000", ref="C", alt="T",
@@ -80,7 +89,7 @@ class TestGeneratePkeyWithMapping:
             chromosome_mapping=self.CHROM_MAP,
             transcript_mapping=partial_trans,
         )
-        assert result is None
+        assert result == mint_pkey("BRCA1", "C456T")
 
     def test_empty_gene_context(self):
         result = generate_pkey_with_mapping(
@@ -128,7 +137,7 @@ class TestGeneratePkeyWithMapping:
             transcript_mapping=self.TRANS_MAP,
             skip_mutations={"A123G"},
         )
-        assert result == "BRCA1-C456T"
+        assert result == mint_pkey("BRCA1", "C456T")
 
     def test_none_skip_mutations(self):
         result = generate_pkey_with_mapping(
@@ -138,15 +147,23 @@ class TestGeneratePkeyWithMapping:
             transcript_mapping=self.TRANS_MAP,
             skip_mutations=None,
         )
-        assert result == "BRCA1-A123G"
+        assert result == mint_pkey("BRCA1", "A123G")
 
     def test_different_transcript_mapping_value(self):
-        """Transcript mapping can remap to a different mutation ID."""
-        trans_map = {"A123G": "A100G"}  # remapped
+        """A remapped transcript value does NOT change the pkey.
+
+        transcript_mapping's VALUES are transcript notation -- a different
+        coordinate space, offset by the 5'UTR. Minting from them produced a key in
+        the wrong space: measured on SMN2, chromosome_mapping['T840C'] is
+        'T70076526C' while transcript_mapping['T840C'] is 'T857C', so every row was
+        keyed on the transcript token and joined to nothing. The pkey comes from the
+        chromosome_mapping key.
+        """
+        trans_map = {"A123G": "A100G"}  # remapped; must not affect the pkey
         result = generate_pkey_with_mapping(
             pos="87504250", ref="A", alt="G",
             gene_context="BRCA1",
             chromosome_mapping=self.CHROM_MAP,
             transcript_mapping=trans_map,
         )
-        assert result == "BRCA1-A100G"
+        assert result == mint_pkey("BRCA1", "A123G")

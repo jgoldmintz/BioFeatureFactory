@@ -45,16 +45,27 @@ from biofeaturefactory.alphafold3.bin.af3_parser import (
     extract_interface_sites
 )
 from biofeaturefactory.alphafold3.bin.binding_metrics import (
-    BindingMetrics, DeltaMetrics, ThresholdConfig,
+    BindingMetrics, DeltaMetrics, ThresholdConfig, RnaEditSpan,
     compute_delta_metrics, aggregate_mutation_summary,
     format_events_rows, format_sites_rows
 )
 
-from biofeaturefactory.utils.utility import (
+from biofeaturefactory.lib.utility import (
+    mint_pkey,
     read_fasta, trim_muts, get_mutation_data_bioAccurate,
     extract_gene_from_filename, subseq, load_mapping,
-    _collect_failures_from_logs, write_tsv
+    _collect_failures_from_logs, write_tsv,
+    Variant, parse_variant, splice_seq,
+    is_intronic_token, INTRONIC_PREFIX
 )
+
+
+# Superset test for a nucleotide allele. NOT `allele in "ACGTU"`: substring
+# containment accepts any allele whose letters happen to sit CONSECUTIVELY in
+# that literal -- 'AC', 'CG' and 'ACGT' all pass it -- while rejecting 'AG',
+# 'GA' and 'ACC'. Whether a multi-base allele was admitted therefore depended on
+# the spelling of the constant, not on the alphabet.
+_NT_BASES = frozenset("ACGTU")
 
 
 def parse_vcf_chrom(vcf_path: str) -> Optional[str]:
@@ -75,14 +86,48 @@ class MutationContext:
     pkey: str
     gene: str
     mutation: str
-    nt_pos: int  # 1-based nucleotide position
-    wt_nt: str
-    mut_nt: str
+    nt_pos: int  # 1-based nucleotide position of the FIRST REF base
+    ref: str     # REF allele; multi-base for an MNV / deletion / delins
+    alt: str     # ALT allele; multi-base for an MNV / insertion / delins
     transcript_seq: str
     wt_rna_window: str
     mut_rna_window: str
-    window_center: int  # Position of mutation in window (0-based)
-    genomic_pos: Optional[int] = None  # Chromosomal position for RBP distance
+    window_center: int  # 0-based index of the first REF base inside the window
+    variant_kind: str = "snv"  # Variant.kind: snv | mnv | insertion | deletion | delins
+    genomic_pos: Optional[int] = None  # Chromosomal position (1-based) for RBP distance
+    substrate: str = "transcript"      # transcript | pre_mRNA -- which molecule was windowed
+
+    @property
+    def bed_pos(self) -> Optional[int]:
+        """genomic_pos in the 0-based half-open frame used by POSTAR3 BED intervals."""
+        return None if self.genomic_pos is None else self.genomic_pos - 1
+
+    @property
+    def length_delta(self) -> int:
+        """len(ALT) - len(REF); 0 for an SNV or MNV."""
+        return len(self.alt) - len(self.ref)
+
+    @property
+    def edit_span(self) -> RnaEditSpan:
+        """Edit geometry of the PRIMARY RNA window (windows[0])."""
+        return RnaEditSpan(self.window_center, len(self.ref), len(self.alt),
+                           len(self.wt_rna_window), len(self.mut_rna_window))
+
+
+def _window_edit_span(context: 'MutationContext',
+                      window: Optional[Tuple[str, str, int]] = None) -> RnaEditSpan:
+    """RnaEditSpan for one RNA window of a mutation.
+
+    `window` is a (wt_win, mut_win, centre) triple from _generate_windows; with
+    it omitted the primary window on the context is used. Both drivers derive
+    the projection from RnaEditSpan and nowhere else, so the sites tables they
+    emit agree with each other and with every other pipeline's alignment.
+    """
+    if window is None:
+        return context.edit_span
+    wt_win, mut_win, centre = window
+    return RnaEditSpan(centre, len(context.ref), len(context.alt),
+                       len(wt_win), len(mut_win))
 
 
 @dataclass
@@ -180,7 +225,8 @@ class AlphaFold3Pipeline:
         chrom: Optional[str] = None,
         tx_start: Optional[int] = None,
         strand: str = "+",
-        chrom_mapping: Optional[Dict[str, str]] = None
+        chrom_mapping: Optional[Dict[str, str]] = None,
+        premrna_mapping: Optional[Dict[str, str]] = None
     ):
         """
         Process all mutations for a gene.
@@ -193,6 +239,14 @@ class AlphaFold3Pipeline:
             tx_start: Transcript start for coordinate conversion
             strand: Strand ('+' or '-')
             chrom_mapping: Dict mapping mutation -> chromosome entry (e.g., C123T -> C87504250T)
+            premrna_mapping: Dict mapping mutation -> pre-mRNA entry. Required for
+                intronic ('gd.') tokens: an intron has no ORF or transcript
+                coordinate, so those variants are scored against the pre_mRNA
+                record instead. That is also the correct substrate biologically --
+                intronic splicing regulatory elements (branch point,
+                polypyrimidine tract, ISE/ISS) are RBP sites that exist only in
+                the pre-mRNA, and the 5' splice site spans the exon|intron
+                junction, which a bare intron record would truncate.
         """
         # Get gene name
         if gene_name is None:
@@ -215,6 +269,11 @@ class AlphaFold3Pipeline:
         if transcript_seq is None:
             transcript_seq = next(iter(fasta_data.values()))
 
+        # Second substrate for intronic variants. Absent for a FASTA that
+        # predates the pre_mRNA record, in which case intronic tokens fall
+        # through to the existing NA path rather than being scored wrongly.
+        premrna_seq = fasta_data.get('pre_mRNA')
+
         # Load mutations
         if mutations_path:
             mutations = trim_muts(mutations_path, self.validation_log, gene_name)
@@ -233,14 +292,31 @@ class AlphaFold3Pipeline:
         # Process each mutation
         for mutation in mutations:
             try:
+                seq_for_mut = transcript_seq
+                coord_token = None
+                substrate = 'transcript'
+                if is_intronic_token(mutation):
+                    pre_tok = (premrna_mapping or {}).get(mutation)
+                    if premrna_seq is None or pre_tok is None:
+                        # No substrate or no coordinate -> the existing NA path.
+                        # Scoring an intronic token against the transcript would
+                        # read its position as an ORF offset and silently window
+                        # the wrong region.
+                        self._add_na_mutation(gene_name, mutation)
+                        continue
+                    seq_for_mut = premrna_seq
+                    coord_token = pre_tok
+                    substrate = 'pre_mRNA'
                 self._process_mutation(
                     gene_name=gene_name,
                     mutation=mutation,
-                    transcript_seq=transcript_seq,
+                    transcript_seq=seq_for_mut,
                     chrom=chrom,
                     tx_start=tx_start,
                     strand=strand,
-                    chrom_mapping=chrom_mapping
+                    chrom_mapping=chrom_mapping,
+                    coord_token=coord_token,
+                    substrate=substrate
                 )
             except Exception as e:
                 print(f"  Error processing {mutation}: {e}", file=sys.stderr)
@@ -254,53 +330,111 @@ class AlphaFold3Pipeline:
         chrom: Optional[str],
         tx_start: Optional[int],
         strand: str,
-        chrom_mapping: Optional[Dict[str, str]] = None
+        chrom_mapping: Optional[Dict[str, str]] = None,
+        coord_token: Optional[str] = None,
+        substrate: str = 'transcript'
     ):
-        """Process a single mutation."""
-        pkey = f"{gene_name}-{mutation}"
+        """Process a single mutation.
 
-        # Parse mutation
-        pos_data = get_mutation_data_bioAccurate(mutation)
-        if pos_data[0] is None:
-            raise ValueError(f"Invalid mutation format: {mutation}")
+        `mutation` is always the IDENTITY of the variant and is what the pkey is
+        built from. `coord_token` overrides which token supplies the coordinate
+        and alleles -- for an intronic variant the identity is 'gd.T5000C' while
+        the coordinate lives in pre-mRNA space. Leaving them the same object for
+        the transcript path keeps that path byte-identical.
+        """
+        # {GENE}-{sha}. `mutation` is a verbatim token from trim_muts or the
+        # chromosome-mapping keys (:278-284); neither normalises.
+        pkey = mint_pkey(gene_name, mutation)
+        token = coord_token if coord_token is not None else mutation
 
-        nt_pos = pos_data[0]  # 1-based
-        wt_nt, mut_nt = pos_data[1]
+        # Parse mutation. parse_variant is length-aware and NEVER raises, so an
+        # indel / MNV / delins arrives here as a record instead of dying inside
+        # get_mutation_data_bioAccurate's int(token[1:-1]). Non-SNV is the
+        # DEFAULT path -- there is no flag, because whether a given column
+        # survives is decided per column from len(ref) != len(alt), a fact of
+        # the record rather than a user preference.
+        variant = parse_variant(token, is_nt=True)
+        if variant is None:
+            # Not a nucleotide token under the shared grammar. Fall back to the
+            # ORIGINAL parser, unchanged, so the existing NA-vs-FAILED split for
+            # aa tokens, Stop tokens and malformed tokens -- including the exact
+            # ValueError text those produce -- is preserved to the byte.
+            pos_data = get_mutation_data_bioAccurate(token, is_nt=False)  # AF3 opt-out of primitive nt-validation; local ref-check + alt-guard below
+            if pos_data[0] is None:
+                self._add_na_mutation(gene_name, mutation)
+                return
+            nt_pos = pos_data[0]  # 1-based
+            wt_nt, mut_nt = pos_data[1]
+            # aa/Stop tokens are out of scope for this nucleotide-only pipeline: N/A, not FAILED.
+            if not (set(wt_nt.upper()) <= _NT_BASES and set(mut_nt.upper()) <= _NT_BASES):
+                self._add_na_mutation(gene_name, mutation)
+                return
+            # Reachable: int() accepts spellings the grammar does not ('A-12T',
+            # 'A 12T', 'A1_2T'). Variant rejects pos < 1, so keep the original
+            # out-of-range wording for the one case that used to produce it.
+            if nt_pos < 1:
+                raise ValueError(f"Position {nt_pos} out of range")
+            variant = Variant(pos=nt_pos, ref=wt_nt, alt=mut_nt)
 
-        # Validate mutation
-        pos_0 = nt_pos - 1
-        if pos_0 < 0 or pos_0 >= len(transcript_seq):
+        nt_pos = variant.pos      # 1-based, first REF base
+        pos_0 = variant.pos0
+        ref, alt = variant.ref, variant.alt
+
+        # Validate mutation. Bound the END of the REF span, not its start: a
+        # multi-base REF can begin inside the transcript and run off the end.
+        # Identical to `pos_0 >= len(transcript_seq)` when len(ref) == 1.
+        if pos_0 < 0 or pos_0 + len(ref) > len(transcript_seq):
             raise ValueError(f"Position {nt_pos} out of range")
 
-        if transcript_seq[pos_0].upper() != wt_nt.upper():
-            raise ValueError(f"Reference mismatch at {nt_pos}: expected {wt_nt}, found {transcript_seq[pos_0]}")
+        # REF guard over the WHOLE span. Checking transcript_seq[pos_0] alone
+        # passes any multi-base REF whose first base happens to match.
+        observed = transcript_seq[pos_0:pos_0 + len(ref)]
+        if observed.upper() != ref.upper():
+            raise ValueError(f"Reference mismatch at {nt_pos}: expected {ref}, found {observed}")
 
         # Generate RNA windows
-        windows = self._generate_windows(transcript_seq, pos_0, mut_nt)
+        windows = self._generate_windows(transcript_seq, pos_0, ref, alt)
 
         # Primary window (centered or first offset)
         wt_window, mut_window, window_center = windows[0]
+
+        # The variant must sit inside its own window for the WT/MUT comparison
+        # to cover the edit at all. Unreachable for an SNV; reachable for a REF
+        # span longer than the window, or one pushed out by 5'-end truncation.
+        if not (0 <= window_center and window_center + len(ref) <= len(wt_window)):
+            raise ValueError(
+                f"REF span outside window: offset {window_center}, "
+                f"len(ref) {len(ref)}, window {len(wt_window)}")
 
         context = MutationContext(
             pkey=pkey,
             gene=gene_name,
             mutation=mutation,
             nt_pos=nt_pos,
-            wt_nt=wt_nt,
-            mut_nt=mut_nt,
+            ref=ref,
+            alt=alt,
             transcript_seq=transcript_seq,
             wt_rna_window=wt_window,
             mut_rna_window=mut_window,
-            window_center=window_center
+            window_center=window_center,
+            variant_kind=variant.kind,
+            substrate=substrate
         )
 
         # Resolve chromosomal position
         genomic_pos = None
         if chrom_mapping and mutation in chrom_mapping:
             entry = chrom_mapping[mutation]
-            try:
-                genomic_pos = int(entry[1:-1])
-            except (ValueError, IndexError):
+            # parse_variant, not int(entry[1:-1]). The genomic spelling of a
+            # non-SNV carries multi-base alleles and int() raises on every one
+            # of them. Widening the token parser above WITHOUT this one would
+            # leave genomic_pos None for every indel, so each would reach
+            # _add_no_rbps_result and be reported as 'no_rbps_in_region' -- a
+            # fabricated negative, strictly worse than today's FAILED row.
+            genomic_variant = parse_variant(entry, is_nt=True)
+            if genomic_variant is not None:
+                genomic_pos = genomic_variant.pos
+            else:
                 print(f"    Warning: Could not parse chromosome mapping for {mutation}: {entry}", file=sys.stderr)
         elif tx_start is not None:
             if strand == '+':
@@ -310,12 +444,20 @@ class AlphaFold3Pipeline:
 
         context.genomic_pos = genomic_pos
 
-        # Query RBPs near mutation
-        rbp_sites = self._get_nearby_rbps(chrom, genomic_pos)
+        # Query RBPs across the variant's WHOLE REF span, not just its first base
+        rbp_sites = self._get_nearby_rbps(chrom, context.bed_pos, len(ref))
 
         if not rbp_sites:
-            # No RBPs in region
-            self._add_no_rbps_result(context)
+            # "We looked and found nothing" and "we never looked" are different
+            # findings. Reporting the second as the first is a fabricated
+            # observation, in the same class as a coalesced 0.0.
+            if chrom is None:
+                reason = 'NA:no_chromosome'
+            elif context.bed_pos is None:
+                reason = 'NA:unresolved_genomic_position'
+            else:
+                reason = 'no_rbps_in_region'
+            self._add_no_rbps_result(context, reason)
             return
 
         # Group by RBP
@@ -324,10 +466,12 @@ class AlphaFold3Pipeline:
 
         # Phase 1: Submit all RBP jobs (non-blocking)
         pending_list = []
+        skipped_rbps: List[str] = []
         for rbp_name, sites in rbps_to_test.items():
             pending = self._submit_rbp_jobs(
                 context, rbp_name, sites,
-                windows=windows if len(windows) > 1 else None
+                windows=windows if len(windows) > 1 else None,
+                skipped=skipped_rbps
             )
             if pending:
                 pending_list.append(pending)
@@ -340,58 +484,89 @@ class AlphaFold3Pipeline:
                 delta_list.append(delta)
 
         # Aggregate results
-        self._finalize_mutation_results(context, delta_list)
+        self._finalize_mutation_results(context, delta_list, skipped_rbps)
 
     def _get_nearby_rbps(
         self,
         chrom: Optional[str],
-        genomic_pos: Optional[int]
+        bed_pos: Optional[int],
+        span_len: int = 1
     ) -> List[RBPBindingSite]:
-        """Query POSTAR3 for RBPs near mutation position."""
-        if chrom is None or genomic_pos is None:
+        """Query POSTAR3 for RBPs near the variant's REF span (0-based BED frame).
+
+        The neighbourhood is [bed_pos - rbp_window, bed_pos + span_len + rbp_window).
+        With span_len == 1 that interval is exactly what
+        query_position(chrom, bed_pos, rbp_window) produces, so SNV behaviour is
+        unchanged; a multi-base REF widens it by its own length rather than
+        anchoring the whole neighbourhood on the span's 5' base.
+        """
+        if chrom is None or bed_pos is None:
             return []
 
-        return self.rbp_db.query_position(chrom, genomic_pos, self.rbp_window)
+        return self.rbp_db.query(chrom,
+                                 bed_pos - self.rbp_window,
+                                 bed_pos + span_len + self.rbp_window)
 
     def _generate_windows(
         self,
         transcript_seq: str,
         pos_0: int,
-        mut_nt: str
+        ref: str,
+        alt: str
     ) -> List[Tuple[str, str, int]]:
         """
         Generate RNA windows around the mutation.
 
-        Returns list of (wt_window, mut_window, window_center) tuples.
-        Single window when multi_window is disabled.
+        Returns list of (wt_window, mut_window, window_center) tuples, where
+        window_center is the 0-based index of the FIRST REF base inside the
+        window. Single window when multi_window is disabled.
+
+        Two length-aware properties, both no-ops for an SNV:
+
+        1. The window is centred on the MIDPOINT of the REF span. Anchoring on
+           its first base gives a multi-base REF the full 5' flank but only
+           (half - len(ref)) of 3' flank, and at len(ref) > half the window
+           stops covering the edited span at all. len(ref)//2 == 0 for an SNV.
+        2. The mutant window covers the SAME BIOLOGICAL SPAN as the WT one, so
+           it is longer/shorter by exactly (len(alt) - len(ref)). Taking a
+           second window centred on the mutant sequence instead would slide it
+           (alt - ref) bases 3', making WT vs MUT a comparison of two different
+           regions of the transcript.
         """
-        mut_seq = transcript_seq[:pos_0] + mut_nt + transcript_seq[pos_0 + 1:]
+        # splice_seq honours len(ref); the previous one-base concatenation
+        # (`seq[:pos_0] + mut_nt + seq[pos_0+1:]`) cannot express an indel.
+        # REF was verified against the transcript by the caller.
+        mut_seq = splice_seq(transcript_seq, pos_0, ref, alt, validate=False)
+        delta = len(alt) - len(ref)
+        centre = min(pos_0 + len(ref) // 2, len(transcript_seq) - 1)
 
         if not self.multi_window:
-            wt_window = subseq(transcript_seq, pos_0, self.window_size)
-            mut_window = subseq(mut_seq, pos_0, self.window_size)
-            window_start = max(0, pos_0 - self.window_size // 2)
+            wt_window = subseq(transcript_seq, centre, self.window_size)
+            window_start = max(0, centre - self.window_size // 2)
+            mut_window = mut_seq[window_start:window_start + len(wt_window) + delta]
             return [(wt_window, mut_window, pos_0 - window_start)]
 
         seen = set()
         windows = []
         for frac in self.multi_window_offsets:
             target_center = int(frac * self.window_size)
-            window_start = pos_0 - target_center
+            window_start = centre - target_center
             window_start = max(0, min(window_start, len(transcript_seq) - self.window_size))
             window_end = window_start + self.window_size
 
             wt_win = transcript_seq[window_start:window_end]
-            mut_win = mut_seq[window_start:window_end]
-            center = pos_0 - window_start
+            mut_win = mut_seq[window_start:window_end + delta]
 
             if wt_win not in seen:
                 seen.add(wt_win)
-                windows.append((wt_win, mut_win, center))
+                windows.append((wt_win, mut_win, pos_0 - window_start))
 
-        return windows if windows else [(subseq(transcript_seq, pos_0, self.window_size),
-                                          subseq(mut_seq, pos_0, self.window_size),
-                                          pos_0 - max(0, pos_0 - self.window_size // 2))]
+        # No `if windows else <fallback>`: self.multi_window_offsets is
+        # `offsets or [0.3, 0.5, 0.7]` in __init__, so it is never empty, the
+        # first iteration always appends, and the fallback could never run. It
+        # also carried its own copy of the single-window arithmetic in the old
+        # one-base form, which would have been wrong for every indel.
+        return windows
 
     @dataclass
     class _PendingRBPAnalysis:
@@ -404,34 +579,59 @@ class AlphaFold3Pipeline:
         window_wt_futures: Optional[List[Future]] = None
         window_mut_futures: Optional[List[Future]] = None
         n_windows: int = 1
+        # The window triples these futures were built from. Needed at collection
+        # time to project each window's sites back into its own WT frame; the
+        # futures alone do not say which window they came from.
+        windows: Optional[List[Tuple[str, str, int]]] = None
 
     def _submit_rbp_jobs(
         self,
         context: MutationContext,
         rbp_name: str,
         sites: List[RBPBindingSite],
-        windows: Optional[List[Tuple[str, str, int]]] = None
+        windows: Optional[List[Tuple[str, str, int]]] = None,
+        skipped: Optional[List[str]] = None
     ) -> Optional['AlphaFold3Pipeline._PendingRBPAnalysis']:
-        """Submit AF3 jobs for one RBP without blocking. Returns pending tracker."""
+        """Submit AF3 jobs for one RBP without blocking. Returns pending tracker.
+
+        An RBP that is not submitted is appended to `skipped` by name and
+        reason. It is otherwise absent from delta_list AND from n_rbps_tested,
+        i.e. indistinguishable from an RBP that was never near the variant.
+        """
+        def _skip(reason: str) -> None:
+            if skipped is not None:
+                skipped.append(f"{rbp_name}:{reason}")
+
         rbp_data = self.seq_mapper.get_rbp_data(rbp_name)
         if not rbp_data:
             print(f"      {rbp_name}: sequence not found", file=sys.stderr)
+            _skip('sequence_not_found')
             return None
 
         protein_seq = rbp_data.sequence
         protein_msa = rbp_data.msa_content
 
-        total_tokens = len(context.wt_rna_window) + len(protein_seq)
+        # Test the cap against the LONGER of the two windows: an insertion makes
+        # the mutant window longer than the WT one, so sizing on the WT alone
+        # would submit a MUT job that exceeds the limit.
+        total_tokens = max(len(context.wt_rna_window),
+                           len(context.mut_rna_window)) + len(protein_seq)
         if total_tokens > 5000:
             print(f"      {rbp_name}: token limit exceeded ({total_tokens})", file=sys.stderr)
+            _skip(f'token_limit_exceeded_{total_tokens}')
             return None
 
-        distance = min(site.distance_to(context.genomic_pos) for site in sites) if context.genomic_pos else 0
+        # Distance from the whole REF span, not from its 5' base: a deletion
+        # that straddles a binding site has neither endpoint inside it.
+        distance = (min(site.distance_to_span(context.bed_pos, len(context.ref))
+                        for site in sites)
+                    if context.bed_pos is not None else 0)
 
         pending = self._PendingRBPAnalysis(
             rbp_name=rbp_name,
             sites=sites,
-            distance=distance
+            distance=distance,
+            windows=windows
         )
 
         if windows and len(windows) > 1:
@@ -481,33 +681,37 @@ class AlphaFold3Pipeline:
         distance = pending.distance
 
         if pending.n_windows > 1:
-            wt_results = []
-            mut_results = []
-            for wt_f, mut_f in zip(pending.window_wt_futures, pending.window_mut_futures):
+            # Keyed by window index, not appended to a flat list: an incomplete
+            # job used to shift every later result's position, and the sites
+            # block below needs to know WHICH window a result came from to
+            # project it back into that window's own WT frame.
+            wt_by_win = {}
+            mut_by_win = {}
+            for i, (wt_f, mut_f) in enumerate(zip(pending.window_wt_futures,
+                                                  pending.window_mut_futures)):
                 wt_job = wt_f.result()
                 mut_job = mut_f.result()
                 if wt_job.status == "completed" and wt_job.result_path:
-                    wt_results.append(self._parse_af3_output(wt_job.result_path, rbp_name))
+                    wt_by_win[i] = self._parse_af3_output(wt_job.result_path, rbp_name)
                 if mut_job.status == "completed" and mut_job.result_path:
-                    mut_results.append(self._parse_af3_output(mut_job.result_path, rbp_name))
+                    mut_by_win[i] = self._parse_af3_output(mut_job.result_path, rbp_name)
 
-            wt_metrics = self._aggregate_parsed_results(wt_results, rbp_name)
-            mut_metrics = self._aggregate_parsed_results(mut_results, rbp_name)
+            wt_metrics = self._aggregate_parsed_results(list(wt_by_win.values()), rbp_name)
+            mut_metrics = self._aggregate_parsed_results(list(mut_by_win.values()), rbp_name)
 
-            for r in wt_results:
-                if r and r.structures:
-                    sites_data = extract_interface_sites(r.structures[0])
-                    freq_rna = r.aggregation.contact_frequency_rna if r.aggregation else None
-                    freq_prot = r.aggregation.contact_frequency_protein if r.aggregation else None
-                    self.sites_rows.extend(format_sites_rows(context.pkey, rbp_name, 'WT', sites_data, freq_rna, freq_prot))
-                    break
-            for r in mut_results:
-                if r and r.structures:
-                    sites_data = extract_interface_sites(r.structures[0])
-                    freq_rna = r.aggregation.contact_frequency_rna if r.aggregation else None
-                    freq_prot = r.aggregation.contact_frequency_protein if r.aggregation else None
-                    self.sites_rows.extend(format_sites_rows(context.pkey, rbp_name, 'MUT', sites_data, freq_rna, freq_prot))
-                    break
+            for allele, by_win in (('WT', wt_by_win), ('MUT', mut_by_win)):
+                for i in sorted(by_win):
+                    r = by_win[i]
+                    if r and r.structures:
+                        sites_data = extract_interface_sites(r.structures[0])
+                        freq_rna = r.aggregation.contact_frequency_rna if r.aggregation else None
+                        freq_prot = r.aggregation.contact_frequency_protein if r.aggregation else None
+                        window = pending.windows[i] if pending.windows else None
+                        self.sites_rows.extend(format_sites_rows(
+                            context.pkey, rbp_name, allele, sites_data,
+                            freq_rna, freq_prot,
+                            edit_span=_window_edit_span(context, window)))
+                        break
 
             delta = compute_delta_metrics(
                 rbp_name=rbp_name,
@@ -529,16 +733,21 @@ class AlphaFold3Pipeline:
         wt_metrics = wt_parsed.metrics if wt_parsed else None
         mut_metrics = mut_parsed.metrics if mut_parsed else None
 
+        edit_span = _window_edit_span(context)
         if wt_parsed and wt_parsed.structures:
             sites_data = extract_interface_sites(wt_parsed.structures[0])
             freq_rna = wt_parsed.aggregation.contact_frequency_rna if wt_parsed.aggregation else None
             freq_prot = wt_parsed.aggregation.contact_frequency_protein if wt_parsed.aggregation else None
-            self.sites_rows.extend(format_sites_rows(context.pkey, rbp_name, 'WT', sites_data, freq_rna, freq_prot))
+            self.sites_rows.extend(format_sites_rows(
+                context.pkey, rbp_name, 'WT', sites_data, freq_rna, freq_prot,
+                edit_span=edit_span))
         if mut_parsed and mut_parsed.structures:
             sites_data = extract_interface_sites(mut_parsed.structures[0])
             freq_rna = mut_parsed.aggregation.contact_frequency_rna if mut_parsed.aggregation else None
             freq_prot = mut_parsed.aggregation.contact_frequency_protein if mut_parsed.aggregation else None
-            self.sites_rows.extend(format_sites_rows(context.pkey, rbp_name, 'MUT', sites_data, freq_rna, freq_prot))
+            self.sites_rows.extend(format_sites_rows(
+                context.pkey, rbp_name, 'MUT', sites_data, freq_rna, freq_prot,
+                edit_span=edit_span))
 
         return compute_delta_metrics(
             rbp_name=rbp_name,
@@ -639,10 +848,29 @@ class AlphaFold3Pipeline:
             std_plddt_protein=agg.std_interface_plddt_protein
         )
 
+    @staticmethod
+    def _variant_columns(context: MutationContext, skipped_rbps: List[str]) -> dict:
+        """Variant-class columns carried by every row built from a MutationContext.
+
+        Every AF3 metric other than sites.res_id is a whole-complex scalar, so
+        these are the only columns the variant class itself determines. They are
+        populated for EVERY class -- an SNV reports kind 'snv', delta 0 and a
+        fully aligned window, which are all true statements, not placeholders.
+        """
+        return {
+            'variant_class': context.variant_kind,
+            'length_delta_nt': context.length_delta,
+            'substrate': context.substrate,
+            'rna_window_alignment': context.edit_span.alignment,
+            'n_rbps_skipped': len(skipped_rbps),
+            'rbps_skipped': ';'.join(skipped_rbps),
+        }
+
     def _finalize_mutation_results(
         self,
         context: MutationContext,
-        delta_list: List[DeltaMetrics]
+        delta_list: List[DeltaMetrics],
+        skipped_rbps: Optional[List[str]] = None
     ):
         """Aggregate and store results for a mutation."""
         # Summary row
@@ -662,15 +890,22 @@ class AlphaFold3Pipeline:
         else:
             summary['qc_flags'] = 'ALL_FAILED'
 
+        summary.update(self._variant_columns(context, skipped_rbps or []))
         self.summary_rows.append(summary)
 
         # Events rows
         events = format_events_rows(context.pkey, delta_list)
         self.events_rows.extend(events)
 
-    def _add_no_rbps_result(self, context: MutationContext):
-        """Add result for mutation with no nearby RBPs."""
-        self.summary_rows.append({
+    def _add_no_rbps_result(self, context: MutationContext,
+                            qc_flag: str = 'no_rbps_in_region'):
+        """Add result for a mutation with no RBP comparison to report.
+
+        The literal dict is deliberate: aggregate_mutation_summary([]) rounds
+        the two delta columns, which would render them '0.0' where this row has
+        always written '0'.
+        """
+        row = {
             'pkey': context.pkey,
             'Gene': context.gene,
             'n_rbps_tested': 0,
@@ -684,23 +919,58 @@ class AlphaFold3Pipeline:
             'top_event_rbp': '',
             'top_event_class': 'none',
             'top_event_delta_pae': 0,
-            'qc_flags': 'no_rbps_in_region'
-        })
+            'qc_flags': qc_flag
+        }
+        row.update(self._variant_columns(context, []))
+        self.summary_rows.append(row)
+
+    def _summary_stub(self, gene: str, mutation: str, qc_flag: str) -> dict:
+        """Summary row for a mutation that never reached a window.
+
+        aggregate_mutation_summary([]) supplies the full column set; write_tsv
+        takes its header from rows[0], so a short row would drop columns.
+
+        variant_class is filled whenever the token parses, because the class is
+        a property of the TOKEN and stays true however the token was rejected.
+        The window columns stay empty: no window was built, and qc_flag already
+        names why.
+        """
+        summary = aggregate_mutation_summary([])
+        summary['pkey'] = mint_pkey(gene, mutation)
+        summary['Gene'] = gene
+        summary['qc_flags'] = qc_flag
+        variant = parse_variant(mutation, is_nt=True)
+        if variant is not None:
+            summary['variant_class'] = variant.kind
+            summary['length_delta_nt'] = variant.length_delta
+        return summary
+
+    def _add_na_mutation(self, gene: str, mutation: str):
+        """Add result for a token this nucleotide-only pipeline cannot score."""
+        self.summary_rows.append(
+            self._summary_stub(gene, mutation, 'NA:non_nucleotide_token')
+        )
 
     def _add_failed_mutation(self, gene: str, mutation: str, error: str):
         """Add result for failed mutation."""
-        pkey = f"{gene}-{mutation}"
-        self.summary_rows.append({
-            'pkey': pkey,
-            'Gene': gene,
-            'n_rbps_tested': 0,
-            'qc_flags': f'FAILED:{error[:50]}'
-        })
+        self.summary_rows.append(
+            self._summary_stub(gene, mutation, f'FAILED:{error[:50]}')
+        )
 
     def _write_rows(self, rows, path):
-        """Write a list of row dicts to a TSV file."""
+        """Write a list of row dicts to a TSV file.
+
+        Header is the UNION of every row's keys, in first-appearance order.
+        write_tsv defaults to fieldnames=rows[0].keys() with extrasaction='ignore',
+        so a first row narrower than a later one silently truncates the whole file
+        and neither direction errors. That fires the moment any row carries a key
+        the first row lacks -- a suppression reason code, an optional metric.
+        _summary_stub works around it for the summary table only; events and sites
+        had no protection at all.
+        """
         if rows:
-            write_tsv(rows, path)
+            fieldnames = list(dict.fromkeys(key for row in rows for key in row))
+            write_tsv(rows, path, fieldnames)
             print(f"Wrote {len(rows)} rows to {path}", file=sys.stderr)
 
     def flush_gene(self, gene_name: str):
@@ -721,61 +991,64 @@ def main():
     )
 
     # Required inputs
-    parser.add_argument('--postar-db', required=True,
+    parser.add_argument('-pd', '--postar-db', required=True,
                        help='POSTAR3 database file')
-    parser.add_argument('--rbp-mapping', required=True,
+    parser.add_argument('-rm', '--rbp-mapping', required=True,
                        help='Gene-UniProt mapping TSV')
-    parser.add_argument('--rbp-sequences',
+    parser.add_argument('-rs', '--rbp-sequences',
                        help='Protein sequences FASTA (optional if --msa-dir provided)')
-    parser.add_argument('--msa-dir',
+    parser.add_argument('-md', '--msa-dir',
                        help='Directory with A3M MSA files (preferred over --rbp-sequences)')
 
     # Gene inputs (file or directory, auto-detected)
-    parser.add_argument('--fasta',
+    parser.add_argument('-f', '--fasta',
                         help='Transcript FASTA file or directory of FASTA files')
-    parser.add_argument('--mutations',
+    parser.add_argument('-mu', '--mutations',
                         help='Mutations CSV file or directory (optional when --chromosome-mapping provided)')
 
     # VCF-based coordinate resolution (replaces --chrom/--tx-start/--strand)
-    parser.add_argument('--vcf',
+    parser.add_argument('-v', '--vcf',
                         help='Per-gene VCF file or directory from vcf_converter.py (provides chromosome)')
-    parser.add_argument('--chromosome-mapping',
+    parser.add_argument('-cm', '--chromosome-mapping',
                         help='Chromosome mapping CSV file or directory (provides mutations and chromosomal positions)')
+    parser.add_argument('-pm', '--premrna-mapping',
+                        help='pre-mRNA mapping CSV file or directory (premrna_mapping_<GENE>.csv). Required to score intronic (gd.) variants: they have no ORF or transcript coordinate and are windowed on the pre_mRNA record.')
 
     # Legacy genomic coordinates (still supported)
-    parser.add_argument('--chrom', help='Chromosome (alternative to --vcf)')
-    parser.add_argument('--tx-start', type=int, help='Transcript start position (alternative to --chromosome-mapping)')
-    parser.add_argument('--strand', default='+', help='Strand (+/-)')
+    parser.add_argument('-ch', '--chrom', help='Chromosome (alternative to --vcf)')
+    parser.add_argument('-ts', '--tx-start', type=int, help='Transcript start position (alternative to --chromosome-mapping)')
+    parser.add_argument('-s', '--strand', default='+', help='Strand (+/-)')
 
     # Output
     parser.add_argument('--output', '-o', required=True,
                        help='Output base directory')
 
     # Execution
-    parser.add_argument('--execution-mode', default='local',
-                       choices=['local', 'batch', 'cloud'],
-                       help='AF3 execution mode')
-    parser.add_argument('--af3-binary', default='alphafold3',
+    parser.add_argument('-em', '--execution-mode', default='local',
+                       choices=['local'],
+                       help='AF3 execution mode (only local is supported here; '
+                            'for SLURM use `python -m biofeaturefactory.alphafold3.burst submit`)')
+    parser.add_argument('-ab', '--af3-binary', default='alphafold3',
                        help='Path to AF3 executable')
-    parser.add_argument('--docker-image', default='alphafold3',
+    parser.add_argument('-di', '--docker-image', default='alphafold3',
                        help='Docker image name for AF3')
-    parser.add_argument('--model-dir',
+    parser.add_argument('-mdi', '--model-dir',
                        help='Path to AF3 model weights directory')
 
     # Parameters
-    parser.add_argument('--window-size', type=int, default=101,
+    parser.add_argument('-ws', '--window-size', type=int, default=101,
                        help='RNA window size (odd number)')
-    parser.add_argument('--rbp-window', type=int, default=50,
+    parser.add_argument('-rw', '--rbp-window', type=int, default=50,
                        help='Window for RBP site lookup (+/-bp)')
-    parser.add_argument('--validation-log',
+    parser.add_argument('-vl', '--validation-log',
                        help='Validation log for filtering mutations')
 
     # Multi-window mode (optional, multiplies AF3 runs)
-    parser.add_argument('--multi-window', action='store_true', default=False,
+    parser.add_argument('-mw', '--multi-window', action='store_true', default=False,
                        help='Run multiple windows per mutation (multiplies AF3 runs)')
-    parser.add_argument('--multi-window-offsets', type=str, default='0.3,0.5,0.7',
+    parser.add_argument('-mwo', '--multi-window-offsets', type=str, default='0.3,0.5,0.7',
                        help='Mutation position as fraction of window (default: 0.3,0.5,0.7)')
-    parser.add_argument('--max-gpus', type=int, default=None,
+    parser.add_argument('-mg', '--max-gpus', type=int, default=None,
                        help='Max GPUs for parallel AF3 execution (default: auto-detect)')
 
     args = parser.parse_args()
@@ -812,6 +1085,16 @@ def main():
     mutations_input = Path(args.mutations) if args.mutations else None
     vcf_input = Path(args.vcf) if args.vcf else None
     chrom_map_input = Path(args.chromosome_mapping) if args.chromosome_mapping else None
+    premrna_map_input = Path(args.premrna_mapping) if args.premrna_mapping else None
+
+    def _load_premrna_map(gene):
+        """pre-mRNA mapping for one gene, or None when not supplied."""
+        if premrna_map_input is None:
+            return None
+        if premrna_map_input.is_file():
+            return load_mapping(str(premrna_map_input), mapType="pre_mRNA")
+        cands = list(premrna_map_input.glob(f'*{gene}*.csv')) if gene else []
+        return load_mapping(str(cands[0]), mapType="pre_mRNA") if cands else None
 
     if not fasta_input:
         parser.error("--fasta is required")
@@ -872,7 +1155,8 @@ def main():
                 chrom=chrom,
                 tx_start=args.tx_start,
                 strand=args.strand,
-                chrom_mapping=chrom_mapping
+                chrom_mapping=chrom_mapping,
+                premrna_mapping=_load_premrna_map(gene_name)
             )
             pipeline.flush_gene(gene_name)
 
@@ -902,7 +1186,8 @@ def main():
             chrom=chrom,
             tx_start=args.tx_start,
             strand=args.strand,
-            chrom_mapping=chrom_mapping
+            chrom_mapping=chrom_mapping,
+            premrna_mapping=_load_premrna_map(gene_name)
         )
         pipeline.flush_gene(gene_name)
 

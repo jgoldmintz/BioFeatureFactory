@@ -10,8 +10,7 @@ from pathlib import Path
 
 import pytest
 
-sys.path.insert(0, str(Path(__file__).parent.parent.parent / "biofeaturefactory" / "utils"))
-from utility import write_tsv, mutation_class
+from biofeaturefactory.lib.utility import write_tsv, mutation_class
 
 
 # ===========================================================================

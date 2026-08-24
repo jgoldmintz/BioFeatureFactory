@@ -25,6 +25,53 @@ from dataclasses import dataclass
 from typing import Dict, Optional, List
 from enum import Enum
 
+from biofeaturefactory.lib.utility import align_wt_to_mut
+
+
+@dataclass(frozen=True)
+class RnaEditSpan:
+    """Where a variant sits inside one RNA window, in window-local 0-based coords.
+
+    Both AF3 drivers (alphafold3_pipeline and burst) build this from the same
+    three numbers -- the window-local offset of the first REF base and the two
+    allele lengths -- so the alignment they report and the projection they join
+    sites rows on cannot drift apart. It lives here, beside format_sites_rows,
+    because that is the only function that consumes the projection.
+
+    An SNV is offset/1/1 with wt_len == mut_len, for which the projection is the
+    identity and `alignment` reports every base aligned. No SNV behaviour is
+    conditional on this type.
+    """
+    offset: int      # window-local 0-based index of the first REF base
+    ref_len: int
+    alt_len: int
+    wt_len: int      # WT window length
+    mut_len: int     # MUT window length == wt_len + (alt_len - ref_len)
+
+    @property
+    def wt_to_mut(self) -> List[Optional[int]]:
+        """WT index -> MUT index, None where the edit deleted that base."""
+        return align_wt_to_mut(self.wt_len, self.offset, self.ref_len, self.alt_len)
+
+    @property
+    def length_delta(self) -> int:
+        return self.alt_len - self.ref_len
+
+    @property
+    def alignment(self) -> str:
+        """`aligned_a/u;deleted_d;inserted_i`, u = UNION of both alleles' bases.
+
+        The denominator is (WT bases + inserted bases), never the WT length
+        alone: every WT base keeps a counterpart under an insertion however
+        large it is, so `aligned N/N` over WT positions would report a 20 nt
+        insertion as fully aligned. The bases with no counterpart are all on
+        the mutant side.
+        """
+        n_deleted = sum(1 for j in self.wt_to_mut if j is None)
+        n_inserted = max(0, self.length_delta)
+        return (f"aligned_{self.wt_len - n_deleted}/{self.wt_len + n_inserted};"
+                f"deleted_{n_deleted};inserted_{n_inserted}")
+
 
 class BindingEventClass(Enum):
     """Classification of binding change events."""
@@ -300,9 +347,18 @@ def format_events_rows(
 
     Returns:
         List of row dicts for events.tsv
+
+    In multi-window mode the aggregation struct holds across-window statistics,
+    so its count/std are emitted as n_windows_used_*/std_pae_across_windows_*
+    and the per-sample n_samples_*/std_pae_* columns stay empty.
     """
     rows = []
     for d in delta_list:
+        multi_window = bool(d.n_windows)
+        n_wt = d.wt_metrics.n_samples if d.wt_metrics and d.wt_metrics.n_samples else ''
+        n_mut = d.mut_metrics.n_samples if d.mut_metrics and d.mut_metrics.n_samples else ''
+        std_wt = round(d.wt_metrics.std_chain_pair_pae_min, 3) if d.wt_metrics and d.wt_metrics.std_chain_pair_pae_min is not None else ''
+        std_mut = round(d.mut_metrics.std_chain_pair_pae_min, 3) if d.mut_metrics and d.mut_metrics.std_chain_pair_pae_min is not None else ''
         row = {
             'pkey': pkey,
             'rbp_name': d.rbp_name,
@@ -314,11 +370,15 @@ def format_events_rows(
             'delta_interface_contacts': d.delta_interface_contacts,
             'cls': d.event_class.value,
             'priority': round(d.priority_score, 3),
-            'n_samples_wt': d.wt_metrics.n_samples if d.wt_metrics and d.wt_metrics.n_samples else '',
-            'n_samples_mut': d.mut_metrics.n_samples if d.mut_metrics and d.mut_metrics.n_samples else '',
-            'std_pae_wt': round(d.wt_metrics.std_chain_pair_pae_min, 3) if d.wt_metrics and d.wt_metrics.std_chain_pair_pae_min is not None else '',
-            'std_pae_mut': round(d.mut_metrics.std_chain_pair_pae_min, 3) if d.mut_metrics and d.mut_metrics.std_chain_pair_pae_min is not None else '',
+            'n_samples_wt': '' if multi_window else n_wt,
+            'n_samples_mut': '' if multi_window else n_mut,
+            'std_pae_wt': '' if multi_window else std_wt,
+            'std_pae_mut': '' if multi_window else std_mut,
             'n_windows': d.n_windows if d.n_windows else '',
+            'n_windows_used_wt': n_wt if multi_window else '',
+            'n_windows_used_mut': n_mut if multi_window else '',
+            'std_pae_across_windows_wt': std_wt if multi_window else '',
+            'std_pae_across_windows_mut': std_mut if multi_window else '',
         }
         rows.append(row)
     return rows
@@ -330,7 +390,10 @@ def format_sites_rows(
     allele: str,
     sites: List,
     contact_frequency_rna: Optional[Dict[int, float]] = None,
-    contact_frequency_protein: Optional[Dict[int, float]] = None
+    contact_frequency_protein: Optional[Dict[int, float]] = None,
+    *,
+    edit_span: RnaEditSpan,
+    rna_chain: str = 'R'
 ) -> List[dict]:
     """
     Format interface sites as rows for sites.tsv.
@@ -342,13 +405,60 @@ def format_sites_rows(
         sites: List of InterfaceSite objects
         contact_frequency_rna: Optional dict of res_id -> fraction for RNA chain
         contact_frequency_protein: Optional dict of res_id -> fraction for protein chain
+        edit_span: REQUIRED RnaEditSpan for the window this allele was folded
+            in. Supplies the WT->MUT projection and both window lengths.
+        rna_chain: chain ID whose res_id lives in the RNA window frame. The
+            protein chain is the same molecule in both alleles, so its res_id
+            carries no edit and needs no projection.
+
+    `res_id` is the ONE AF3 output column that encodes a residue correspondence;
+    every other metric this module emits is a whole-complex scalar. For a
+    residue 3' of an indel the MUT res_id is the WT res_id shifted by the length
+    delta, so joining a WT row to a MUT row on res_id compares two different
+    bases. edit_span is therefore REQUIRED rather than defaulted to the
+    identity: a silent identity default is exactly the mis-join this argument
+    exists to prevent, and the house convention for a parameter with no safe
+    default is to fail loud (see utility.get_mutation_data_bioAccurate).
+    For an SNV the projection IS the identity, so nothing changes.
+
+    Two derived columns make the cross-allele join safe:
+        res_id_wt_frame  WT-window coordinate of this residue -- the only key on
+                         which a WT row and a MUT row may be joined. EMPTY for a
+                         base the ALT inserted: it has no WT counterpart, and
+                         reusing its own number would fabricate one.
+        align_status     aligned | deleted (WT base the edit removed, no MUT
+                         counterpart) | inserted (MUT base with no WT
+                         counterpart) | res_id_outside_window (res_id not
+                         addressable in its own window -- reported, not guessed)
     """
+    wt_to_mut = edit_span.wt_to_mut
+    mut_to_wt = {j: i for i, j in enumerate(wt_to_mut) if j is not None}
     rows = []
     for s in sites:
         freq = ''
-        freq_dict = contact_frequency_rna if s.chain == 'R' else contact_frequency_protein
+        freq_dict = contact_frequency_rna if s.chain == rna_chain else contact_frequency_protein
         if freq_dict and s.res_id in freq_dict:
             freq = round(freq_dict[s.res_id], 3)
+
+        if s.chain != rna_chain:
+            # Protein chain: identical sequence in the WT and MUT jobs.
+            res_id_wt_frame, align_status = s.res_id, 'aligned'
+        elif allele == 'WT':
+            i0 = s.res_id - 1
+            if 0 <= i0 < len(wt_to_mut):
+                res_id_wt_frame = s.res_id
+                align_status = 'aligned' if wt_to_mut[i0] is not None else 'deleted'
+            else:
+                res_id_wt_frame, align_status = '', 'res_id_outside_window'
+        else:
+            j0 = s.res_id - 1
+            if not (0 <= j0 < edit_span.mut_len):
+                res_id_wt_frame, align_status = '', 'res_id_outside_window'
+            else:
+                i0 = mut_to_wt.get(j0)
+                res_id_wt_frame = '' if i0 is None else i0 + 1
+                align_status = 'inserted' if i0 is None else 'aligned'
+
         rows.append({
             'pkey': pkey,
             'rbp_name': rbp_name,
@@ -360,5 +470,7 @@ def format_sites_rows(
             'is_contact': 1 if s.is_contact else 0,
             'min_contact_distance': s.min_contact_distance,
             'contact_frequency': freq,
+            'res_id_wt_frame': res_id_wt_frame,
+            'align_status': align_status,
         })
     return rows

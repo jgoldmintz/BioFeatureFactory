@@ -31,8 +31,10 @@ from pathlib import Path
 
 import pysam
 
-from biofeaturefactory.utils.utility import (
+from biofeaturefactory.lib.utility import (
     get_mutation_data_bioAccurate,
+    parse_variant,
+    NON_ORF_PREFIXES,
     trim_muts,
     extract_gene_from_filename,
     chromosome_map,
@@ -87,9 +89,15 @@ def verify_sequences_against_reference(verify_path, reference_path):
                 print(f"  Verifying {seq_name}...")
                 found, found_locations = False, []
 
+                needle = sequence.upper()
                 for ref_name in ref_fasta.references:
-                    ref_sequence = ref_fasta.fetch(ref_name)
-                    pos = ref_sequence.upper().find(sequence.upper())
+                    # Skip on LENGTH before fetching. fetch(ref_name) materialises the
+                    # entire chromosome as a Python str -- ~250 MB for chr1 -- and this
+                    # loop ran it once per sequence per reference. GRCh38 has 194+
+                    # references, so verifying one sequence read the whole genome.
+                    if ref_fasta.get_reference_length(ref_name) < len(needle):
+                        continue
+                    pos = ref_fasta.fetch(ref_name).upper().find(needle)
                     if pos != -1:
                         found = True
                         found_locations.append(
@@ -171,6 +179,67 @@ def get_reference_nucleotide(fasta_file, chromosome, position):
     except Exception as e:
         print(f"Error extracting reference nucleotide: {e}", file=sys.stderr)
         return None
+
+
+def _cds_blocks(gene_info):
+    """Exon blocks clipped to the CDS, in TRANSCRIPT order.
+
+    get_genome_loc returns exons in genomic ascending order; on the minus strand
+    transcript order is the reverse. Returned as [(g_start, g_end), ...] with the
+    first block holding ORF position 1.
+    """
+    cds_lo = gene_info.get("cds_start") or gene_info["tx_start"]
+    cds_hi = gene_info.get("cds_end") or gene_info["tx_end"]
+    blocks = []
+    for g_start, g_end in gene_info["exons"]:
+        lo, hi = max(g_start, cds_lo), min(g_end, cds_hi)
+        if lo <= hi:
+            blocks.append((lo, hi))
+    blocks.sort(key=lambda b: b[0], reverse=(gene_info["strand"] == "-"))
+    return blocks
+
+
+def _orf_to_genomic(pos1, gene_info):
+    """1-based ORF position -> 1-based genomic position, EXON-AWARE.
+
+    The arithmetic this replaces was `gene_start + relative_pos - 1`, which treats
+    an ORF offset as a genomic offset and so is wrong by the total intron length
+    upstream of the position -- for SMN2 that is ~26 kb by the last exon. `exons`
+    was already loaded and only ever used to print len(exons).
+
+    Returns None when pos1 falls outside the CDS.
+    """
+    if pos1 is None or pos1 < 1:
+        return None
+    remaining = pos1
+    minus = gene_info["strand"] == "-"
+    for g_start, g_end in _cds_blocks(gene_info):
+        span = g_end - g_start + 1
+        if remaining <= span:
+            return (g_end - remaining + 1) if minus else (g_start + remaining - 1)
+        remaining -= span
+    return None
+
+
+def _vcf_row(chrom, pos, ref, alt, fetch_base):
+    """One VCF 4.3 data row for any variant class.
+
+    A pure insertion or deletion cannot be written as bare REF/ALT: VCF requires a
+    shared anchor base at POS-1 when either allele would otherwise be empty. An SNV
+    or a same-length MNV needs no anchor and is returned unchanged, so the SNV path
+    is byte-identical to before.
+
+    Returns (pos, ref, alt) or None when the anchor base cannot be read.
+    """
+    if ref and alt and len(ref) == len(alt):
+        return pos, ref, alt
+    anchor_pos = pos - 1
+    if anchor_pos < 1:
+        return None
+    anchor = fetch_base(anchor_pos)
+    if not anchor:
+        return None
+    return anchor_pos, anchor + ref, anchor + alt
 
 
 def _resolve_mapping_source(chromosome_mapping_input, gene_name):
@@ -316,65 +385,176 @@ def process_single_file(
                     file=sys.stderr,
                 )
 
+        rejected = []
+
+        def _fetch(posn):
+            if not reference_fasta:
+                return None
+            return get_reference_nucleotide(reference_fasta, chromosome, posn)
+
         for snp_string in mut_list:
             try:
-                relative_pos, nts = get_mutation_data_bioAccurate(snp_string)
-                if relative_pos is None or not nts:
+                # parse_variant, not get_mutation_data_bioAccurate: the latter does
+                # int(token[1:-1]) and so raises on EVERY non-SNV token
+                # (ACAA1002A -> int('CAA1002')). Those tokens were caught by the
+                # except below and printed as "Skipping mutation", which is how a
+                # converter on a non-SNV branch emitted no indel at all.
+                # gd./ch. tokens are ALREADY genomic and need no ORF mapping:
+                #   ch.  absolute chromosomal   -> POS as written
+                #   gd.  gene genomic slice     -> tx_start + pos - 1
+                # Unlike an ORF token that arithmetic is exact for this space, since
+                # the slice starts at tx_start and spans introns. Verified against
+                # chr_mapping_SMN2.csv: 8/8 tokens, 0 mismatches. They previously
+                # failed parse_variant on the prefix and were rejected outright.
+                prefix = next((pfx for pfx in NON_ORF_PREFIXES
+                               if snp_string.lower().startswith(pfx)), None)
+                if prefix:
+                    gvar = parse_variant(snp_string[len(prefix):], is_nt=True)
+                    if gvar is None:
+                        rejected.append((snp_string, "unparseable_non_orf_token"))
+                        continue
+                    abs_pos = (gvar.pos if prefix == "ch."
+                               else gene_start + gvar.pos - 1)
+                    ref, alt = gvar.ref.upper(), gvar.alt.upper()
+                    if reference_fasta:
+                        actual = "".join((_fetch(abs_pos + i) or "?") for i in range(len(ref)))
+                        if actual != ref:
+                            rejected.append(
+                                (snp_string,
+                                 f"REF_MISMATCH:expected_{ref}_reference_has_{actual}_at_{abs_pos}"))
+                            continue
+                    row = _vcf_row(formatted_chr, abs_pos, ref, alt, _fetch)
+                    if row is None:
+                        rejected.append((snp_string, "no_anchor_base_for_indel"))
+                        continue
+                    variants.append((row[0], formatted_chr, row[1], row[2]))
+                    processed_count += 1
                     continue
-                wt_nt, mut_nt = nts
+
+                variant = parse_variant(snp_string, is_nt=True)
+                if variant is None:
+                    rejected.append((snp_string, "unparseable_token"))
+                    continue
+                relative_pos = variant.pos
+                wt_nt, mut_nt = variant.ref, variant.alt
+
                 mapping_entry = mapping_lookup.get(snp_string) if mapping_lookup else None
                 if mapping_entry:
-                    m_ref = mapping_entry[0]
-                    m_alt = mapping_entry[-1]
-                    try:
-                        m_pos = int(mapping_entry[1:-1])
-                    except ValueError:
-                        print(
-                            f"Skipping mapping for {snp_string}: could not parse position in '{mapping_entry}'.",
-                            file=sys.stderr,
-                        )
-                        mapping_entry = None
+                    # Same parser for the same reason: int(entry[1:-1]) on a
+                    # multi-base chromosome token raised and silently dropped the
+                    # mapping, falling through to the annotation path.
+                    m_var = parse_variant(str(mapping_entry), is_nt=True)
+                    if m_var is None:
+                        print(f"Skipping mapping for {snp_string}: could not parse '{mapping_entry}'.",
+                              file=sys.stderr)
                     else:
-                        abs_pos = m_pos
-                        ref, alt = m_ref.upper(), m_alt.upper()
+                        abs_pos = m_var.pos
+                        ref, alt = m_var.ref.upper(), m_var.alt.upper()
+                        ok = True
                         if validate_mapping and reference_fasta:
-                            actual_ref = get_reference_nucleotide(reference_fasta, chromosome, abs_pos)
-                            if actual_ref and actual_ref != ref:
-                                print(
-                                    f"  Warning: Mapping REF mismatch for {snp_string} (mapping {ref}, reference {actual_ref}). Recomputing from annotation.",
-                                    file=sys.stderr,
-                                )
-                                mapping_entry = None
-                        if mapping_entry:
-                            variants.append((abs_pos, formatted_chr, ref, alt))
+                            actual = _fetch(abs_pos)
+                            if actual and actual != ref[0]:
+                                print(f"  Warning: Mapping REF mismatch for {snp_string} "
+                                      f"(mapping {ref}, reference {actual}). Recomputing from annotation.",
+                                      file=sys.stderr)
+                                ok = False
+                        if ok:
+                            row = _vcf_row(formatted_chr, abs_pos, ref, alt, _fetch)
+                            if row is None:
+                                rejected.append((snp_string, "no_anchor_base_for_indel"))
+                                continue
+                            variants.append((row[0], formatted_chr, row[1], row[2]))
                             processed_count += 1
                             continue
-                # fallback to annotation-driven computation
-                if relative_pos is None:
+
+                # NO ANNOTATION FALLBACK. Both arithmetic forms that stood here are
+                # wrong and were measured wrong on SMN2, 38/38 tokens:
+                #   gene_start + relative_pos - 1   ignores introns entirely
+                #   exon-aware walk from cds_start   needs the true CDS start, and
+                #     get_genome_loc returns cds_start == tx_start for this gene,
+                #     so ORF position 1 cannot be located (SMN2 is off by its 17 nt
+                #     5'UTR, and by whole introns once the position crosses an exon).
+                # Guessing here produced a well-formed VCF row for a variant that
+                # does not exist. core/variant_mapping.py already resolves ORF ->
+                # chromosome correctly and writes chr_mapping_<GENE>.csv; that file
+                # is the authoritative source and is what this converter now needs.
+                rejected.append(
+                    (snp_string,
+                     "no_chromosome_mapping: ORF->genomic cannot be derived from the "
+                     "annotation alone; supply --chromosome-mapping-input "
+                     "(chr_mapping_<GENE>.csv from core/variant_mapping.py)"))
+                continue
+
+                row = _vcf_row(formatted_chr, abs_pos, ref, alt, _fetch)
+                if row is None:
+                    rejected.append((snp_string, "no_anchor_base_for_indel"))
                     continue
-                if strand == "+":
-                    abs_pos = gene_start + relative_pos - 1
-                    ref, alt = wt_nt, mut_nt
-                else:
-                    abs_pos = gene_end - relative_pos + 1
-                    ref, alt = reverse_complement(wt_nt), reverse_complement(mut_nt)
-                if reference_fasta:
-                    actual_ref = get_reference_nucleotide(reference_fasta, chromosome, abs_pos)
-                    if actual_ref:
-                        ref = actual_ref
-                variants.append((abs_pos, formatted_chr, ref, alt))
+                variants.append((row[0], formatted_chr, row[1], row[2]))
                 processed_count += 1
             except Exception as e:
+                rejected.append((snp_string, f"{type(e).__name__}: {e}"))
                 print(f"Skipping mutation {snp_string}: {e}", file=sys.stderr)
+
+        if rejected:
+            print(f"  {gene_name}: {len(rejected)} token(s) not converted:", file=sys.stderr)
+            for tok, why in rejected[:20]:
+                print(f"    {tok}: {why}", file=sys.stderr)
 
         # Sort and write VCF
         variants.sort(key=lambda x: x[0])
-        out_vcf = Path(outdir) / f"{gene_name}.vcf"
+        # Per-gene layout: <outdir>/<GENE>/vcf/<GENE>.vcf, matching every other
+        # BFF producer (<outdir>/<GENE>/{CodonMSA,RareCodon,EVmutation,adabmDCA}/...)
+        # rather than dumping every gene's VCF into one flat directory.
+        #
+        # NOTE for the SpliceAI workflow: spliceai/bin/main.nf:135 discovers inputs
+        # with `Channel.fromPath("${params.input_vcf_dir}/*.vcf")` -- a FLAT glob, so
+        # --input_vcf_dir must now be pointed at <outdir>/<GENE>/vcf, not <outdir>.
+        # main.nf:254 also publishes SpliceAI OUTPUT to "${gene_id}/VCF" (capital),
+        # which is a DIFFERENT directory from this one on a case-sensitive
+        # filesystem -- i.e. on the Linux target, though not on this macOS dev box.
+        out_dir_gene = Path(outdir) / gene_name / "vcf"
+        out_dir_gene.mkdir(parents=True, exist_ok=True)
+        out_vcf = out_dir_gene / f"{gene_name}.vcf"
+        # ##contig lines are REQUIRED by every pysam-based reader, which is what
+        # SpliceAI uses. Without them `spliceai -I <this file>` reads the variants,
+        # runs the model, and then dies on the FIRST write:
+        #     OSError: [Errno 22] Can't write record: Invalid argument
+        # because pysam cannot resolve the CHROM against a contig dictionary. The
+        # file looked valid -- correct header, correct rows, REF verified against
+        # the reference -- and was unusable by the one tool it is built for.
+        #
+        # Lengths come from the reference .fai, the same file the REF checks above
+        # read through. When there is no .fai the ID is still emitted: a contig line
+        # without length satisfies the dictionary lookup, and a wrong length would
+        # be worse than an absent one.
+        contig_lengths = {}
+        if reference_fasta:
+            fai = Path(f"{reference_fasta}.fai")
+            if fai.exists():
+                try:
+                    with open(fai) as fh:
+                        for line in fh:
+                            parts = line.split("\t")
+                            if len(parts) >= 2:
+                                contig_lengths[parts[0]] = parts[1]
+                except OSError:
+                    pass  # fall through to ID-only contig lines
+
+        # Preserve first-appearance order rather than sorting: VCF requires the
+        # contig order in the header to match the order records appear.
+        seen_chroms = list(dict.fromkeys(v[1] for v in variants))
+
         with open(out_vcf, "w") as f:
             f.write("##fileformat=VCFv4.3\n")
             f.write(f"##fileDate={datetime.datetime.now():%Y%m%d}\n")
             f.write("##source=SnpToVcfConverter\n")
             f.write(f"##gene_context={gene_name}\n")
+            for chrom_id in seen_chroms:
+                length = contig_lengths.get(chrom_id)
+                if length:
+                    f.write(f"##contig=<ID={chrom_id},length={length}>\n")
+                else:
+                    f.write(f"##contig=<ID={chrom_id}>\n")
             f.write("#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\n")
             for pos, chrom, ref, alt in variants:
                 f.write(f"{chrom}\t{pos}\t.\t{ref}\t{alt}\t.\t.\t.\n")
@@ -416,7 +596,7 @@ def main():
         action="store_true",
         help="Remove cached VCF metadata before processing (forces regeneration).",
     )
-    parser.add_argument("--verify-sequences", help="FASTA file or directory containing FASTA files to verify against reference")
+    parser.add_argument("-vs", "--verify-sequences", help="FASTA file or directory containing FASTA files to verify against reference")
     args = parser.parse_args()
 
     mutation_path = Path(args.mutation)
@@ -431,7 +611,16 @@ def main():
             print(f"Sequence verification failed: {results['error']}", file=sys.stderr)
             sys.exit(1)
 
-    files = [mutation_path] if mutation_path.is_file() else list(mutation_path.glob("*.csv"))
+    # rglob, not glob: core/variant_mapping.py writes mutations to
+    # <out>/<GENE>/mappings/mutations/<GENE>_mutations.csv, so a non-recursive
+    # glob at an output root matched nothing and reported "0/0 files successful".
+    # <GENE>_mutations.csv is preferred when present so the recursive walk does not
+    # also pick up the aa/chromosome/gDNA mapping CSVs that sit alongside it.
+    if mutation_path.is_file():
+        files = [mutation_path]
+    else:
+        named = sorted(mutation_path.rglob("*_mutations.csv"))
+        files = named if named else sorted(mutation_path.rglob("*.csv"))
 
     cache_path = outdir_path / ".vcf_converter_cache.json"
     if args.clear_cache and cache_path.exists():

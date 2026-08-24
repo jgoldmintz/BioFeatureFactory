@@ -19,7 +19,8 @@ set -euo pipefail
 
 # End-to-end database build for codon-aware and AF3 pipelines.
 #
-# Default output root: <repo>/Bio_DBs
+# Output root: nearest existing Bio_DBs at or above the repo, else <repo>/Bio_DBs.
+# Override with DB_ROOT=<path>.
 #
 # Outputs:
 #   - assembly_summary_refseq.txt
@@ -33,7 +34,8 @@ set -euo pipefail
 #   - AF3/RBP_db/* (POSTAR3 indexed if present)
 #
 # Optional env vars:
-#   DB_ROOT=<path>                         (default: <repo>/Bio_DBs)
+#   DB_ROOT=<path>                         (default: nearest existing Bio_DBs at or
+#                                          above the repo, else <repo>/Bio_DBs)
 #   TAXON_GROUP=vertebrate_mammalian      (RefSeq "group" column filter)
 #   ARIA_SPLIT=4
 #   ARIA_CONN=4
@@ -65,7 +67,25 @@ AF3_MSA_URL_TEMPLATE="${AF3_MSA_URL_TEMPLATE:-https://alphafold.ebi.ac.uk/files/
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
-DB_ROOT="${DB_ROOT:-$PROJECT_ROOT/../Bio_DBs}"
+# Bio_DBs is not a fixed number of levels above this script. The old default,
+# $PROJECT_ROOT/../Bio_DBs, assumes the repo sits directly beside Bio_DBs; on a
+# checkout nested one deeper (<base>/BFF/BioFeatureFactory next to <base>/Bio_DBs)
+# it names a directory that does not exist, and the build silently creates a
+# second empty database root beside the real one. Search upward for an existing
+# Bio_DBs and use that. When none exists anywhere, create <repo>/Bio_DBs -- inside
+# the checkout, which is what the header documents and what mkdir -p below makes.
+# DB_ROOT= still overrides outright.
+_find_bio_dbs() {
+  local d="$SCRIPT_DIR"
+  local i
+  for i in 1 2 3 4 5; do
+    d="$(cd "$d/.." 2>/dev/null && pwd)" || return 1
+    [[ -d "$d/Bio_DBs" ]] && { echo "$d/Bio_DBs"; return 0; }
+    [[ "$d" == "/" ]] && break
+  done
+  return 1
+}
+DB_ROOT="${DB_ROOT:-$(_find_bio_dbs || echo "$PROJECT_ROOT/Bio_DBs")}"
 AWK_SCRIPT="$SCRIPT_DIR/build_refseq_ftp_paths.awk"
 
 mkdir -p "$DB_ROOT"
@@ -455,6 +475,37 @@ else
   echo "  WARN AF3/RBP_db/msa is missing. Set AF3_RBP_MSA_ARCHIVE_URL to auto-populate."
 fi
 
+# ── Step 9b: CoCoPUTs human codon usage table (rare_codon null model) ────
+# Lives here rather than in bootstrap.sh because it IS a prepared database: it is
+# derived data, it is shared across checkouts, and rare_codon reads it by path.
+# Every other artifact under DB_ROOT is built by this script; having bootstrap
+# write one of them meant two owners for one directory and two different ideas of
+# where Bio_DBs is.
+#
+# Why it exists: rare_codon defines "rare" against GENOME-WIDE statistics. Without
+# this table rare_codon_pipeline.py falls back to deriving "rare" from the single
+# gene under analysis, making the reference distribution and the test sequence the
+# same data. Measured against this table on SMN2, that fallback produced 7 false
+# rare codons and missed 2 real ones out of a true set of 4 -- it called GCC rare
+# at 9.5% when GCC is 39.9% of all human alanine codons.
+#
+# ~11 MB of upstream zips, ~4 s, idempotent (exits early if the table exists).
+# Consumed as:
+#   rare_codon_pipeline.py --reference-codon-usage $DB_ROOT/cocoputs/human_GRCh38_codon_usage.tsv
+echo "[9b/10] CoCoPUTs human codon usage table..."
+if [[ "${SKIP_COCOPUTS:-0}" -eq 1 ]]; then
+  echo "  SKIP (SKIP_COCOPUTS=1)"
+else
+  COCOPUTS_SCRIPT="$SCRIPT_DIR/build_cocoputs_cut.py"
+  if [[ -f "$COCOPUTS_SCRIPT" ]]; then
+    echo "  DIR $DB_ROOT/cocoputs"
+    "${PYTHON:-python3}" "$COCOPUTS_SCRIPT" --out-dir "$DB_ROOT/cocoputs" \
+      || echo "  WARN CoCoPUTs table build failed; rare_codon will fall back to its self-referential null model"
+  else
+    echo "  WARN $COCOPUTS_SCRIPT not found"
+  fi
+fi
+
 echo "[10/10] Summary"
 echo "Done."
 echo "  DB root: ${DB_ROOT}"
@@ -464,3 +515,4 @@ echo "  ID map: ${DB_ROOT}/protein_id_to_refseq.tsv"
 echo "  UniRef90: ${DB_ROOT}/uniref90.fasta.gz"
 echo "  miRNA FASTA: ${DB_ROOT}/mature_hsa.fasta"
 echo "  AF3 RBP DB dir: ${DB_ROOT}/AF3/RBP_db"
+echo "  Codon usage table: ${DB_ROOT}/cocoputs/human_GRCh38_codon_usage.tsv"

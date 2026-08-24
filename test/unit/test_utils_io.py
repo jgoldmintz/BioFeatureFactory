@@ -11,8 +11,8 @@ from pathlib import Path
 
 import pytest
 
-sys.path.insert(0, str(Path(__file__).parent.parent.parent / "biofeaturefactory" / "utils"))
-from utility import (
+from biofeaturefactory.lib.utility import (
+    mint_pkey,
     read_fasta,
     write_fasta,
     load_mapping,

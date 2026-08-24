@@ -14,6 +14,15 @@
 # You should have received a copy of the GNU Affero General Public License
 # along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
-"""BioFeatureFactory utilities package."""
+"""BioFeatureFactory core: the input-producing stages.
 
-from biofeaturefactory.utils.utility import *
+Every module here is a CLI that PRODUCES the artifacts the feature pipelines
+consume -- coordinate mappings and sequence records (variant_mapping), VCFs
+(vcf_converter), and protein/codon alignments (msa_generation_pipeline,
+codon_msa_pipeline). They are orchestrated by CLI, including from Nextflow, not
+imported by the pipelines.
+
+Layering: lib -> core -> pipelines. Adding a feature pipeline means writing one
+consumer against the artifacts core already emits; it requires no change here
+and none in lib.
+"""
