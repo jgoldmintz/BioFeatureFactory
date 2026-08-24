@@ -43,40 +43,40 @@ def parse_args() -> argparse.Namespace:
         description="Controller for the SpliceAI Nextflow pipeline."
     )
     # Pipeline inputs / options
-    parser.add_argument("--mutations_path", type=Path,
+    parser.add_argument("-mp", "--mutations_path", type=Path,
                         help="Dir or file with <GENE>_mutations.csv (required unless using --input_vcf_path)")
-    parser.add_argument("--input_vcf_path", type=Path,
+    parser.add_argument("-ivp", "--input_vcf_path", type=Path,
                         help="Existing VCF (file) or directory of VCFs when skipping VCF generation")
-    parser.add_argument("--skip_vcf_generation", action="store_true",
+    parser.add_argument("-svg", "--skip_vcf_generation", action="store_true",
                         help="Use pre-built VCFs (requires --input_vcf_path)")
-    parser.add_argument("--reference_genome", type=Path, required=True)
-    parser.add_argument("--annotation_file", type=Path, required=True)
-    parser.add_argument("--transcript_mapping_path", type=Path, required=True)
-    parser.add_argument("--chromosome_mapping_path", type=Path, required=True)
-    parser.add_argument("--genomic_mapping_path", type=Path, required=True)
-    parser.add_argument("--output_dir", type=Path, default=Path("."))
-    parser.add_argument("--vcf_output_dir", type=Path)
-    parser.add_argument("--validation_log", type=Path)
-    parser.add_argument("--chromosome_format", choices=["refseq", "simple", "ucsc"], default="refseq")
-    parser.add_argument("--splice_threshold", type=float, default=0.0)
-    parser.add_argument("--retry_jitter", type=int, default=10)
-    parser.add_argument("--clear_vcf_cache", action="store_true")
-    parser.add_argument("--validate_mapping", action="store_true")
-    parser.add_argument("--maxforks", type=int, default=0,
+    parser.add_argument("-rg", "--reference_genome", type=Path, required=True)
+    parser.add_argument("-af", "--annotation_file", type=Path, required=True)
+    parser.add_argument("-tmp", "--transcript_mapping_path", type=Path, required=True)
+    parser.add_argument("-cmp", "--chromosome_mapping_path", type=Path, required=True)
+    parser.add_argument("-gmp", "--genomic_mapping_path", type=Path, required=True)
+    parser.add_argument("-od", "--output_dir", type=Path, default=Path("."))
+    parser.add_argument("-vod", "--vcf_output_dir", type=Path)
+    parser.add_argument("-vl", "--validation_log", type=Path)
+    parser.add_argument("-cf", "--chromosome_format", choices=["refseq", "simple", "ucsc"], default="refseq")
+    parser.add_argument("-st", "--splice_threshold", type=float, default=0.0)
+    parser.add_argument("-rj", "--retry_jitter", type=int, default=10)
+    parser.add_argument("-cvc", "--clear_vcf_cache", action="store_true")
+    parser.add_argument("-vm", "--validate_mapping", action="store_true")
+    parser.add_argument("-ma", "--maxforks", type=int, default=0,
                         help="Max concurrent run_spliceai tasks (0=Nextflow default)")
-    parser.add_argument("--forceAll_isoforms", action="store_true",
+    parser.add_argument("-fi", "--forceAll_isoforms", action="store_true",
                         help="Process all isoforms regardless of count (default: apply filtering for genes >50 isoforms)")
-    parser.add_argument("--max_isoforms_per_gene", type=int, default=50,
+    parser.add_argument("-mipg", "--max_isoforms_per_gene", type=int, default=50,
                         help="Maximum isoforms per gene before hybrid filtering is applied (default: 50)")
 
     # Controller options
-    parser.add_argument("--poll_seconds", type=float, default=15.0,
+    parser.add_argument("-ps", "--poll_seconds", type=float, default=15.0,
                         help="Tracker poll interval")
-    parser.add_argument("--disable_tracker", action="store_true",
+    parser.add_argument("-dt", "--disable_tracker", action="store_true",
                         help="Skip launching spliceai-tracker.py")
-    parser.add_argument("--pipeline", type=Path, default=NEXTFLOW_SCRIPT,
+    parser.add_argument("-pi", "--pipeline", type=Path, default=NEXTFLOW_SCRIPT,
                         help="Nextflow script to run (default: main.nf)")
-    parser.add_argument("--resume", action="store_true",
+    parser.add_argument("-re", "--resume", action="store_true",
                         help="Resume from a previous run using Nextflow's -resume flag")
 
     args = parser.parse_args()

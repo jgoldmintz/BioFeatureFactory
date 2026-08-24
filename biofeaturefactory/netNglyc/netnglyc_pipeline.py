@@ -3339,25 +3339,25 @@ def main():
     )
     parser.add_argument("input", nargs='?', help="Input FASTA file or directory (required for process/full-pipeline modes)")
     parser.add_argument("output", nargs='?', help="Output base directory (writes {GENE}/NetNglyc/{GENE}.tsv, .events.tsv, .sites.tsv)")
-    parser.add_argument("--workers", type=int, default=4, help="Number of parallel workers (used with --processing-mode parallel, default: 4)")
-    parser.add_argument("--cache-dir", help="Custom cache directory for SignalP/NetNGlyc results")
-    parser.add_argument("--test", action="store_true",
+    parser.add_argument("-w", "--workers", type=int, default=4, help="Number of parallel workers (used with --processing-mode parallel, default: 4)")
+    parser.add_argument("-cd", "--cache-dir", help="Custom cache directory for SignalP/NetNGlyc results")
+    parser.add_argument("-t", "--test", action="store_true",
                         help="Run test with ABCB1 sequence (no other args required)")
-    parser.add_argument("--clear-cache", action="store_true",
+    parser.add_argument("-cc", "--clear-cache", action="store_true",
                         help="Clear all cached results and exit (no other args required)")
-    parser.add_argument("--mapping-dir",
+    parser.add_argument("-md", "--mapping-dir",
                         help="Directory containing mutation mapping CSV files (REQUIRED for parsing modes)")
-    parser.add_argument("--threshold", type=float, default=0.5,
+    parser.add_argument("-th", "--threshold", type=float, default=0.5,
                         help="Minimum glycosylation potential threshold for predictions (default: 0.5)")
-    parser.add_argument("--batch-timeout", type=int, default=5000,
+    parser.add_argument("-bt", "--batch-timeout", type=int, default=5000,
                         help="Timeout in seconds for NetNGlyc execution (default: 5000s)")
-    parser.add_argument("--verbose", action="store_true",
+    parser.add_argument("-v", "--verbose", action="store_true",
                         help="Enable verbose output showing detailed processing information")
-    parser.add_argument("--log",
+    parser.add_argument("-l", "--log",
                         help="Validation log file or directory to skip failed mutations (mutant modes only)")
 
     # Native execution options
-    parser.add_argument("--native-netnglyc-bin",
+    parser.add_argument("-nnb", "--native-netnglyc-bin",
                         help="Path to native NetNGlyc binary")
 
     args = parser.parse_args()

@@ -1256,10 +1256,10 @@ def main(argv=None):
     p.add_argument("-Ep", "--exclude-premrna", action="store_true",
                    help="Exclude the pre-mRNA mapping CSVs.")
     p.add_argument("--orf", help="Optional ORF FASTA (file or directory). If omitted, ORF is inferred from transcript.")
-    p.add_argument("--force-cds",
+    p.add_argument("-fc", "--force-cds",
         help="Force specific transcript: single accession (e.g., NM_022162.3) for all genes, "
              "or CSV file mapping genes to transcript IDs (gene,transcript_id columns).")
-    p.add_argument("--verbose", action="store_true", help="Print detailed ORF/mutation validation messages.")
+    p.add_argument("-v", "--verbose", action="store_true", help="Print detailed ORF/mutation validation messages.")
     args = p.parse_args(argv)
 
     mut_path = Path(args.mutations)

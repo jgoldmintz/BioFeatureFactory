@@ -34,6 +34,8 @@ import RNA
 os.environ["OMP_NUM_THREADS"] = "1"
 
 from biofeaturefactory.lib.utility import (
+    discover_mapping_files,
+    discover_fasta_files,
     mint_pkey,
     parse_piece_token,
     split_piece_cell,
@@ -487,14 +489,14 @@ def main():
     parser.add_argument("-i", "--input", required=True, help="Input fasta sequence file/dir")
     parser.add_argument("-o", "--output", required=True, help="Output base directory")
     parser.add_argument("-w", "--window", type=int, default=151, help="Window size (odd; truncates near ends)")
-    parser.add_argument("--transcript-mapping", help="Path to transcript mapping file/directory")
+    parser.add_argument("-tm", "--transcript-mapping", help="Path to transcript mapping file/directory")
     parser.add_argument("--intron-premrna-mapping",
                         help="Path to intron_premRNA_mapping_<GENE>.csv (file or directory). "
                              "Intronic variants are folded against BOTH the intron record "
                              "and the pre_mRNA record.")
-    parser.add_argument("--log", help="Validation log (file or dir) used to filter failed mutations")
-    parser.add_argument("--samples", type=int, default=1000, help="Number of Boltzmann samples per sequence")
-    parser.add_argument("--tau", type=float, default=0.05, help="Threshold for change_flag on deltau")
+    parser.add_argument("-l", "--log", help="Validation log (file or dir) used to filter failed mutations")
+    parser.add_argument("-s", "--samples", type=int, default=1000, help="Number of Boltzmann samples per sequence")
+    parser.add_argument("-ta", "--tau", type=float, default=0.05, help="Threshold for change_flag on deltau")
     parser.add_argument("--workers", type=int, default=None, help="Max parallel workers (processes)")
     args = parser.parse_args()
 
@@ -511,11 +513,33 @@ def main():
     valid_exts_fa = ('.fasta', '.fa', '.faa', '.fna')
     valid_exts_map = ('.tsv', '.csv')
 
-    files = [input_path] if input_path.is_file() else [i for i in input_path.iterdir() if i.suffix in valid_exts_fa]
+    if input_path.is_file():
+        files = [input_path]
+    else:
+        # discover_fasta_files first: it understands variant_mapping's per-gene
+        # layout (<root>/<GENE>/fastas/<GENE>.fasta), which a flat iterdir of the
+        # root cannot see -- that root holds only directories. Measured before
+        # this: `-i out/` raised "No valid input files found in out" while
+        # out/NPM1/fastas/ and out/PAM/fastas/ each held one.
+        _disc = discover_fasta_files(str(input_path))
+        files = ([Path(p) for _, p in sorted(_disc.items())] if _disc
+                 else [i for i in input_path.iterdir() if i.suffix in valid_exts_fa])
     if not files:
         raise ValueError(f'No valid input files found in {input_path.name}')
     if transcpt is None:
-        raise ValueError("--transcript-mapping is required")
+        # Default it to the input root when that root carries the per-gene layout:
+        # variant_mapping writes <root>/<GENE>/mappings/transcript/ beside
+        # <root>/<GENE>/fastas/, so the two are the same directory and requiring
+        # the flag makes the caller repeat themselves. discover_mapping_files
+        # confirms a transcript mapping is actually there before defaulting;
+        # otherwise the original error stands.
+        if (not input_path.is_file()
+                and discover_mapping_files(str(input_path), "transcript")):
+            transcpt = input_path
+            print(f"[rnafold] --transcript-mapping not given; using {input_path} "
+                  f"(per-gene layout detected)")
+        else:
+            raise ValueError("--transcript-mapping is required")
 
     # Recursive + type-filtered, for the same reason as _resolve_map_for_gene:
     # the mappings sit at <root>/<GENE>/mappings/transcript/ under the gene-first
@@ -735,6 +759,11 @@ def main():
         + [_gene_of(e) for e in run_summary.get("skipped_genes", [])]
         + list(results_by_gene.keys())
     ) if g}
+    # One timestamp for the whole run, so every gene's summary from a single
+    # invocation shares a suffix and sorts together. Matches variant_mapping's
+    # validation_<YYYYmmdd_HHMMSS>.log convention.
+    from datetime import datetime
+    run_stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     for gname in sorted(genes_seen):
         unsucc = [e for e in run_summary.get("unsuccessful", []) if _gene_of(e) == gname]
         skipped = [e for e in run_summary.get("skipped_genes", []) if _gene_of(e) == gname]
@@ -745,12 +774,18 @@ def main():
         per["mutations_unsuccessful"] = len(unsucc)
         gene_dir = Path(args.output) / gname / "RNAfold"
         gene_dir.mkdir(parents=True, exist_ok=True)
-        with open(gene_dir / "rnafold.run_summary.json", "w") as f:
+        summary_path = gene_dir / f"rnafold.run_summary.{run_stamp}.json"
+        with open(summary_path, "w") as f:
             json.dump(per, f, indent=2)
+        # Name the actual file, not the "<gene>" template. The summary is written
+        # PER GENE, so a run over several genes produces several of these and the
+        # placeholder told the reader neither which genes nor where to look.
+        print(f"[SUMMARY] {gname}: mutations "
+              f"{per['mutations_total'] - per['mutations_unsuccessful']}/{per['mutations_total']} ok, "
+              f"{per['mutations_unsuccessful']} unsuccessful -> {summary_path}")
     print(f"[SUMMARY] genes {run_summary['genes_processed']}/{run_summary['genes_total']}, "
           f"mutations {run_summary['mutations_successful']}/{run_summary['mutations_total']} ok, "
-          f"{run_summary['mutations_unsuccessful']} unsuccessful "
-          f"-> <gene>/RNAfold/rnafold.run_summary.json")
+          f"{run_summary['mutations_unsuccessful']} unsuccessful")
 
 if __name__ == "__main__":
     main()

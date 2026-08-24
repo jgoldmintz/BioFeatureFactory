@@ -1934,26 +1934,26 @@ def main() -> None:
     # MSAs are the primary inputs: training is invoked here if params don't exist.
     parser.add_argument("--msa",
                         help="Protein MSA file or directory; triggers `adabmDCA train` if params absent")
-    parser.add_argument("--codon-msa",
+    parser.add_argument("-cm", "--codon-msa",
                         help="Codon MSA file or directory (triplets); encoded + trained if params absent")
     # Pre-built params (cache / override) — skip train if these resolve.
-    parser.add_argument("--protein-params",
+    parser.add_argument("-pp", "--protein-params",
                         help="Pre-built protein params file or directory")
-    parser.add_argument("--codon-params",
+    parser.add_argument("-cp", "--codon-params",
                         help="Pre-built codon params file or directory")
-    parser.add_argument("--protein-alphabet", default="-ACDEFGHIKLMNPQRSTVWY",
+    parser.add_argument("-pa", "--protein-alphabet", default="-ACDEFGHIKLMNPQRSTVWY",
                         help="Protein alphabet (default: standard 20 AA + gap)")
     parser.add_argument("--focus",
                         help="Focus sequence ID in protein MSA (default: gene name)")
-    parser.add_argument("--codon-focus",
+    parser.add_argument("-cf", "--codon-focus",
                         help="Focus sequence ID in codon MSA (default: ORF)")
-    parser.add_argument("--gene", help="Gene name override (single-gene mode)")
-    parser.add_argument("--skip-codon", action="store_true",
+    parser.add_argument("-g", "--gene", help="Gene name override (single-gene mode)")
+    parser.add_argument("-sc", "--skip-codon", action="store_true",
                         help="Route synonymous + stop to the protein TSV; do not produce codon TSV")
-    parser.add_argument("--skip-train", action="store_true",
+    parser.add_argument("-st", "--skip-train", action="store_true",
                         help="Skip adabmDCA train invocation (encoding still runs for codon MSAs)")
     # adabmDCA training tunables (consumed by train_adabmdca_in_process when training fires)
-    parser.add_argument("--adabmdca-model", default="bmDCA",
+    parser.add_argument("-am", "--adabmdca-model", default="bmDCA",
                         choices=["bmDCA", "eaDCA", "edDCA", "pseudoDCA"],
                         help="Training algorithm. bmDCA/eaDCA/edDCA are Boltzmann-learning "
                              "variants (high memory); pseudoDCA is pseudolikelihood maximization "
@@ -1962,27 +1962,27 @@ def main() -> None:
     # Boltzmann routines and 500 for pseudoDCA. A single default cannot serve both
     # -- 50000 is Boltzmann-sized, and the pseudoDCA function's own signature says
     # 500 (plmc's default), so the CLI silently multiplied that path by 100x.
-    parser.add_argument("--adabmdca-nepochs", type=int, default=None,
+    parser.add_argument("-an", "--adabmdca-nepochs", type=int, default=None,
                         help="Max gradient steps / epochs. Default: 500 for pseudoDCA, "
                              "50000 for bmDCA/eaDCA/edDCA. On pseudoDCA this is a "
                              "CEILING -- the run stops early at convergence.")
-    parser.add_argument("--adabmdca-tol", type=float, default=1e-3,
+    parser.add_argument("-at", "--adabmdca-tol", type=float, default=1e-3,
                         help="pseudoDCA convergence threshold on ||grad||/||grad||_0 "
                              "(default: 1e-3). 0 disables early stopping.")
-    parser.add_argument("--adabmdca-patience", type=int, default=3,
+    parser.add_argument("-ap", "--adabmdca-patience", type=int, default=3,
                         help="Consecutive convergence checks below --adabmdca-tol "
                              "required to stop (default: 3)")
-    parser.add_argument("--adabmdca-check-every", type=int, default=10,
+    parser.add_argument("-ace", "--adabmdca-check-every", type=int, default=10,
                         help="Epochs between convergence checks (default: 10)")
-    parser.add_argument("--adabmdca-target", type=float, default=0.95)
-    parser.add_argument("--adabmdca-lr", type=float, default=0.01)
-    parser.add_argument("--adabmdca-nchains", type=int, default=10000)
-    parser.add_argument("--adabmdca-nsweeps", type=int, default=10)
-    parser.add_argument("--adabmdca-device", default="cuda")
-    parser.add_argument("--adabmdca-dtype", default="float32",
+    parser.add_argument("-ata", "--adabmdca-target", type=float, default=0.95)
+    parser.add_argument("-al", "--adabmdca-lr", type=float, default=0.01)
+    parser.add_argument("-anc", "--adabmdca-nchains", type=int, default=10000)
+    parser.add_argument("-ans", "--adabmdca-nsweeps", type=int, default=10)
+    parser.add_argument("-ad", "--adabmdca-device", default="cuda")
+    parser.add_argument("-adt", "--adabmdca-dtype", default="float32",
                         choices=["float32", "float64"])
-    parser.add_argument("--adabmdca-seed", type=int, default=0)
-    parser.add_argument("--validation-log",
+    parser.add_argument("-as", "--adabmdca-seed", type=int, default=0)
+    parser.add_argument("-vl", "--validation-log",
                         help="Validation log from exon_aware_mapping for mutation filtering")
     parser.add_argument("--output", "-o", default=".", help="Output directory")
     parser.add_argument("--quiet", "-q", action="store_true")

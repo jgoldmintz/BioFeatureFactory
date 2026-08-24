@@ -1015,34 +1015,34 @@ def main():
                        help='Output base directory')
 
     # MHC-specific options
-    parser.add_argument('--alleles', nargs='+',
+    parser.add_argument('-a', '--alleles', nargs='+',
                        help='HLA alleles to predict (e.g., HLA-A*02:01 HLA-B*07:02). If not specified, uses default set.')
     # Only netMHC-4.0 is supported: the invocation (allele format, `-a`/`-f`) and
     # the parser (15-column layout, 'HLA' header) are hardcoded to it. netMHCpan /
     # netMHCII use different output layouts the parser cannot read and would
     # silently yield zero predictions, so they are not offered.
-    parser.add_argument('--netmhc-tool', choices=['netMHC'],
+    parser.add_argument('-nt', '--netmhc-tool', choices=['netMHC'],
                        default='netMHC',
                        help='NetMHC tool to use (only netMHC-4.0 is supported)')
     # Execution backend
-    parser.add_argument('--native-netmhc-path',
+    parser.add_argument('-nnp', '--native-netmhc-path',
                        help='Path to native NetMHC executable')
 
     # Processing options
     parser.add_argument('--mutations', '-m',
                        help='Mutation file or directory of mutation CSVs (single-column NT mutations)')
-    parser.add_argument('--log',
+    parser.add_argument('-l', '--log',
                        help='Validation log file to skip failed mutations')
-    parser.add_argument('--threshold', type=float, default=0.5,
+    parser.add_argument('-t', '--threshold', type=float, default=0.5,
                        help='Binding rank threshold for strong binders (default: 0.5)')
-    parser.add_argument('--batch-size', type=int, default=100,
+    parser.add_argument('-bs', '--batch-size', type=int, default=100,
                        help='(deprecated; unused — netMHC input is no longer batched)')
-    parser.add_argument('--timeout', type=int, default=600,
+    parser.add_argument('-ti', '--timeout', type=int, default=600,
                        help='Command timeout in seconds (default: 600)')
     parser.add_argument('--max-workers', type=int, default=4,
                        help='Concurrent netMHC runs per gene (default: 4; set 1 for serial)')
 
-    parser.add_argument('--verbose', action='store_true',
+    parser.add_argument('-v', '--verbose', action='store_true',
                        help='Enable verbose output')
 
     args = parser.parse_args()

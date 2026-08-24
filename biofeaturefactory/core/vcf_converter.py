@@ -596,7 +596,7 @@ def main():
         action="store_true",
         help="Remove cached VCF metadata before processing (forces regeneration).",
     )
-    parser.add_argument("--verify-sequences", help="FASTA file or directory containing FASTA files to verify against reference")
+    parser.add_argument("-vs", "--verify-sequences", help="FASTA file or directory containing FASTA files to verify against reference")
     args = parser.parse_args()
 
     mutation_path = Path(args.mutation)

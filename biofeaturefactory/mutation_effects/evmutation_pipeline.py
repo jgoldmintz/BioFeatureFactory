@@ -1434,7 +1434,7 @@ Examples:
     parser.add_argument("--model-params",
                         help="Protein model params file or directory "
                              "containing {GENE}.model_params")
-    parser.add_argument("--codon-model-params",
+    parser.add_argument("-cmp", "--codon-model-params",
                         help="Codon model params file or directory "
                              "containing {GENE}.codon_model_params")
 
@@ -1445,28 +1445,28 @@ Examples:
     parser.add_argument("--focus",
                         help="Focus sequence ID in protein MSA "
                              "(default: gene name)")
-    parser.add_argument("--codon-msa",
+    parser.add_argument("-cm", "--codon-msa",
                         help="Codon MSA file or directory of per-gene codon MSA files; "
                              "encoded then run through plmc if params absent")
-    parser.add_argument("--codon-focus",
+    parser.add_argument("-cf", "--codon-focus",
                         help="Focus sequence ID in codon MSA (default: ORF)")
 
-    parser.add_argument("--gene",
+    parser.add_argument("-g", "--gene",
                         help="Gene name override (single-gene mode only)")
-    parser.add_argument("--plmc-binary",
+    parser.add_argument("-pb", "--plmc-binary",
                         help="Path to plmc binary (required when running plmc)")
-    parser.add_argument("--alphabet", default="-ACDEFGHIKLMNPQRSTVWY",
+    parser.add_argument("-a", "--alphabet", default="-ACDEFGHIKLMNPQRSTVWY",
                         help="Protein alphabet for plmc (default: standard 20 AA)")
-    parser.add_argument("--lambda-e", type=float, default=16.2,
+    parser.add_argument("-le", "--lambda-e", type=float, default=16.2,
                         help="J_ij regularisation strength (default: 16.2)")
-    parser.add_argument("--lambda-h", type=float, default=0.01,
+    parser.add_argument("-lh", "--lambda-h", type=float, default=0.01,
                         help="h_i regularisation strength (default: 0.01)")
-    parser.add_argument("--skip-plmc", action="store_true",
+    parser.add_argument("-sp", "--skip-plmc", action="store_true",
                         help="Skip plmc inference (encoding still runs for codon MSAs)")
-    parser.add_argument("--skip-codon", action="store_true",
+    parser.add_argument("-sc", "--skip-codon", action="store_true",
                         help="Skip codon-level scoring; route synonymous + stop variants to the protein TSV "
                              "(synonymous score is 0 by construction; stop has no AA-level score)")
-    parser.add_argument("--validation-log",
+    parser.add_argument("-vl", "--validation-log",
                         help="Validation log from variant_mapping for mutation filtering")
     parser.add_argument("--output", "-o", default=".",
                         help="Output directory (default: current directory)")

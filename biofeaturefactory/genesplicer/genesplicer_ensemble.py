@@ -52,6 +52,7 @@ import concurrent.futures
 # imports from biofeaturefactory.lib.utility
 # ---------------------------------------------------------------------------
 from biofeaturefactory.lib.utility import (
+    discover_fasta_files,
     read_fasta,
     parse_variant,
     splice_seq,
@@ -1278,18 +1279,18 @@ def main():
                              "If omitted, resolved from --genesplicer-dir or the genesplicer binary location "
                              "(conda ships it beside the binary as share/genesplicer-*/human).")
     parser.add_argument("-o", "--output", required=True, help="Output base directory (writes {GENE}/GeneSplicer/{GENE}.tsv, .events.tsv, .sites.tsv)")
-    parser.add_argument("--window", type=int, default=DEFAULT_WINDOW, help="Window/reporting size (default 151)")
-    parser.add_argument("--report-radius", type=int, default=DEFAULT_REPORT_RADIUS,
+    parser.add_argument("-w", "--window", type=int, default=DEFAULT_WINDOW, help="Window/reporting size (default 151)")
+    parser.add_argument("-rr", "--report-radius", type=int, default=DEFAULT_REPORT_RADIUS,
                         help="Radius (bp) to count as local; default = --window")
-    parser.add_argument("--distance-k", type=int, default=DEFAULT_DISTANCE_K,
+    parser.add_argument("-dk", "--distance-k", type=int, default=DEFAULT_DISTANCE_K,
                         help="Distance-decay kernel k (default 75)")
-    parser.add_argument("--visibility-threshold", type=float, default=DEFAULT_VISIBILITY_THRESHOLD,
+    parser.add_argument("-vt", "--visibility-threshold", type=float, default=DEFAULT_VISIBILITY_THRESHOLD,
                         help="Minimum score to treat a site as visible (default 1.0)")
-    parser.add_argument("--high-cutoff", type=float, default=DEFAULT_HIGH_CUTOFF,
+    parser.add_argument("-hc", "--high-cutoff", type=float, default=DEFAULT_HIGH_CUTOFF,
                         help="High-confidence score cutoff (default 5.0)")
-    parser.add_argument("--shift-bp", type=int, default=DEFAULT_SHIFT_BP,
+    parser.add_argument("-sb", "--shift-bp", type=int, default=DEFAULT_SHIFT_BP,
                         help="Minimum bp difference to classify as a shifted site (default 3)")
-    parser.add_argument("--cluster-radius", type=int, default=DEFAULT_CLUSTER_RADIUS,
+    parser.add_argument("-cr", "--cluster-radius", type=int, default=DEFAULT_CLUSTER_RADIUS,
                         help="Single-linkage radius (bp) for grouping sites into clusters (default 3)")
     parser.add_argument("--max-cluster-span", type=int, default=DEFAULT_MAX_CLUSTER_SPAN,
                         help="Max total span (bp) of one cluster; a site that would push the "
@@ -1297,19 +1298,19 @@ def main():
                              "inert: a left-anchored fixed window splits genuine cross-allele "
                              "pairs that straddle its boundary, so it is off until a bound that "
                              "cuts at the largest gap exists (see _cluster_sites)")
-    parser.add_argument("--redirect-max-bp", type=int, default=DEFAULT_REDIRECT_MAX_BP,
+    parser.add_argument("-rmb", "--redirect-max-bp", type=int, default=DEFAULT_REDIRECT_MAX_BP,
                         help="Max bp between a lost and a gained site to link them as one "
                              "redirected site (default 100)")
-    parser.add_argument("--register-max-bp", type=int, default=DEFAULT_REGISTER_MAX_BP,
+    parser.add_argument("-rmbp", "--register-max-bp", type=int, default=DEFAULT_REGISTER_MAX_BP,
                         help="Linked pairs within this distance are labelled 'shifted' "
                              "(register shift) rather than 'redirected' (default 12)")
-    parser.add_argument("--redirect-snv-max-bp", type=int, default=DEFAULT_REDIRECT_SNV_BP,
+    parser.add_argument("-rsmb", "--redirect-snv-max-bp", type=int, default=DEFAULT_REDIRECT_SNV_BP,
                         help="Max distance from the variant span (zero inside it) to the lost "
                              "site for a redirect link to be considered variant-caused "
                              "(default 80, = GeneSplicer's coding/non-coding context window)")
-    parser.add_argument("--workers", type=int, default=None,
+    parser.add_argument("-wo", "--workers", type=int, default=None,
                         help="Max parallel workers (default: half cores, capped at 8)")
-    parser.add_argument("--log", help="Validation log file/dir to skip failed mutations")
+    parser.add_argument("-l", "--log", help="Validation log file/dir to skip failed mutations")
     args = parser.parse_args()
 
     if args.genesplicer_dir:
@@ -1349,7 +1350,11 @@ def main():
     if input_path.is_file():
         fasta_paths = [input_path]
     else:
-        fasta_paths = [p for p in input_path.iterdir() if p.is_file() and p.suffix in (".fa", ".fasta", ".fna")]
+        # Per-gene layout first (<root>/<GENE>/fastas/), flat scan as fallback.
+        _disc = discover_fasta_files(str(input_path))
+        fasta_paths = ([Path(p) for _, p in sorted(_disc.items())] if _disc
+                       else [p for p in input_path.iterdir()
+                             if p.is_file() and p.suffix in (".fa", ".fasta", ".fna")])
     if not fasta_paths:
         print(f"No FASTA files found in {args.input}", file=sys.stderr)
         sys.exit(1)

@@ -1191,6 +1191,122 @@ def extract_gene_from_filename(filename: str) -> str:
     # Fallback: basename without extensions
     return strip_all_extensions(Path(filename).stem)
 
+# variant_mapping writes one directory per gene:
+#
+#     <out>/<GENE>/fastas/<GENE>.fasta
+#     <out>/<GENE>/mappings/chromosome/chr_mapping_<GENE>.csv
+#     <out>/<GENE>/mappings/gDNA/genomic_mapping_<GENE>.csv
+#     <out>/<GENE>/mappings/transcript/transcript_mapping_<GENE>.csv
+#     <out>/<GENE>/mappings/aa/<GENE>_aa_mapping.csv
+#     <out>/<GENE>/mappings/intron_premRNA/intron_premRNA_mapping_<GENE>.csv
+#     <out>/<GENE>/mappings/pkey/pkey_mapping_<GENE>.csv
+#     <out>/<GENE>/mappings/mutations/<GENE>_mutations.csv
+#
+# When that layout is present the GENE IS THE DIRECTORY, and reading it from the
+# directory beats parsing it out of the filename. Two measured failures of the
+# filename route on a real tree:
+#
+#   * discover_mapping_files(out, "chromosome") returned {}. The file is named
+#     chr_mapping_<GENE>.csv, so the substring "chromosome" matches nothing and
+#     the chromosome mapping -- the one every VCF-producing pipeline needs -- was
+#     silently absent rather than reported missing.
+#   * discover_fasta_files(out) reported genes "100", "200", "300", "400",
+#     "1000", "1900", "4900", "RF00162" and "RF00379": CodonMSA files named
+#     <GENE>_<N>.codon.msa.fasta, plus vendored test data under alphafold3/,
+#     nsp3/, plmc/ and adabmDCApy/ that an unbounded rglob reaches.
+#
+# MAP_DIR_FOR_TYPE names the subdirectory per map_type, so the caller's vocabulary
+# ("chromosome", "genomic", ...) no longer has to coincide with the filename.
+MAP_DIR_FOR_TYPE = {
+    "chromosome":     "chromosome",
+    "genomic":        "gDNA",
+    "gdna":           "gDNA",
+    "transcript":     "transcript",
+    "aa":             "aa",
+    "intron_premrna": "intron_premRNA",
+    "premrna":        "intron_premRNA",
+    "pkey":           "pkey",
+    # No "mutations" entry on purpose. <GENE>_mutations.csv is single-column and
+    # validate_mapping_content rejects it by design, so advertising the type here
+    # would promise a lookup that always returns {}.
+}
+
+_FASTA_EXTENSIONS = ("*.fasta", "*.fa", "*.fas", "*.fna", "*.faa")
+
+
+def _gene_dirs(root):
+    """<GENE> directories directly under `root` carrying the variant_mapping layout.
+
+    A directory qualifies on having `fastas/` or `mappings/`; nothing else in a
+    tree can be mistaken for a gene, which is what bounds the scan.
+    """
+    from pathlib import Path
+    p = Path(root)
+    if not p.is_dir():
+        return []
+    out = []
+    for child in sorted(p.iterdir()):
+        if not child.is_dir() or child.name.startswith("."):
+            continue
+        # MSA/ and CodonMSA/ count too: msa_generation_pipeline and
+        # codon_msa_pipeline write <out>/<GENE>/MSA/ and <out>/<GENE>/CodonMSA/,
+        # and an output root holding only those is still a gene tree.
+        if any((child / d).is_dir() for d in ("fastas", "mappings", "MSA", "CodonMSA")):
+            out.append(child)
+    return out
+
+
+# What each MSA generator writes, so a consumer can be pointed at the output root
+# instead of an explicit file:
+#     msa_generation_pipeline.py:96   <out>/<GENE>/MSA/<GENE>.msa.a2m
+#     codon_msa_pipeline.py:1019      <out>/<GENE>/CodonMSA/<GENE>.codon.msa.fasta
+MSA_LAYOUT = {
+    "protein": ("MSA", ("*.a2m", "*.msa.a2m", "*.sto", "*.fasta", "*.fa")),
+    "codon":   ("CodonMSA", ("*.codon.msa.fasta", "*.fasta", "*.fa")),
+}
+
+
+def discover_msa_files(msa_dir, kind="protein"):
+    """{gene_name: msa_path} for an MSA generator's output root.
+
+    Mirrors discover_fasta_files but reads <GENE>/MSA/ or <GENE>/CodonMSA/ rather
+    than <GENE>/fastas/. Returns {} when the layout is absent, so a caller can
+    fall back to whatever it did before.
+
+    kind is 'protein' (msa_generation_pipeline) or 'codon' (codon_msa_pipeline).
+    A single file path returns {gene_from_filename: path}.
+    """
+    from pathlib import Path
+
+    found = {}
+    if not msa_dir:
+        return found
+    p = Path(msa_dir)
+    if not p.exists():
+        return found
+    if p.is_file():
+        return {extract_gene_from_filename(p.stem): str(p)}
+
+    subdir, patterns = MSA_LAYOUT.get(kind, MSA_LAYOUT["protein"])
+    for gd in _gene_dirs(p):
+        d = gd / subdir
+        if not d.is_dir():
+            # Case-insensitive filesystems have produced both CodonMSA/ and
+            # codonMSA/ in the same tree; match on the lowered name so a tree
+            # written on one platform still resolves on the other.
+            alt = [c for c in gd.iterdir()
+                   if c.is_dir() and c.name.lower() == subdir.lower()]
+            if not alt:
+                continue
+            d = alt[0]
+        for pat in patterns:
+            hits = sorted(d.glob(pat))
+            if hits:
+                found[gd.name] = str(hits[0])
+                break
+    return found
+
+
 def discover_mapping_files(mapping_dir, map_type=None):
     """Scan directory (or accept a single CSV) for mapping files and extract gene names flexibly.
 
@@ -1222,6 +1338,29 @@ def discover_mapping_files(mapping_dir, map_type=None):
         return bool(res[0]) if isinstance(res, (list, tuple)) else bool(res)
 
     p = Path(mapping_dir)
+
+    # Layout-aware pass first. Only runs when <root>/<GENE>/mappings/ exists, so a
+    # caller pointing at a flat directory of CSVs is unaffected.
+    gene_dirs = _gene_dirs(p) if p.is_dir() else []
+    if gene_dirs:
+        sub = MAP_DIR_FOR_TYPE.get((map_type or "").lower()) if map_type else None
+        for gd in gene_dirs:
+            maps = gd / "mappings"
+            if not maps.is_dir():
+                continue
+            search = [maps / sub] if sub else sorted(d for d in maps.iterdir() if d.is_dir())
+            for d in search:
+                if not d.is_dir():
+                    continue
+                for csv_file in sorted(d.glob("*.csv")):
+                    if _accepts(csv_file):
+                        mapping_files[gd.name] = str(csv_file)
+                        break
+                if gd.name in mapping_files:
+                    break
+        if mapping_files:
+            return mapping_files
+
     if p.is_file():
         gene_name = extract_gene_from_filename(p.stem)
         if _accepts(p):
@@ -1271,6 +1410,26 @@ def discover_fasta_files(fasta_dir):
 
     # Common FASTA file extensions
     fasta_extensions = ['*.fasta', '*.fa', '*.fas', '*.fna', '*.faa']
+
+    root = Path(fasta_dir)
+
+    # Layout-aware pass first: <root>/<GENE>/fastas/. Bounded to those directories,
+    # so vendored test data elsewhere in the tree cannot be read as a gene.
+    for gd in _gene_dirs(root):
+        fdir = gd / "fastas"
+        if not fdir.is_dir():
+            continue
+        for extension in _FASTA_EXTENSIONS:
+            hit = None
+            for f in sorted(fdir.glob(extension)):
+                if validate_fasta_content(f):
+                    hit = f
+                    break
+            if hit is not None:
+                fasta_files[gd.name] = str(hit)
+                break
+    if fasta_files:
+        return fasta_files
 
     for extension in fasta_extensions:
         for fasta_file in Path(fasta_dir).rglob(extension):

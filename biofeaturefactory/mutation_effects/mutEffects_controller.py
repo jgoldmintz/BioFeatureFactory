@@ -138,14 +138,14 @@ def parse_args() -> argparse.Namespace:
     )
 
     # Required
-    parser.add_argument("--fasta", type=Path, required=True,
+    parser.add_argument("-f", "--fasta", type=Path, required=True,
                         help="ORF FASTA file or directory of per-gene FASTA files")
-    parser.add_argument("--mutations", type=Path, required=True,
+    parser.add_argument("-m", "--mutations", type=Path, required=True,
                         help="Mutations CSV file or directory of per-gene CSVs")
-    parser.add_argument("--plmc-binary", type=str,
+    parser.add_argument("-pb", "--plmc-binary", type=str,
                         help="Path to plmc executable (required when the EVmutation backend runs; "
                              "omit only when --adabmdca-only is set)")
-    parser.add_argument("--db-root", type=Path,
+    parser.add_argument("-dr", "--db-root", type=Path,
                         help="Bio_DBs root directory (contains uniref90.fasta, refseq_assemblies/, etc.). "
                              "Required only when at least one gene needs MSA generation; omit when "
                              "--msa and --codon-msa cover every gene in --fasta.")
@@ -153,51 +153,51 @@ def parse_args() -> argparse.Namespace:
                         help="Output base directory")
 
     # Pre-built MSA sources (optional, skips generation for genes that have them)
-    parser.add_argument("--msa", type=Path,
+    parser.add_argument("-ms", "--msa", type=Path,
                         help="Protein MSA file or directory")
-    parser.add_argument("--codon-msa", type=Path,
+    parser.add_argument("-cm", "--codon-msa", type=Path,
                         help="Codon MSA file or directory")
 
     # Tool binaries
-    parser.add_argument("--jackhmmer-binary", type=str, default="jackhmmer",
+    parser.add_argument("-jb", "--jackhmmer-binary", type=str, default="jackhmmer",
                         help="Path to jackhmmer (default: jackhmmer)")
-    parser.add_argument("--jackhmmer-iterations", type=int, default=5,
+    parser.add_argument("-ji", "--jackhmmer-iterations", type=int, default=5,
                         help="Number of jackhmmer iterations (default: 5)")
-    parser.add_argument("--mmseqs-binary", type=str, default="mmseqs",
+    parser.add_argument("-mb", "--mmseqs-binary", type=str, default="mmseqs",
                         help="Path to mmseqs2 (default: mmseqs)")
-    parser.add_argument("--aligner", type=str, default="mafft",
+    parser.add_argument("-a", "--aligner", type=str, default="mafft",
                         choices=["mafft", "muscle"],
                         help="Protein aligner (default: mafft)")
 
     # Pre-built model params
-    parser.add_argument("--model-params", type=Path,
+    parser.add_argument("-mp", "--model-params", type=Path,
                         help="Protein model params file or directory")
-    parser.add_argument("--codon-model-params", type=Path,
+    parser.add_argument("-cmp", "--codon-model-params", type=Path,
                         help="Codon model params file or directory")
 
     # Backend selection — both run in parallel by default.
     # --evmutation-only and --adabmdca-only are mutually exclusive.
     backend_group = parser.add_mutually_exclusive_group()
-    backend_group.add_argument("--evmutation-only", action="store_true",
+    backend_group.add_argument("-eo", "--evmutation-only", action="store_true",
                                help="Run only the EVmutation/plmc backend; skip adabmDCA.")
-    backend_group.add_argument("--adabmdca-only", action="store_true",
+    backend_group.add_argument("-ao", "--adabmdca-only", action="store_true",
                                help="Run only the adabmDCA backend; skip EVmutation/plmc.")
 
     # --skip-codon: optional argument selects which backend(s) to skip codon-side for.
     #   --skip-codon                  → both backends skip codon-side
     #   --skip-codon evmutation       → only EVmutation skips codon-side
     #   --skip-codon adabmdca         → only adabmDCA skips codon-side
-    parser.add_argument("--skip-codon", nargs="?", const="both", default=None,
+    parser.add_argument("-sc", "--skip-codon", nargs="?", const="both", default=None,
                         choices=["both", "evmutation", "adabmdca"],
                         help="Skip codon-side scoring. No arg = both backends; "
                              "'evmutation' or 'adabmdca' targets one backend. "
                              "Synonymous + stop variants route to the protein TSV instead.")
 
     # adabmDCA pre-built params
-    parser.add_argument("--adabmdca-protein-params", type=Path,
+    parser.add_argument("-app", "--adabmdca-protein-params", type=Path,
                         help="Pre-built adabmDCA protein params file or directory "
                              "(default: <output>/adabmdca_protein_params/{GENE}.protein_adabm_params)")
-    parser.add_argument("--adabmdca-codon-params", type=Path,
+    parser.add_argument("-acp", "--adabmdca-codon-params", type=Path,
                         help="Pre-built adabmDCA codon params file or directory "
                              "(default: <output>/adabmdca_codon_params/{GENE}.codon_adabm_params)")
 
@@ -205,7 +205,7 @@ def parse_args() -> argparse.Namespace:
     # NOTE: there is no --adabmdca-binary flag — the `adabmDCA` console script
     # is installed by `pip install adabmDCA` (the Python/torch implementation,
     # not a compiled binary) and is expected on PATH.
-    parser.add_argument("--adabmdca-model", default="bmDCA",
+    parser.add_argument("-am", "--adabmdca-model", default="bmDCA",
                         choices=["bmDCA", "eaDCA", "edDCA", "pseudoDCA"],
                         help="Training routine (default: bmDCA). bmDCA/eaDCA/edDCA are "
                              "Boltzmann-learning variants (high memory); pseudoDCA is "
@@ -214,28 +214,28 @@ def parse_args() -> argparse.Namespace:
                              "pseudoDCA when memory becomes the bottleneck.")
     # None => adabmdca_pipeline.py picks per backend (500 pseudoDCA / 50000 Boltzmann).
     # A single 50000 default silently multiplied the pseudoDCA path by 100x.
-    parser.add_argument("--adabmdca-nepochs", type=int, default=None,
+    parser.add_argument("-an", "--adabmdca-nepochs", type=int, default=None,
                         help="Max epochs. Default: 500 for pseudoDCA, 50000 otherwise.")
-    parser.add_argument("--adabmdca-tol", type=float, default=1e-3,
+    parser.add_argument("-at", "--adabmdca-tol", type=float, default=1e-3,
                         help="pseudoDCA convergence threshold on ||grad||/||grad||_0 (default: 1e-3; 0 disables)")
-    parser.add_argument("--adabmdca-patience", type=int, default=3)
-    parser.add_argument("--adabmdca-check-every", type=int, default=10)
-    parser.add_argument("--adabmdca-target", type=float, default=0.95,
+    parser.add_argument("-ap", "--adabmdca-patience", type=int, default=3)
+    parser.add_argument("-ace", "--adabmdca-check-every", type=int, default=10)
+    parser.add_argument("-ata", "--adabmdca-target", type=float, default=0.95,
                         help="Pearson Cij target (default: 0.95)")
-    parser.add_argument("--adabmdca-lr", type=float, default=0.01)
-    parser.add_argument("--adabmdca-nchains", type=int, default=10000,
+    parser.add_argument("-al", "--adabmdca-lr", type=float, default=0.01)
+    parser.add_argument("-anc", "--adabmdca-nchains", type=int, default=10000,
                         help="PCD chain count (default: 10000)")
-    parser.add_argument("--adabmdca-nsweeps", type=int, default=10)
-    parser.add_argument("--adabmdca-device", default="cuda",
+    parser.add_argument("-ans", "--adabmdca-nsweeps", type=int, default=10)
+    parser.add_argument("-ad", "--adabmdca-device", default="cuda",
                         help="adabmDCA device (default: cuda)")
-    parser.add_argument("--adabmdca-dtype", default="float32",
+    parser.add_argument("-adt", "--adabmdca-dtype", default="float32",
                         choices=["float32", "float64"])
-    parser.add_argument("--adabmdca-seed", type=int, default=0)
+    parser.add_argument("-as", "--adabmdca-seed", type=int, default=0)
 
     # Options
-    parser.add_argument("--threads", type=int, default=4)
-    parser.add_argument("--validation-log", type=Path)
-    parser.add_argument("--resume", action="store_true",
+    parser.add_argument("-t", "--threads", type=int, default=4)
+    parser.add_argument("-vl", "--validation-log", type=Path)
+    parser.add_argument("-r", "--resume", action="store_true",
                         help="Resume previous Nextflow run")
 
     args = parser.parse_args()

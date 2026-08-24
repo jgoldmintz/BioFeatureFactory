@@ -1144,7 +1144,7 @@ def main():
                         help='Output base directory')
 
     # Input type
-    parser.add_argument('--input-type', choices=['nt', 'aa'], default=None,
+    parser.add_argument('-it', '--input-type', choices=['nt', 'aa'], default=None,
                         help='Input sequence type: "nt" for nucleotide (will translate), "aa" for amino acid. '
                              'Optional — when omitted, auto-detected from the WT sequence via detect_alphabet.')
 
@@ -1158,13 +1158,13 @@ def main():
                         help='Path to trained NSP3 model checkpoint (REQUIRED)')
     parser.add_argument('-c', '--config', required=True,
                         help='Path to NSP3 config YAML file (REQUIRED)')
-    parser.add_argument('--log',
+    parser.add_argument('-l', '--log',
                         help='Validation log file to skip failed mutations')
-    parser.add_argument('--batch-size', type=int, default=100,
+    parser.add_argument('-bs', '--batch-size', type=int, default=100,
                         help='Number of sequences to process per NSP3 batch (default: 100)')
     parser.add_argument('--max-seq-length', type=int, default=1500,
                         help='Maximum sequence length before chunking (default: 1500)')
-    parser.add_argument('--verbose', action='store_true',
+    parser.add_argument('-v', '--verbose', action='store_true',
                         help='Enable verbose output')
 
     args = parser.parse_args()

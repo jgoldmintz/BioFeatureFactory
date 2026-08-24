@@ -1093,25 +1093,25 @@ Example:
 
     parser.add_argument('--output', '-o', required=True,
                         help='Output base directory (writes {GENE}/CodonMSA/{GENE}.codon.msa.fasta and .manifest.tsv)')
-    parser.add_argument('--min-seqid', type=float, default=1.0,
+    parser.add_argument('-ms', '--min-seqid', type=float, default=1.0,
                         help='Minimum observed AA identity for back-translation QC (default: 1.0)')
-    parser.add_argument('--search-min-seqid', type=float, default=0.5,
+    parser.add_argument('-sms', '--search-min-seqid', type=float, default=0.5,
                         help='Minimum sequence identity for mmseqs2 search (default: 0.5)')
-    parser.add_argument('--search-min-qcov', type=float, default=0.5,
+    parser.add_argument('-smq', '--search-min-qcov', type=float, default=0.5,
                         help='Minimum query coverage for mmseqs2 search (default: 0.5)')
-    parser.add_argument('--max-hits', type=int, default=500,
+    parser.add_argument('-mh', '--max-hits', type=int, default=500,
                         help='Max RefSeq hits to retrieve from mmseqs2 (default: 500)')
-    parser.add_argument('--aligner', default='mafft', choices=['mafft', 'muscle'],
+    parser.add_argument('-a', '--aligner', default='mafft', choices=['mafft', 'muscle'],
                         help='Protein aligner (default: mafft)')
-    parser.add_argument('--mmseqs-binary', default='mmseqs',
+    parser.add_argument('-mb', '--mmseqs-binary', default='mmseqs',
                         help='Path to mmseqs2 binary (default: mmseqs)')
-    parser.add_argument('--threads', type=int, default=None,
+    parser.add_argument('-t', '--threads', type=int, default=None,
                         help='Number of threads for mmseqs2 (default: auto)')
-    parser.add_argument('--target-db-base', default=None,
+    parser.add_argument('-tdb', '--target-db-base', default=None,
                         help='Base path for mmseqs2 target DB (default: auto from --db-root)')
-    parser.add_argument('--mmseqs-tmp-dir', default=None,
+    parser.add_argument('-mtd', '--mmseqs-tmp-dir', default=None,
                         help='Temp directory for mmseqs2 (default: system temp)')
-    parser.add_argument('--verbose', action='store_true',
+    parser.add_argument('-v', '--verbose', action='store_true',
                         help='Print progress updates')
 
     args = parser.parse_args()

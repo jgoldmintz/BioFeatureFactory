@@ -1669,32 +1669,32 @@ def main():
                         help='Input: WT FASTA file/directory')
     parser.add_argument('output', nargs='?',
                         help='Output base directory (writes {GENE}/NetPhos/{GENE}.tsv, .events.tsv, .sites.tsv)')
-    parser.add_argument('--threshold', type=float, default=0.5,
+    parser.add_argument('-t', '--threshold', type=float, default=0.5,
                         help='Phosphorylation score threshold (default: 0.5)')
-    parser.add_argument('--yes-only', action='store_true',
+    parser.add_argument('-yo', '--yes-only', action='store_true',
                         help='Only include predictions marked as YES')
-    parser.add_argument('--mapping-dir',
+    parser.add_argument('-md', '--mapping-dir',
                         help='Directory or single CSV file containing mutation mapping(s)')
-    parser.add_argument('--log',
+    parser.add_argument('-l', '--log',
                         help='Validation log file or directory to skip failed mutations')
-    parser.add_argument('--wt-header', default='ORF',
+    parser.add_argument('-wh', '--wt-header', default='ORF',
                         help='FASTA header identifying WT sequence (default: ORF)')
-    parser.add_argument('--verbose', action='store_true',
+    parser.add_argument('-v', '--verbose', action='store_true',
                         help='Verbose output')
 
-    parser.add_argument('--batch-size', type=int,
+    parser.add_argument('-bs', '--batch-size', type=int,
                         help='Batch size for large FASTA files')
-    parser.add_argument('--timeout', type=int, default=300,
+    parser.add_argument('-ti', '--timeout', type=int, default=300,
                         help='Command timeout in seconds (default: 300)')
 
     # Cache options
-    parser.add_argument('--no-cache', action='store_true',
+    parser.add_argument('-nc', '--no-cache', action='store_true',
                         help='Disable result caching')
-    parser.add_argument('--clear-cache', action='store_true',
+    parser.add_argument('-cc', '--clear-cache', action='store_true',
                         help='Clear all cached NetPhos results and exit')
 
     # Native execution options
-    parser.add_argument('--native-ape-path',
+    parser.add_argument('-nap', '--native-ape-path',
                         help='Path to native APE binary')
 
     args = parser.parse_args()

@@ -991,64 +991,64 @@ def main():
     )
 
     # Required inputs
-    parser.add_argument('--postar-db', required=True,
+    parser.add_argument('-pd', '--postar-db', required=True,
                        help='POSTAR3 database file')
-    parser.add_argument('--rbp-mapping', required=True,
+    parser.add_argument('-rm', '--rbp-mapping', required=True,
                        help='Gene-UniProt mapping TSV')
-    parser.add_argument('--rbp-sequences',
+    parser.add_argument('-rs', '--rbp-sequences',
                        help='Protein sequences FASTA (optional if --msa-dir provided)')
-    parser.add_argument('--msa-dir',
+    parser.add_argument('-md', '--msa-dir',
                        help='Directory with A3M MSA files (preferred over --rbp-sequences)')
 
     # Gene inputs (file or directory, auto-detected)
-    parser.add_argument('--fasta',
+    parser.add_argument('-f', '--fasta',
                         help='Transcript FASTA file or directory of FASTA files')
-    parser.add_argument('--mutations',
+    parser.add_argument('-mu', '--mutations',
                         help='Mutations CSV file or directory (optional when --chromosome-mapping provided)')
 
     # VCF-based coordinate resolution (replaces --chrom/--tx-start/--strand)
-    parser.add_argument('--vcf',
+    parser.add_argument('-v', '--vcf',
                         help='Per-gene VCF file or directory from vcf_converter.py (provides chromosome)')
-    parser.add_argument('--chromosome-mapping',
+    parser.add_argument('-cm', '--chromosome-mapping',
                         help='Chromosome mapping CSV file or directory (provides mutations and chromosomal positions)')
-    parser.add_argument('--premrna-mapping',
+    parser.add_argument('-pm', '--premrna-mapping',
                         help='pre-mRNA mapping CSV file or directory (premrna_mapping_<GENE>.csv). Required to score intronic (gd.) variants: they have no ORF or transcript coordinate and are windowed on the pre_mRNA record.')
 
     # Legacy genomic coordinates (still supported)
-    parser.add_argument('--chrom', help='Chromosome (alternative to --vcf)')
-    parser.add_argument('--tx-start', type=int, help='Transcript start position (alternative to --chromosome-mapping)')
-    parser.add_argument('--strand', default='+', help='Strand (+/-)')
+    parser.add_argument('-ch', '--chrom', help='Chromosome (alternative to --vcf)')
+    parser.add_argument('-ts', '--tx-start', type=int, help='Transcript start position (alternative to --chromosome-mapping)')
+    parser.add_argument('-s', '--strand', default='+', help='Strand (+/-)')
 
     # Output
     parser.add_argument('--output', '-o', required=True,
                        help='Output base directory')
 
     # Execution
-    parser.add_argument('--execution-mode', default='local',
+    parser.add_argument('-em', '--execution-mode', default='local',
                        choices=['local'],
                        help='AF3 execution mode (only local is supported here; '
                             'for SLURM use `python -m biofeaturefactory.alphafold3.burst submit`)')
-    parser.add_argument('--af3-binary', default='alphafold3',
+    parser.add_argument('-ab', '--af3-binary', default='alphafold3',
                        help='Path to AF3 executable')
-    parser.add_argument('--docker-image', default='alphafold3',
+    parser.add_argument('-di', '--docker-image', default='alphafold3',
                        help='Docker image name for AF3')
-    parser.add_argument('--model-dir',
+    parser.add_argument('-mdi', '--model-dir',
                        help='Path to AF3 model weights directory')
 
     # Parameters
-    parser.add_argument('--window-size', type=int, default=101,
+    parser.add_argument('-ws', '--window-size', type=int, default=101,
                        help='RNA window size (odd number)')
-    parser.add_argument('--rbp-window', type=int, default=50,
+    parser.add_argument('-rw', '--rbp-window', type=int, default=50,
                        help='Window for RBP site lookup (+/-bp)')
-    parser.add_argument('--validation-log',
+    parser.add_argument('-vl', '--validation-log',
                        help='Validation log for filtering mutations')
 
     # Multi-window mode (optional, multiplies AF3 runs)
-    parser.add_argument('--multi-window', action='store_true', default=False,
+    parser.add_argument('-mw', '--multi-window', action='store_true', default=False,
                        help='Run multiple windows per mutation (multiplies AF3 runs)')
-    parser.add_argument('--multi-window-offsets', type=str, default='0.3,0.5,0.7',
+    parser.add_argument('-mwo', '--multi-window-offsets', type=str, default='0.3,0.5,0.7',
                        help='Mutation position as fraction of window (default: 0.3,0.5,0.7)')
-    parser.add_argument('--max-gpus', type=int, default=None,
+    parser.add_argument('-mg', '--max-gpus', type=int, default=None,
                        help='Max GPUs for parallel AF3 execution (default: auto-detect)')
 
     args = parser.parse_args()

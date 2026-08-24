@@ -1137,22 +1137,22 @@ def _add_shared_input_args(p: argparse.ArgumentParser) -> None:
     """Args needed by both submit and ingest (input collection)."""
     p.add_argument('--postar-db', required=True, help='POSTAR3 database file')
     p.add_argument('--rbp-mapping', required=True, help='Gene-UniProt mapping TSV')
-    p.add_argument('--rbp-sequences', help='Protein sequences FASTA (optional if --msa-dir provided)')
-    p.add_argument('--msa-dir', help='Directory with A3M MSA files (preferred)')
-    p.add_argument('--fasta', required=True, help='Transcript FASTA file or directory')
-    p.add_argument('--mutations', help='Mutations CSV file or directory')
-    p.add_argument('--vcf', help='Per-gene VCF file or directory (for chromosome resolution)')
-    p.add_argument('--chromosome-mapping', help='Chromosome mapping CSV file or directory')
-    p.add_argument('--chrom', help='Chromosome (alternative to --vcf)')
-    p.add_argument('--tx-start', type=int,
+    p.add_argument('-rs', '--rbp-sequences', help='Protein sequences FASTA (optional if --msa-dir provided)')
+    p.add_argument('-md', '--msa-dir', help='Directory with A3M MSA files (preferred)')
+    p.add_argument('-f', '--fasta', required=True, help='Transcript FASTA file or directory')
+    p.add_argument('-mu', '--mutations', help='Mutations CSV file or directory')
+    p.add_argument('-v', '--vcf', help='Per-gene VCF file or directory (for chromosome resolution)')
+    p.add_argument('-cm', '--chromosome-mapping', help='Chromosome mapping CSV file or directory')
+    p.add_argument('-ch', '--chrom', help='Chromosome (alternative to --vcf)')
+    p.add_argument('-ts', '--tx-start', type=int,
                    help='Transcript start (alternative to --chromosome-mapping)')
-    p.add_argument('--strand', default='+', choices=['+', '-'], help='Strand')
-    p.add_argument('--window-size', type=int, default=101, help='RNA window size (odd)')
-    p.add_argument('--rbp-window', type=int, default=50, help='Window for RBP site lookup (+/-bp)')
-    p.add_argument('--validation-log', help='Validation log for filtering mutations')
-    p.add_argument('--multi-window', action='store_true', default=False,
+    p.add_argument('-s', '--strand', default='+', choices=['+', '-'], help='Strand')
+    p.add_argument('-ws', '--window-size', type=int, default=101, help='RNA window size (odd)')
+    p.add_argument('-rw', '--rbp-window', type=int, default=50, help='Window for RBP site lookup (+/-bp)')
+    p.add_argument('-vl', '--validation-log', help='Validation log for filtering mutations')
+    p.add_argument('-mw', '--multi-window', action='store_true', default=False,
                    help='Multi-window mode (multiplies AF3 runs)')
-    p.add_argument('--multi-window-offsets', default='0.3,0.5,0.7',
+    p.add_argument('-mwo', '--multi-window-offsets', default='0.3,0.5,0.7',
                    help='Mutation positions as fractions of window')
 
 
@@ -1168,17 +1168,17 @@ def main() -> int:
     p_sub.add_argument('--output', '-o', required=True, help='Output base directory')
     p_sub.add_argument('--model-dir', required=True, help='Path to AF3 model weights directory')
     p_sub.add_argument('--docker-image', default='alphafold3', help='AF3 Docker image name')
-    p_sub.add_argument('--slurm-job-name', default='af3_burst', help='SLURM --job-name')
-    p_sub.add_argument('--slurm-partition', default='gpu', help='SLURM --partition')
-    p_sub.add_argument('--slurm-time', default='01:00:00', help='SLURM --time per task')
-    p_sub.add_argument('--slurm-mem', default='64G', help='SLURM --mem per task')
-    p_sub.add_argument('--slurm-log-dir',
+    p_sub.add_argument('-sjn', '--slurm-job-name', default='af3_burst', help='SLURM --job-name')
+    p_sub.add_argument('-sp', '--slurm-partition', default='gpu', help='SLURM --partition')
+    p_sub.add_argument('-st', '--slurm-time', default='01:00:00', help='SLURM --time per task')
+    p_sub.add_argument('-sm', '--slurm-mem', default='64G', help='SLURM --mem per task')
+    p_sub.add_argument('-sld', '--slurm-log-dir',
                        help='Directory for SLURM logs (default: {output}/.burst/logs)')
-    p_sub.add_argument('--array-throttle', type=int, default=256,
+    p_sub.add_argument('-at', '--array-throttle', type=int, default=256,
                        help='Concurrent array task limit (sbatch --array=...%%N)')
-    p_sub.add_argument('--no-submit', action='store_true', default=False,
+    p_sub.add_argument('-ns', '--no-submit', action='store_true', default=False,
                        help='Render manifest + script but skip sbatch')
-    p_sub.add_argument('--clear-cache', action='store_true', default=False,
+    p_sub.add_argument('-cc', '--clear-cache', action='store_true', default=False,
                        help='Delete {output}/.cache before submitting (forces re-run)')
     p_sub.set_defaults(func=cmd_submit)
 

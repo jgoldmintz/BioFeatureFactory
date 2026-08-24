@@ -225,7 +225,11 @@ done
 # conda installs, Nextflow and the editable installs -- a flag named by EITHER
 # phase is enabled, and its step still runs exactly once.
 PHASE_ENV_FLAGS="PIP_INSTALL INSTALL_MIRANDA INSTALL_SPLICEAI INSTALL_MMSEQS2 INSTALL_HMMER INSTALL_NEXTFLOW INSTALL_EDITABLE_REPOS"
-PHASE_GIT_FLAGS="INSTALL_BUILD_TOOLS CLONE_EVMUTATION BUILD_PLMC CLONE_ADABMDCA DOWNLOAD_CG_COTRANS CLONE_NETSURFP3 INSTALL_SIGNALP INSTALL_MIRANDA INSTALL_SPLICEAI INSTALL_MMSEQS2 INSTALL_HMMER BUILD_GENESPLICER INSTALL_NEXTFLOW CLONE_AF3 INSTALL_EDITABLE_REPOS"
+# INSTALL_SPLICEAI is env-phase ONLY. It no longer installs into the active env:
+# it creates and populates a dedicated conda env (bff-spliceai, step 6d), which
+# is an environment concern with nothing to clone or build. Leaving it in the git
+# phase meant `git-phase` alone would create that env as a side effect.
+PHASE_GIT_FLAGS="INSTALL_BUILD_TOOLS CLONE_EVMUTATION BUILD_PLMC CLONE_ADABMDCA DOWNLOAD_CG_COTRANS CLONE_NETSURFP3 INSTALL_SIGNALP INSTALL_MIRANDA INSTALL_MMSEQS2 INSTALL_HMMER BUILD_GENESPLICER INSTALL_NEXTFLOW CLONE_AF3 INSTALL_EDITABLE_REPOS"
 PHASE_DB_FLAGS="DOWNLOAD_UNIREF90 DOWNLOAD_IDMAPPING BUILD_COCOPUTS_CUT RUN_BUILD_DB"
 ALL_PHASE_FLAGS="PIP_INSTALL INSTALL_BUILD_TOOLS CLONE_EVMUTATION BUILD_PLMC CLONE_ADABMDCA DOWNLOAD_CG_COTRANS CLONE_NETSURFP3 INSTALL_SIGNALP INSTALL_MIRANDA INSTALL_SPLICEAI INSTALL_MMSEQS2 INSTALL_HMMER BUILD_GENESPLICER INSTALL_NEXTFLOW CLONE_AF3 INSTALL_EDITABLE_REPOS DOWNLOAD_UNIREF90 DOWNLOAD_IDMAPPING BUILD_COCOPUTS_CUT RUN_BUILD_DB"
 
@@ -791,7 +795,12 @@ except Exception as exc:
     print(f"  FAIL keras predict: {exc}"); sys.exit(1)
 faulthandler.cancel_dump_traceback_later()
 SPLICEAI_CHECK
-    echo "  OK spliceai env ready: $SPLICEAI_ENV_NAME"
+    if "$CONDA_BIN" run -n "$SPLICEAI_ENV_NAME" spliceai --help >/dev/null 2>&1 \
+       || [[ $? -eq 2 ]]; then
+      echo "  OK spliceai env ready: $SPLICEAI_ENV_NAME"
+    else
+      echo "  WARN spliceai not callable in '$SPLICEAI_ENV_NAME' (see --exclude-spliceai)"
+    fi
   else
     if [[ "$SPLICEAI_OWN_ENV" -eq 1 ]]; then
       echo "  WARN conda/mamba not found; installing into the active env instead"
@@ -1207,14 +1216,11 @@ fi
 
 # ── Steps 10-12: summaries over what the git phase clones/builds ─────────
 if [[ "$PHASE_GIT" -eq 1 ]]; then
-  echo "[10/12] SpliceAI/Nextflow checks..."
-  if command -v spliceai >/dev/null 2>&1; then
-    echo "  OK spliceai on PATH"
-  else
-    # Reachable when --exclude-spliceai was passed, when neither conda nor mamba
-    # is available, or when step 6d's install failed.
-    echo "  WARN spliceai not found (installed at step 6d; see --exclude-spliceai)"
-  fi
+  # SpliceAI is checked at the end of step 6d, in the ENV phase, because that is
+  # where it is installed and because it now lives in its own conda env -- it is
+  # not on the active env's PATH, so `command -v spliceai` here reported WARN on a
+  # correctly bootstrapped machine.
+  echo "[10/12] Nextflow checks..."
   if command -v nextflow >/dev/null 2>&1; then
     echo "  OK nextflow on PATH"
   else

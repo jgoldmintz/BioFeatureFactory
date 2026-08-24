@@ -35,7 +35,7 @@ from Bio import SeqIO
 from Bio.Seq import Seq
 
 from biofeaturefactory.lib.utility import (
-    prepare_protein_query, extract_gene_from_filename,
+    prepare_protein_query, extract_gene_from_filename, discover_fasta_files,
     run_jackhmmer, parse_stockholm, stockholm_to_a2m,
     filter_msa_by_gaps, compute_sequence_weights, compute_neff,
     write_a2m,
@@ -223,24 +223,32 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  # Basic usage
+  # Single FASTA
   python msa_generation_pipeline.py \\
-    --query /path/to/fasta \\
-    --database /path/to/uniref90.fasta \\
-    --jackhmmer-binary jackhmmer \\
-    --output results/
+    -f /path/to/GENE.fasta \\
+    -d /path/to/uniref90.fasta \\
+    -j jackhmmer \\
+    -o results/
   # Writes: results/GENE/MSA/GENE.msa.a2m
   #         results/GENE/MSA/GENE.msa.stats.json
 
+  # Directory: a variant_mapping output root, one MSA per gene found at
+  # <root>/<GENE>/fastas/<GENE>.fasta. A flat directory of FASTAs also works.
+  python msa_generation_pipeline.py \\
+    -f out/ \\
+    -d /path/to/uniref90.fasta \\
+    -j jackhmmer \\
+    -o out/
+
   # With custom parameters
   python msa_generation_pipeline.py \\
-    --query /path/to/fasta \\
-    --database /path/to/uniref90.fasta \\
-    --jackhmmer-binary /usr/local/bin/jackhmmer \\
+    -f /path/to/GENE.fasta \\
+    -d /path/to/uniref90.fasta \\
+    -j /usr/local/bin/jackhmmer \\
     --iterations 5 \\
     --min-neff-ratio 10 \\
     --threads 8 \\
-    --output results/
+    -o results/
 
 Quality thresholds:
   N_eff >= 10L (L = protein length) is recommended for EVmutation.
@@ -263,22 +271,22 @@ Quality thresholds:
                         help='Number of jackhmmer iterations (default: 5)')
     parser.add_argument('--evalue-inclusion', '-E', type=float, default=1e-3,
                         help='E-value threshold for inclusion (default: 1e-3)')
-    parser.add_argument('--bitscore-threshold', type=float, default=0.5,
+    parser.add_argument('-bt', '--bitscore-threshold', type=float, default=0.5,
                         help='Minimum bits per residue (default: 0.5)')
-    parser.add_argument('--min-neff-ratio', type=float, default=10,
+    parser.add_argument('-mnr', '--min-neff-ratio', type=float, default=10,
                         help='Minimum N_eff / L ratio (default: 10)')
-    parser.add_argument('--max-seq-gaps', type=float, default=0.4,
+    parser.add_argument('-msg', '--max-seq-gaps', type=float, default=0.4,
                         help='Max fraction gaps per sequence (default: 0.4)')
-    parser.add_argument('--max-col-gaps', type=float, default=0.6,
+    parser.add_argument('-mcg', '--max-col-gaps', type=float, default=0.6,
                         help='Max fraction gaps per column (default: 0.6)')
-    parser.add_argument('--identity-threshold', type=float, default=0.8,
+    parser.add_argument('-it', '--identity-threshold', type=float, default=0.8,
                         help='Clustering threshold for N_eff (default: 0.8)')
     parser.add_argument('--threads', '-t', type=int, default=4,
                         help='Number of CPU threads (default: 4)')
-    parser.add_argument('--max-seqs', type=int, default=10000,
+    parser.add_argument('-ms', '--max-seqs', type=int, default=10000,
                         help='Maximum sequences in alignment (default: 10000). '
                              'Prevents profile drift for genes in large superfamilies.')
-    parser.add_argument('--keep-intermediate', action='store_true',
+    parser.add_argument('-ki', '--keep-intermediate', action='store_true',
                         help='Keep intermediate Stockholm file')
 
     args = parser.parse_args()
@@ -292,10 +300,21 @@ Quality thresholds:
     # Collect FASTA files
     fasta_path = Path(args.fasta)
     if fasta_path.is_dir():
-        fasta_files = sorted(
-            f for f in fasta_path.iterdir()
-            if f.suffix.lower() in ('.fasta', '.fa', '.fas') and f.is_file()
-        )
+        # discover_fasta_files understands variant_mapping's per-gene layout
+        # (<out>/<GENE>/fastas/<GENE>.fasta) and falls back to a recursive scan.
+        # The previous iterdir() was FLAT, so pointing this at a variant_mapping
+        # output root -- the layout every other core output uses -- found nothing
+        # and exited with "No FASTA files found in out/" while out/NPM1/fastas/
+        # and out/PAM/fastas/ both held one.
+        discovered = discover_fasta_files(str(fasta_path))
+        if discovered:
+            fasta_files = [Path(p) for _, p in sorted(discovered.items())]
+        else:
+            # Flat directory of FASTAs, kept for callers not using the gene layout.
+            fasta_files = sorted(
+                f for f in fasta_path.iterdir()
+                if f.suffix.lower() in ('.fasta', '.fa', '.fas') and f.is_file()
+            )
         if not fasta_files:
             parser.error(f"No FASTA files found in {args.fasta}")
     else:

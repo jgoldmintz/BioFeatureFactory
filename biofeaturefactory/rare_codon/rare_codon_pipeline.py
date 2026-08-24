@@ -43,6 +43,7 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 CG_DIR = SCRIPT_DIR / "cg_cotrans"
 
 from biofeaturefactory.lib.utility import (
+    discover_msa_files,
     read_fasta,
     mint_pkey,
     trim_muts,
@@ -697,6 +698,26 @@ def _resolve_per_gene(path_arg, gene, extensions):
     if p.is_file():
         return str(p)
     if p.is_dir():
+        # Per-gene layout first. variant_mapping writes
+        # <root>/<GENE>/mappings/mutations/<GENE>_mutations.csv, so a flat scan of
+        # the root sees only directories and reports "Skipping <GENE>: missing
+        # mutations" for a gene whose mutations file is right there. Search inside
+        # <root>/<GENE>/ when that directory exists; the flat scan below still
+        # handles a plain directory of per-gene files.
+        gene_dir = next((c for c in sorted(p.iterdir())
+                         if c.is_dir() and c.name.upper() == gene.upper()), None)
+        if gene_dir is not None:
+            exact = [f for f in sorted(gene_dir.rglob("*"))
+                     if f.is_file() and f.suffix.lower() in extensions
+                     and f.stem.upper() == gene.upper()]
+            if exact:
+                return str(exact[0])
+            loose = [f for f in sorted(gene_dir.rglob("*"))
+                     if f.is_file() and f.suffix.lower() in extensions
+                     and gene.upper() in f.stem.upper()]
+            if loose:
+                return str(loose[0])
+
         for f in sorted(p.iterdir()):
             if f.stem.upper() == gene.upper() and f.suffix.lower() in extensions:
                 return str(f)
@@ -715,10 +736,20 @@ def _collect_msa_inputs(msa_arg):
     if not p.is_dir():
         return []
 
-    patterns = ("*.msa.fasta", "*.fasta", "*.fa")
-    files = []
-    for pat in patterns:
-        files.extend(sorted(p.glob(pat)))
+    # Per-gene layout first. codon_msa_pipeline.py:1019 writes
+    # <out>/<GENE>/CodonMSA/<GENE>.codon.msa.fasta, so a flat glob of the output
+    # root finds nothing -- that root holds only gene directories. Measured
+    # before this: `--msa out/` raised
+    #     FileNotFoundError: Could not resolve MSA inputs from --msa: out/
+    # The flat glob below still handles a plain directory of MSAs.
+    disc = discover_msa_files(str(p), "codon")
+    if disc:
+        files = [Path(v) for _, v in sorted(disc.items())]
+    else:
+        patterns = ("*.msa.fasta", "*.fasta", "*.fa")
+        files = []
+        for pat in patterns:
+            files.extend(sorted(p.glob(pat)))
     # stable de-dup preserving order
     seen = set()
     out = []
@@ -1091,8 +1122,8 @@ Copyright notice:
     # MSA and codon usage inputs
     parser.add_argument('-a', '--msa', required=True,
                         help='Path to codon-aware MSA FASTA file or directory')
-    parser.add_argument('--usage', help='Path to codon usage .p.gz file (optional; auto-built if missing)')
-    parser.add_argument('--wt-gi', help='Identifier for WT/focus sequence in MSA (single-gene mode)')
+    parser.add_argument('-u', '--usage', help='Path to codon usage .p.gz file (optional; auto-built if missing)')
+    parser.add_argument('-wg', '--wt-gi', help='Identifier for WT/focus sequence in MSA (single-gene mode)')
 
     # Mutation inputs
     # --fasta was removed: its only informational job was to supply the WT ORF,
@@ -1100,18 +1131,18 @@ Copyright notice:
     # did (enumerating genes in directory mode) the MSA resolver does too.
     parser.add_argument('-m', '--mutations', required=True,
                         help='Mutations CSV file or directory of CSV files')
-    parser.add_argument('--validation-log', help='Validation log for filtering')
+    parser.add_argument('-vl', '--validation-log', help='Validation log for filtering')
 
     # Analysis parameters
     parser.add_argument('--window-size', '-L', type=int, default=15,
                         help='Sliding window width in codons (default: 15)')
-    parser.add_argument('--rare-model', choices=['no_norm', 'cmax_norm'], default='no_norm',
+    parser.add_argument('-rm', '--rare-model', choices=['no_norm', 'cmax_norm'], default='no_norm',
                         help='Rare codon definition model (default: no_norm)')
-    parser.add_argument('--rare-threshold', type=float, default=0.1,
+    parser.add_argument('-rt', '--rare-threshold', type=float, default=0.1,
                         help='Threshold for codon rarity (default: 0.1)')
-    parser.add_argument('--null-model', choices=['genome', 'eq', 'groups'], default='genome',
+    parser.add_argument('-nm', '--null-model', choices=['genome', 'eq', 'groups'], default='genome',
                         help='Null model for codon usage (default: genome)')
-    parser.add_argument('--reference-codon-usage',
+    parser.add_argument('-rcu', '--reference-codon-usage',
                         help='Genome-wide codon usage TSV defining which codons are rare '
                              '(columns: codon, amino_acid, count, relative_usage_within_aa). '
                              'Without it, "rare" is derived from the single gene under '

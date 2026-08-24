@@ -60,6 +60,7 @@ import pandas as pd
 # -------------------------------------------------------------------------
 HERE = os.path.dirname(os.path.abspath(__file__))
 from biofeaturefactory.lib.utility import (
+    discover_fasta_files,
     parse_piece_token,
     mint_pkey,
     piece_fields,
@@ -1603,9 +1604,14 @@ def _load_substrate_sequences(input_path: str) -> Dict[str, str]:
     miRNA interaction" for a gene that has plenty.
     """
     path = Path(input_path)
-    files = ([path] if path.is_file()
-             else sorted(f for f in path.iterdir()
-                         if f.suffix.lower() in (".fasta", ".fa", ".fna", ".faa")))
+    if path.is_file():
+        files = [path]
+    else:
+        # Per-gene layout first (<root>/<GENE>/fastas/), flat scan as fallback.
+        _disc = discover_fasta_files(str(path))
+        files = ([Path(p) for _, p in sorted(_disc.items())] if _disc
+                 else sorted(f for f in path.iterdir()
+                             if f.suffix.lower() in (".fasta", ".fa", ".fna", ".faa")))
     out: Dict[str, str] = {}
     for f in files:
         gene = (extract_gene_from_filename(str(f)) or f.stem).upper()
@@ -1636,15 +1642,15 @@ def main():
                         help="intron_premRNA_mapping_<GENE>.csv (file or directory). Intronic "
                              "variants are scanned against BOTH the intron record and the "
                              "pre_mRNA record.")
-    parser.add_argument("--strict-introns", action="store_true",
+    parser.add_argument("-si", "--strict-introns", action="store_true",
                         help="Pass miranda -strict (strict 5' seed pairing) for the intron and "
                              "pre_mRNA substrates only. WT and MUT always use the same setting.")
     # Performance
-    parser.add_argument("--no-parallel", action='store_true', help="disable parallel processing")
+    parser.add_argument("-np", "--no-parallel", action='store_true', help="disable parallel processing")
     parser.add_argument("--max-workers", type=int, help="maximum number of parallel workers")
-    parser.add_argument("--log", help="Validation log file or directory to skip failed mutations")
+    parser.add_argument("-l", "--log", help="Validation log file or directory to skip failed mutations")
     # WT header
-    parser.add_argument("--wt-header", default="transcript", help="Preferred WT FASTA header")
+    parser.add_argument("-wh", "--wt-header", default="transcript", help="Preferred WT FASTA header")
     args = parser.parse_args()
 
     # Validate miranda availability

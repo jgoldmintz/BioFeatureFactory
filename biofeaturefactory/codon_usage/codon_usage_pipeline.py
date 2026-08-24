@@ -22,6 +22,7 @@ import sys
 from pathlib import Path
 
 from biofeaturefactory.lib.utility import (
+    discover_fasta_files,
     read_fasta,
     mint_pkey,
     trim_muts,
@@ -496,9 +497,14 @@ def process_directory(fasta_dir, mutations_dir=None, validation_log=None, output
     results = []
     fasta_extensions = ['*.fasta', '*.fa', '*.fna']
 
-    fasta_files = []
-    for ext in fasta_extensions:
-        fasta_files.extend(Path(fasta_dir).glob(ext))
+    # Per-gene layout first (<root>/<GENE>/fastas/), flat glob as fallback.
+    _disc = discover_fasta_files(str(fasta_dir))
+    if _disc:
+        fasta_files = [Path(p) for _, p in sorted(_disc.items())]
+    else:
+        fasta_files = []
+        for ext in fasta_extensions:
+            fasta_files.extend(Path(fasta_dir).glob(ext))
 
     print(f"Found {len(fasta_files)} FASTA file(s) to process")
 
@@ -584,8 +590,8 @@ Metrics:
 
     # Input options
     parser.add_argument('-f', '--fasta', required=True, help='FASTA file or directory of FASTA files')
-    parser.add_argument('--mutations', help='Mutations CSV file or directory of CSV files')
-    parser.add_argument('--validation-log', help='Validation log for filtering failed mutations')
+    parser.add_argument('-m', '--mutations', help='Mutations CSV file or directory of CSV files')
+    parser.add_argument('-vl', '--validation-log', help='Validation log for filtering failed mutations')
 
     # Output options
     parser.add_argument('--output', '-o', required=True, help='Output base directory')
