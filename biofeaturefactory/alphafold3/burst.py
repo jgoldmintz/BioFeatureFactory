@@ -76,6 +76,7 @@ from biofeaturefactory.alphafold3.bin.burst_manifest import (
 )
 
 from biofeaturefactory.lib.utility import (
+    mint_pkey,
     Variant, _collect_failures_from_logs, extract_gene_from_filename,
     get_mutation_data_bioAccurate, load_mapping, parse_variant, read_fasta,
     splice_seq, subseq, trim_muts, write_tsv,
@@ -368,7 +369,8 @@ def _iterate_mutation(
     A mutation that yields nothing is appended to ``skipped`` carrying the
     qc_flag alphafold3_pipeline.py records for the same token.
     """
-    pkey = f"{gene_name}-{mutation}"
+    # {GENE}-{sha}, matching alphafold3_pipeline.py so burst rows join its output.
+    pkey = mint_pkey(gene_name, mutation)
     kind = ''
     delta_nt: str = ''
 

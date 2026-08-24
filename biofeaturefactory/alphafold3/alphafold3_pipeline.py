@@ -51,6 +51,7 @@ from biofeaturefactory.alphafold3.bin.binding_metrics import (
 )
 
 from biofeaturefactory.lib.utility import (
+    mint_pkey,
     read_fasta, trim_muts, get_mutation_data_bioAccurate,
     extract_gene_from_filename, subseq, load_mapping,
     _collect_failures_from_logs, write_tsv,
@@ -341,7 +342,9 @@ class AlphaFold3Pipeline:
         the coordinate lives in pre-mRNA space. Leaving them the same object for
         the transcript path keeps that path byte-identical.
         """
-        pkey = f"{gene_name}-{mutation}"
+        # {GENE}-{sha}. `mutation` is a verbatim token from trim_muts or the
+        # chromosome-mapping keys (:278-284); neither normalises.
+        pkey = mint_pkey(gene_name, mutation)
         token = coord_token if coord_token is not None else mutation
 
         # Parse mutation. parse_variant is length-aware and NEVER raises, so an
@@ -933,7 +936,7 @@ class AlphaFold3Pipeline:
         names why.
         """
         summary = aggregate_mutation_summary([])
-        summary['pkey'] = f"{gene}-{mutation}"
+        summary['pkey'] = mint_pkey(gene, mutation)
         summary['Gene'] = gene
         summary['qc_flags'] = qc_flag
         variant = parse_variant(mutation, is_nt=True)

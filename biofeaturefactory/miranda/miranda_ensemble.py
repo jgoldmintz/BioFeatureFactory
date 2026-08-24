@@ -1631,7 +1631,7 @@ def main():
                              "omit to use miranda from PATH (e.g. conda install -c bioconda miranda)")
     parser.add_argument("-d", "--mirna_db", required=True, help="path to mirna database")
     # Mapping
-    parser.add_argument("--mapping-dir", required=True, help="transcript mapping CSV/TSV file, or directory of CSV/TSV files")
+    parser.add_argument("-M", "--mapping-dir", required=True, help="transcript mapping CSV/TSV file, or directory of CSV/TSV files")
     parser.add_argument("--intron-premrna-mapping",
                         help="intron_premRNA_mapping_<GENE>.csv (file or directory). Intronic "
                              "variants are scanned against BOTH the intron record and the "

@@ -69,6 +69,7 @@ if not hasattr(collections, "Iterable"):
 from EVmutation.model import CouplingsModel
 import EVmutation.tools as ev_tools
 from biofeaturefactory.lib.utility import (
+    mint_pkey,
     codon_to_aa,
     discover_fasta_files,
     extract_gene_from_filename,
@@ -916,7 +917,9 @@ def score_nt_mutations(nt_mutations, gene, orf_seq, aa_lookup, failure_map=None,
         if should_skip_mutation(gene, nt_mut, failure_map):
             continue
 
-        pkey = f"{gene}-{nt_mut}"
+        # {GENE}-{sha}. nt_mut comes from trim_muts (:1261), which strips only
+        # '*' and whitespace, so it is the verbatim token variant_mapping hashed.
+        pkey = mint_pkey(gene, nt_mut)
         qc_flags = []
 
         m = nt_re.match(nt_mut)
@@ -1303,7 +1306,7 @@ def _process_gene(gene, fasta_file, mutations_file, model_params_path,
     # on pkey, and is indistinguishable from a mutation that was never submitted.
     # Every metric column stays EMPTY -- there is no site index to evaluate.
     intronic_rows = [
-        _blank_row(PROTEIN_FIELDNAMES, f"{gene}-{tok}", tok,
+        _blank_row(PROTEIN_FIELDNAMES, mint_pkey(gene, tok), tok,
                    ["NON_ORF_TOKEN:no_residue_or_codon_site_in_potts_model"])
         for tok in intronic
     ]
@@ -1422,9 +1425,9 @@ Examples:
 """,
     )
 
-    parser.add_argument("--fasta", required=True,
+    parser.add_argument("-f", "--fasta", required=True,
                         help="ORF FASTA file (single gene) or directory (multi-gene)")
-    parser.add_argument("--mutations", required=True,
+    parser.add_argument("-m", "--mutations", required=True,
                         help="Mutations CSV file or directory of per-gene CSVs")
 
     # Model params (file or directory; optional)

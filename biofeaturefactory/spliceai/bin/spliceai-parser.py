@@ -30,6 +30,7 @@ from pathlib import Path
 
 from biofeaturefactory.lib.utility import (
     _collect_failures_from_logs,
+    mint_pkey,
     Variant,
     canonical_token,
     load_mapping,
@@ -190,16 +191,153 @@ def build_notation_index(chromosome_mapping):
     return index
 
 
+# Longest run a single indel is allowed to walk left. A real tandem repeat in a
+# human transcript is tens of bases; this only stops a corrupt reference from
+# turning one lookup into a whole-contig scan.
+_MAX_LEFT_SHIFT = 1000
+
+
+class ReferenceBases:
+    """Single-base reads from the reference FASTA, opened lazily.
+
+    Exists only for left-alignment, and every failure path degrades to "no
+    reference": pysam missing, FASTA missing, no .fai, contig absent. Matching
+    then falls back to the exact and canonical tiers, i.e. to exactly the
+    behaviour that shipped before this tier existed. A reference that cannot be
+    read must not be able to turn a working run into a failing one.
+    """
+
+    def __init__(self, fasta_path):
+        self.path = fasta_path
+        self._fh = None
+        self._failed = False
+        self._warned_contigs = set()
+
+    def _open(self):
+        if self._fh is not None or self._failed:
+            return self._fh
+        try:
+            import pysam
+            self._fh = pysam.FastaFile(self.path)
+        except Exception as exc:                      # noqa: BLE001 - reported, not swallowed
+            print(f"[WARN] reference {self.path!r} unusable for left-alignment ({exc}); "
+                  f"indels join by representation only", file=sys.stderr)
+            self._failed = True
+            return None
+        return self._fh
+
+    @property
+    def available(self):
+        return self._open() is not None
+
+    def base(self, chrom, pos):
+        """Uppercase reference base at 1-based `pos` on `chrom`, or None."""
+        fh = self._open()
+        if fh is None or pos < 1:
+            return None
+        try:
+            seq = fh.fetch(chrom, pos - 1, pos)
+        except Exception:                             # noqa: BLE001 - contig absent / out of range
+            if chrom not in self._warned_contigs:
+                self._warned_contigs.add(chrom)
+                print(f"[WARN] contig {chrom!r} not readable from {self.path}; indels on it "
+                      f"join by representation only", file=sys.stderr)
+            return None
+        return seq.upper() if seq else None
+
+
+def minimal_repr(pos, ref, alt):
+    """Trim shared flank off BOTH ends, letting an allele become empty.
+
+    Deliberately different from canonical_token, which keeps a VCF-style anchor
+    base on a pure indel. That anchor is what stops two spellings of one event
+    from joining: the same deletion written anchor-left by the mapping
+    (AAAA70063453A) and written with one extra shared base by the VCF
+    (TAAAA70063452TA) reduce to different strings under canonical_token and to
+    the same (70063453, 'AAA', '') here. Dropping the anchor gives a pure indel
+    exactly one spelling per placement, which is what makes the placement fix
+    below the only remaining variable.
+    """
+    pos = int(pos)
+    while ref and alt and ref[-1] == alt[-1]:
+        ref, alt = ref[:-1], alt[:-1]
+    while ref and alt and ref[0] == alt[0]:
+        ref, alt = ref[1:], alt[1:]
+        pos += 1
+    return pos, ref, alt
+
+
+def left_align(pos, ref, alt, chrom, refbases):
+    """Shift a pure indel as far left as the reference allows.
+
+    Trimming representation is not enough on its own. Deleting AAA at 70063453
+    and deleting AAA at 70063452 out of the same A-run are the same deletion,
+    and nothing but the reference sequence can say so -- which is the LIMIT
+    build_notation_index's docstring names and this function removes, now that
+    main.nf hands the parser the same FASTA it hands SpliceAI.
+
+    Substitutions and MNVs keep a fixed position and are returned trimmed only.
+    """
+    pos, ref, alt = minimal_repr(pos, ref, alt)
+    if (ref and alt) or (not ref and not alt):
+        return pos, ref, alt
+    if refbases is None:
+        return pos, ref, alt
+
+    indel = ref or alt
+    is_deletion = bool(ref)
+    for _ in range(_MAX_LEFT_SHIFT):
+        if pos <= 1:
+            break
+        prev = refbases.base(chrom, pos - 1)
+        if prev is None or prev != indel[-1]:
+            break
+        indel = prev + indel[:-1]
+        pos -= 1
+    return (pos, indel, '') if is_deletion else (pos, '', indel)
+
+
+def left_align_key(pos, ref, alt, chrom, refbases):
+    """Placement- and representation-independent join key, or None.
+
+    None for a no-op record (ref == alt after trimming) so that every such
+    record does not collide into one shared bucket and resolve to each other.
+    """
+    p, r, a = left_align(pos, ref, alt, chrom, refbases)
+    if not r and not a:
+        return None
+    return f"{r}|{p}|{a}"
+
+
+def build_left_align_index(chromosome_mapping, chrom, refbases):
+    """left-aligned key -> list of transcript mutation IDs.
+
+    Built once per (VCF, contig) by parse_spliceai_vcf, for the same reason
+    build_notation_index is: resolution runs once per (variant x SpliceAI block).
+    """
+    index = {}
+    for mutant, cn in chromosome_mapping.items():
+        v = parse_variant(cn, is_nt=True)
+        if v is None:
+            continue
+        key = left_align_key(v.pos, v.ref, v.alt, chrom, refbases)
+        if key is None:
+            continue
+        index.setdefault(key, []).append(mutant)
+    return index
+
+
 def resolve_pkey(pos, ref, alt, gene_context, chromosome_mapping, transcript_mapping,
-                 skip_mutations=None, notation_index=None):
+                 skip_mutations=None, notation_index=None, chrom=None,
+                 refbases=None, left_align_index=None):
     """Resolve a VCF record to a BFF pkey AND name the outcome.
 
     Returns (pkey_or_None, mode). mode is one of:
         'exact'                 matched a chromosome_mapping value verbatim
         'canonical'             matched only after representation normalization
+        'left_aligned'          matched only after reference left-alignment
         'no_chromosome_match'   genomic notation absent from chromosome_mapping
         'skip_listed'           matched, but every candidate is on the skip-list
-        'no_orf_id'             matched, but transcript_mapping has no ORF label
         'no_gene_context'       resolved, but the VCF header named no gene
 
     The mode is the point: a dropped record used to be indistinguishable from a
@@ -224,6 +362,20 @@ def resolve_pkey(pos, ref, alt, gene_context, chromosome_mapping, transcript_map
                 notation_index = build_notation_index(chromosome_mapping)
             candidates = list(notation_index.get(canonical_token(variant), ()))
             mode = 'canonical'
+    # Third tier. canonical_token normalizes REPRESENTATION but not PLACEMENT,
+    # so an indel inside a tandem repeat still misses when producer and consumer
+    # placed it differently. Measured on SMN2 before this tier: 2 of 6 indels
+    # dropped (TAAAA70063452TA vs AAAA70063453A in an A-run, AG70067059AGAGG vs
+    # G70067060GAGG in an AGAGG repeat), both correct spellings of one event.
+    # Runs only when a readable reference was supplied, and only after the two
+    # cheaper tiers miss, so nothing that resolved before resolves differently.
+    if not candidates and left_align_index is not None:
+        variant = as_variant(pos, ref, alt)
+        if variant is not None:
+            key = left_align_key(variant.pos, variant.ref, variant.alt, chrom, refbases)
+            if key is not None:
+                candidates = list(left_align_index.get(key, ()))
+                mode = 'left_aligned'
     if not candidates:
         return None, 'no_chromosome_match'
 
@@ -240,14 +392,26 @@ def resolve_pkey(pos, ref, alt, gene_context, chromosome_mapping, transcript_map
         print(f"[WARN] {chromosome_notation}: {len(candidates)} transcript keys share this "
               f"genomic notation; ORF label from '{transcript_mutation_id}'", file=sys.stderr)
 
-    # Step 3: Look up ORF mutation ID
-    orf_mutation_id = transcript_mapping.get(transcript_mutation_id)
-    if not orf_mutation_id:
-        return None, 'no_orf_id'
+    # Step 3: mint the pkey from the token we already have.
+    #
+    # transcript_mutation_id IS the verbatim ORF token: chromosome_mapping's KEYS
+    # come from variant_mapping's `mutant` column, which is what mint_pkey hashed.
+    # The previous code did transcript_mapping.get(...) and called the result
+    # `orf_mutation_id`, but that mapping's VALUES are TRANSCRIPT notation -- a
+    # different coordinate space, off by the 5'UTR. Measured on SMN2:
+    #     chromosome_mapping['T840C'] = 'T70076526C'
+    #     transcript_mapping['T840C'] = 'T857C'     <- what was used
+    #     correct pkey                = SMN2-b8401368675d = mint_pkey('SMN2','T840C')
+    # so every row was keyed 'SMN2-T857C': wrong space AND wrong format, joining
+    # to nothing.
+    #
+    # transcript_mapping is no longer consulted here. It also only carries the
+    # ORF-space subset (38 of 46 tokens for SMN2), so the 8 intronic tokens used
+    # to die on 'no_orf_id' despite having a perfectly derivable pkey.
     if not gene_context:
         return None, 'no_gene_context'
 
-    return f"{gene_context}-{orf_mutation_id}", mode
+    return mint_pkey(gene_context, transcript_mutation_id), mode
 
 
 def generate_pkey_with_mapping(pos, ref, alt, gene_context, chromosome_mapping, transcript_mapping, skip_mutations=None):
@@ -286,7 +450,9 @@ def variant_qc_flags(record_ref, record_alt, allele, match_mode):
         ones. A consumer that does not know the row is an indel will read them
         as if it were.
       * whether this row is one allele of a multi-allelic record, and which.
-      * whether the pkey was reached by exact or normalized matching.
+      * whether the pkey was reached by exact, normalized, or left-aligned
+        matching -- a left-aligned row is the SAME event as the mapping row it
+        joined to, placed differently inside a repeat by producer and consumer.
 
     'PASS' means plain bi-allelic SNV, exact key match -- the only case that
     needed no qualification before this column existed.
@@ -304,8 +470,8 @@ def variant_qc_flags(record_ref, record_alt, allele, match_mode):
             flags.append(f"length_delta:{variant.length_delta:+d}nt")
     if allele != record_alt:
         flags.append(f"MULTIALLELIC:allele_{allele}_of_{record_alt}")
-    if match_mode == 'canonical':
-        flags.append('PKEY_MATCH:canonical')
+    if match_mode in ('canonical', 'left_aligned'):
+        flags.append(f'PKEY_MATCH:{match_mode}')
     return ';'.join(flags) if flags else 'PASS'
 
 def parse_vcf_header(vcf_file):
@@ -340,6 +506,7 @@ def parse_spliceai_vcf(
     transcript_mapping_file=None,
     threshold=0.0,
     failure_log=None,
+    reference_fasta=None,
 ):
     """
     Parse SpliceAI VCF file and extract predictions above threshold.
@@ -351,6 +518,8 @@ def parse_spliceai_vcf(
         transcript_mapping_file (str): Path to transcript mapping file
         threshold (float): Minimum delta score threshold
         failure_log (str): Optional validation log used to filter failed mutations
+        reference_fasta (str): Optional reference FASTA (needs a .fai). Enables the
+            left-alignment tier for indels; without it that tier is skipped.
 
     Returns:
         tuple: (success_bool, processed_count, predictions_count)
@@ -402,6 +571,13 @@ def parse_spliceai_vcf(
         # Canonical index of the mapping's genomic notations, built once per VCF
         # and consulted only when exact matching fails (see build_notation_index).
         notation_index = build_notation_index(chromosome_mapping)
+        # Left-alignment is per-contig (a key is only meaningful against one
+        # sequence), and the contig is not known until a record is read, so the
+        # index is built on first sight of each contig rather than up front.
+        refbases = ReferenceBases(reference_fasta) if reference_fasta else None
+        left_align_index = None
+        left_align_chrom = None
+        match_modes = {}
 
         with open(vcf_file, 'r') as f:
             for line_num, line in enumerate(f, 1):
@@ -427,6 +603,11 @@ def parse_spliceai_vcf(
 
                 chrom, pos, variant_id, ref, alt, qual, filter_field, info = fields[:8]
                 processed_count += 1
+
+                if refbases is not None and chrom != left_align_chrom:
+                    left_align_index = build_left_align_index(
+                        chromosome_mapping, chrom, refbases)
+                    left_align_chrom = chrom
 
                 # Parse SpliceAI INFO field
                 spliceai_calls = parse_spliceai_entries(info, block_stats)
@@ -485,7 +666,11 @@ def parse_spliceai_vcf(
                         transcript_mapping,
                         skip_set,
                         notation_index,
+                        chrom,
+                        refbases,
+                        left_align_index,
                     )
+                    match_modes[mode] = match_modes.get(mode, 0) + 1
 
                     if not pkey:
                         # Counted skip with a NAMED reason, per drop class, and
@@ -592,6 +777,14 @@ def parse_spliceai_vcf(
                   f"{dropped_unmapped} unmapped — the mapping file almost certainly does not match this VCF.",
                   file=sys.stderr)
 
+        if match_modes.get('left_aligned'):
+            print(f"[INFO] {vcf_file}: {match_modes['left_aligned']} (record x block) pairs joined "
+                  f"only after reference left-alignment; without --reference they would have been "
+                  f"dropped as no_chromosome_match", file=sys.stderr)
+        if reference_fasta and (refbases is None or not refbases.available):
+            print(f"[WARN] {vcf_file}: --reference was supplied but is not readable; the "
+                  f"left-alignment tier did not run", file=sys.stderr)
+
         print(f"Processed {processed_count} variants, found {len(predictions)} predictions above threshold {threshold}")
         return True, processed_count, len(predictions)
 
@@ -616,6 +809,11 @@ def main():
     parser.add_argument("--chromosome-mapping", help="Path to chromosome mapping file (mutations/combined/chromosome/combined_GENE.csv)")
     parser.add_argument("--transcript-mapping", help="Path to transcript mapping file (mutations/combined/transcript/combined_GENE.csv)")
     parser.add_argument("--log", help="Path to validation log (or directory of logs) used to filter failed mutations")
+    parser.add_argument("-r", "--reference",
+                        help="Reference FASTA (needs a .fai alongside it). Enables indel "
+                             "left-alignment so that a mapping and a VCF that placed the same "
+                             "indel differently inside a tandem repeat still join. Omit it and "
+                             "those records drop as no_chromosome_match.")
     parser.add_argument("-t", "--threshold", type=float, default=0.0,
                         help="Minimum delta score threshold (default: 0.0)")
 
@@ -639,6 +837,7 @@ def main():
         args.transcript_mapping,
         args.threshold,
         args.log,
+        args.reference,
     )
 
     if success:

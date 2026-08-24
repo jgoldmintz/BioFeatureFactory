@@ -41,6 +41,7 @@ from typing import Dict, Optional, Tuple
 from Bio.Seq import Seq
 
 from biofeaturefactory.lib.primitives import (
+    mint_pkey,
     ExtractGeneFromFASTA,
     extract_mutation_from_sequence_name,
     get_mutation_data_bioAccurate,
@@ -235,6 +236,18 @@ def process_single_mutation_for_sequence(seq_name, predictions, mapping_dict, is
     if mutation_id is None:
         return []
 
+    # Sequence names are {GENE}-{sha} now, so what comes back is the DIGEST, not
+    # the token -- and mapping_dict is keyed by the verbatim token, so the lookup
+    # below missed on every sequence and this function returned [] for all of
+    # them. No new parameter is needed: mapping_dict already holds the tokens, so
+    # mint each and match the digest. A {GENE}-{token} name still hits the direct
+    # lookup first and never reaches this.
+    if mutation_id not in mapping_dict:
+        for _tok in mapping_dict:
+            if mint_pkey(gene, _tok).rsplit('-', 1)[-1] == mutation_id:
+                mutation_id = _tok
+                break
+
     # Look up this mutation in the mapping
     if mutation_id not in mapping_dict:
         return []
@@ -268,8 +281,10 @@ def process_single_mutation_for_sequence(seq_name, predictions, mapping_dict, is
 
         # Check if this prediction matches the mutation position and amino acid
         if pred_pos == aa_pos and pred_aa == target_aa:
-            # Create pkey for this match
-            pkey = f"{gene}-{mutation_id}"
+            # Create pkey for this match. mutation_id is the VERBATIM token by
+            # this point (resolved above), so minting reproduces exactly the pkey
+            # variant_mapping wrote.
+            pkey = mint_pkey(gene, mutation_id)
 
             # Add pkey and fix Gene field to prediction
             result_pred = pred.copy()

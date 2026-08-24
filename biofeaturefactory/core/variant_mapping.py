@@ -1273,7 +1273,19 @@ def main(argv=None):
     do_premrna = not args.exclude_premrna
 
     capture_verbose = args.verbose
-    verbose_log: list[str] | None = [] if capture_verbose else None
+    # ALWAYS a list. This used to be None without --verbose, and since every
+    # append site is guarded by `if verbose_log is not None`, that switched off
+    # the recording of FAILURES as well as detail -- a mutation that failed to
+    # map left no record anywhere. Measured on TERT: two promoter variants
+    # outside the transcript bounds produced "dropped in mapping: 2" in the
+    # grand totals, no per-gene log, and no naming of either token; the same run
+    # with --verbose named both with their exact bounds:
+    #   "ch.G1295134A dropped during mapping [nt] (REF span genomic
+    #    1295134-1295134 falls outside the transcript bounds 1253167-1295068)"
+    # A failed mutation is a failure whether or not the caller asked for
+    # chatter, so the flag now gates only whether the log is WRITTEN on a run
+    # that had nothing go wrong.
+    verbose_log: list[str] = []
     gene_log_slices: dict[str, list[str]] = {}
     gene_metrics = {
         "total_genes": 0,
@@ -1321,6 +1333,10 @@ def main(argv=None):
     for f in files:
         gene: str | None = None
         muts: list[str] = []
+        # Set once every mapping CSV for this gene is on disk. Everything after
+        # that point is bookkeeping, so an exception raised there must not be
+        # allowed to report the gene's mutations as failed (see the handler).
+        outputs_written = False
         try:
             gene = extract_gene_from_filename(str(f))
             print(f"\n== {gene} ==")
@@ -1550,9 +1566,25 @@ def main(argv=None):
                            [{"pkey": pkey_of[t], "mutant": t} for t in muts])
             print(f"  Pkey mapping: {pkey_csv}  ({len(muts)} rows)")
 
+            outputs_written = True
+
             mut_dest = gene_out(output, gene, "mappings", "mutations", f"{gene}_mutations.csv")
-            shutil.copy2(f, mut_dest)
-            print(f"  Mutations copy: {mut_dest}")
+            # `f` IS mut_dest whenever the input already lives in the canonical
+            # output layout -- which is the layout this pipeline itself writes,
+            # so re-running it on its own output raised
+            #     SameFileError: '<G>/mappings/mutations/<G>_mutations.csv' and
+            #                    '<G>/mappings/mutations/<G>_mutations.csv'
+            #                    are the same file
+            # from the LAST statement of the gene, after all six mapping CSVs had
+            # already been written. Measured on PAM: every mapping file correct on
+            # disk, and validation_20260823_233651.log still read "all 2
+            # mutation(s) marked as failed". Skipping is correct rather than a
+            # workaround -- the destination already holds the exact bytes.
+            if mut_dest.exists() and os.path.samefile(f, mut_dest):
+                print(f"  Mutations copy: {mut_dest} (input already in place)")
+            else:
+                shutil.copy2(f, mut_dest)
+                print(f"  Mutations copy: {mut_dest}")
             total_mut = len(muts)
             # A mutation dropped in mapping produced no nt row at all, so it is
             # a failure regardless of whether ORF validation flagged it. Counting
@@ -1584,6 +1616,28 @@ def main(argv=None):
             gene_metrics["passed_genes"] += 1
         except Exception as e:
             fail_msg = str(e)
+            # An exception AFTER every mapping CSV was written is a bookkeeping
+            # failure, not a mapping failure, and reporting it as the latter is
+            # what made a complete PAM run read as a total loss. The old handler
+            # asked only "did something throw", never "how far did the gene get",
+            # so `failed_mutations += len(muts)` fired unconditionally. Anything
+            # that throws here now names itself as post-output and leaves the
+            # mutation counts alone; the gene still reports the error, and the
+            # rows are on disk to be checked against it.
+            if outputs_written:
+                print(f"  WARNING (after outputs written): {fail_msg}", file=sys.stderr)
+                if verbose_log is not None:
+                    label = gene or extract_gene_from_filename(str(f)) or f.name
+                    verbose_log.append(
+                        f"{label}: all mapping outputs written; post-output step failed "
+                        f"('{fail_msg}'). Mutations are NOT affected."
+                    )
+                ok += 1
+                gene_metrics["passed_genes"] += 1
+                if isinstance(muts, list) and muts:
+                    gene_metrics["total_mutations"] += len(muts)
+                    gene_metrics["passed_mutations"] += len(muts)
+                continue
             fail.append((f.name, fail_msg))
             print(f"  ERROR: {fail_msg}", file=sys.stderr)
             gene_metrics["failed_genes"] += 1
@@ -1617,7 +1671,17 @@ def main(argv=None):
         for name, msg in fail:
             print(f"  - {name}: {msg}")
 
-    if verbose_log:
+    # Written when the caller asked for it, OR whenever anything failed. A clean
+    # run without --verbose still writes nothing, so the flag keeps its meaning
+    # for the success path; what it can no longer do is suppress the record of a
+    # failure. The whole collected slice is written rather than a filtered
+    # failures-only subset: the surrounding detail is what makes a drop
+    # diagnosable, and selecting "failure lines" would mean string-matching
+    # message text, which silently stops working the moment a message is reworded.
+    any_failure = (bool(fail)
+                   or gene_metrics["failed_mutations"] > 0
+                   or gene_metrics["failed_genes"] > 0)
+    if verbose_log and (capture_verbose or any_failure):
         from datetime import datetime
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         # One log PER GENE, under that gene's directory, so the whole output
@@ -1631,7 +1695,9 @@ def main(argv=None):
             try:
                 with open(log_path, "w") as log_file:
                     log_file.write("\n".join(_lines) + "\n")
-                print(f"Verbose validation log written to {log_path}")
+                print(f"Validation log written to {log_path}"
+                      + ("" if capture_verbose
+                         else "  (failures present; written without --verbose)"))
             except Exception as exc:
                 print(f"Warning: Unable to write verbose log for {_gene} ({exc})",
                       file=sys.stderr)

@@ -70,11 +70,18 @@ from biofeaturefactory.lib.utility import (
     codon_to_aa,
     discover_fasta_files,
     extract_gene_from_filename,
+    format_aa_token,
     load_validation_failures,
+    mint_pkey,
     mutation_class,
+    parse_variant,
+    protein_consequence,
     read_fasta,
     should_skip_mutation,
+    splice_seq,
+    split_intronic_tokens,
     trim_muts,
+    warn_intronic_unsupported,
     write_tsv,
 )
 
@@ -358,17 +365,44 @@ def train_adabmdca_pseudolikelihood_in_process(
     dtype_str: str = "float32",
     seed: int = 0,
     quiet: bool = False,
+    tol: float = 1e-3,
+    patience: int = 3,
+    check_every: int = 10,
 ) -> str:
     """
     Train an adabmDCA Potts model by pseudolikelihood maximization.
 
     Parameters mirror Ekeberg 2013 / Hopf 2017 / plmc conventions:
       lambda_h, lambda_J: L2 regularization strengths on h and J.
-      nepochs: number of gradient steps (plmc default: 500).
+      nepochs: MAXIMUM number of gradient steps (plmc default: 500). The loop
+               stops earlier when the convergence test below fires; nepochs is a
+               ceiling, not a target.
       lr: learning rate for plain SGD on h and J.
       chunk_size: positions processed per j-loop chunk in the J gradient
                   accumulator. Larger = faster but more peak intermediate
                   memory (4 × L × q × chunk × q × 4 bytes float32).
+      tol, patience, check_every: convergence test. Every `check_every` epochs,
+                  ||grad|| is compared against its value at the first check;
+                  when the ratio stays below `tol` for `patience` consecutive
+                  checks the loop breaks. tol=0 disables the test.
+
+    Convergence: the Boltzmann routines in adabmDCApy self-terminate at
+    `target_pearson` (default 0.95), but this pseudolikelihood loop is BFF's own
+    reimplementation -- adabmDCApy has no pseudolikelihood routine -- and it ran
+    a fixed epoch count with no stopping rule. ||grad|| was already computed at
+    the print site and thrown away, so "did 500 epochs converge?" was
+    unanswerable by construction. It is now measured.
+
+    The test is RELATIVE to the first checked gradient norm, not absolute: the
+    norm scales with L, q and the sequence weights, so any fixed threshold would
+    mean something different for every gene. Ratio-to-initial is scale-free and
+    comparable across the panel.
+
+    This matters most on rented hardware. `--adabmdca-nepochs` defaults to 50000
+    (a Boltzmann-sized number; this function's own signature default is 500), and
+    at codon scale the per-epoch cost is the L²q² gradient einsum below, so the
+    difference between stopping at convergence and running the ceiling is the
+    difference between a run and days of billed compute.
 
     Writes the trained params to output_params_path in adabmDCApy text format.
     Returns that path.
@@ -461,6 +495,11 @@ def train_adabmdca_pseudolikelihood_in_process(
     #       to a new tensor each j-step.
     grad_J = torch.zeros_like(J)
     grad_h = torch.zeros_like(h)
+    # Convergence bookkeeping (see the docstring's Convergence note).
+    grad_norm_0 = None      # ||grad|| at the first checked epoch = the baseline
+    below = 0               # consecutive checks under tol
+    stopped_at = None       # epoch the loop broke at, None if it ran to nepochs
+    history = []            # [(epoch, ||grad||)] at each check, for the caller's log
     # Pre-allocate the (B, L, q) E buffer once and reuse via copy_().
     E = torch.empty(B, L, q, device=device, dtype=dtype)
     try:
@@ -544,10 +583,53 @@ def train_adabmdca_pseudolikelihood_in_process(
                 J.mul_(1.0 - lr * lambda_J).add_(grad_J, alpha=lr)
                 J[L_idx, :, L_idx, :] = 0.0  # keep diagonal at zero after the update
 
-                if not quiet and (epoch % 25 == 0 or epoch == nepochs - 1):
+                # ----- Convergence test -----
+                # Evaluated on a schedule, not every epoch: ||grad|| is a reduction
+                # over the full (L,q,L,q) tensor, which is cheap next to the epoch's
+                # einsum but not free at codon scale. check_every amortises it.
+                is_check = (tol > 0 and (epoch % check_every == 0 or epoch == nepochs - 1))
+                grad_norm = None
+                if is_check or (not quiet and epoch % 25 == 0):
                     grad_norm = (grad_h.norm() + grad_J.norm()).item()
+                if not quiet and (epoch % 25 == 0 or epoch == nepochs - 1):
+                    if grad_norm is None:
+                        grad_norm = (grad_h.norm() + grad_J.norm()).item()
+                    ratio = "" if grad_norm_0 is None else f", ||grad||/||grad||_0 = {grad_norm / grad_norm_0:.3e}"
                     print(f"    epoch {epoch:4d}: PL = {PL.item():.4f}, "
-                          f"||grad|| = {grad_norm:.4e}")
+                          f"||grad|| = {grad_norm:.4e}{ratio}")
+                if is_check:
+                    if grad_norm_0 is None:
+                        grad_norm_0 = grad_norm
+                    # PLATEAU detector, not ratio-to-initial. Measured on a toy MSA,
+                    # ||grad|| under this plain-SGD update decays roughly as
+                    # 1/sqrt(epoch): 1.46 -> 0.36 over 400 epochs, i.e. ratio-to-initial
+                    # 0.78 @25, 0.49 @100, 0.34 @200, 0.25 @400. Reaching 1e-3 OF THE
+                    # INITIAL NORM would take ~1e5-1e6 epochs, so an absolute-ratio test
+                    # can never fire and the early stop would be decorative.
+                    # What "converged" actually means here is that the norm has stopped
+                    # moving, so the test is the RELATIVE DECREASE PER CHECK.
+                    rel_drop = None
+                    if history:
+                        prev = history[-1][1]
+                        if prev > 0:
+                            rel_drop = (prev - grad_norm) / prev
+                    history.append((epoch, grad_norm))
+                    if rel_drop is not None and rel_drop < tol:
+                        below += 1
+                        if below >= patience:
+                            stopped_at = epoch
+                            if not quiet:
+                                print(f"    converged: ||grad|| improved <{tol:.1e} per "
+                                      f"{check_every} epochs for {patience} consecutive "
+                                      f"checks; stopping at epoch {epoch} of {nepochs} "
+                                      f"(||grad||/||grad||_0 = {grad_norm / grad_norm_0:.3e})")
+                            del wdiff
+                            break
+                    else:
+                        # Reset on any excursion -- patience counts CONSECUTIVE checks, so
+                        # a single noisy plateau cannot end the run early. rel_drop < 0
+                        # (the norm went UP) also resets rather than counting.
+                        below = 0
                 del wdiff
     except RuntimeError as e:
         # Same OOM hint pattern as the Boltzmann path. If pseudolikelihood
@@ -567,6 +649,27 @@ def train_adabmdca_pseudolikelihood_in_process(
             f"  Original error: {e}"
         ) from e
 
+    if not quiet:
+        if tol <= 0:
+            print(f"    epochs run: {nepochs} of {nepochs} (early stopping disabled, tol=0)")
+        elif stopped_at is None:
+            # Ran the ceiling without the test firing. Say so explicitly: it means the
+            # model is STILL DESCENDING at the ceiling, which is exactly the thing the
+            # fixed-epoch loop could not tell you. Report the observed decay so the
+            # next run can be sized from data instead of guessed.
+            last_drop = ""
+            if len(history) >= 2 and history[-2][1] > 0:
+                d = (history[-2][1] - history[-1][1]) / history[-2][1]
+                last_drop = f", last decrease {d:.2e} per {check_every} epochs (tol={tol:.1e})"
+            ratio = f", ||grad||/||grad||_0 = {history[-1][1] / grad_norm_0:.3e}" \
+                    if history and grad_norm_0 else ""
+            print(f"    NOT converged: ran all {nepochs} epochs and ||grad|| was still "
+                  f"descending{ratio}{last_drop}. Raise --adabmdca-nepochs, or loosen "
+                  f"--adabmdca-tol if this decrease is small enough for your purpose.")
+        else:
+            print(f"    epochs run: {stopped_at + 1} of {nepochs} "
+                  f"({(nepochs - stopped_at - 1) / nepochs:.0%} of the ceiling saved)")
+
     # 6. Save the trained params to disk in adabmDCApy text format so the
     # downstream scoring step can load them the same way as the Boltzmann path.
     final_params = {"bias": h, "coupling_matrix": J}
@@ -578,7 +681,8 @@ def train_adabmdca_pseudolikelihood_in_process(
 # adabmDCApy text-format params loader (numpy-only, no torch dependency)
 # ---------------------------------------------------------------------------
 
-def load_adabmdca_params(path: str, alphabet: str) -> Tuple[np.ndarray, np.ndarray]:
+def load_adabmdca_params(path: str, alphabet: str,
+                         dtype: np.dtype = np.float32) -> Tuple[np.ndarray, np.ndarray]:
     """
     Parse adabmDCApy text-format params.
 
@@ -587,8 +691,39 @@ def load_adabmdca_params(path: str, alphabet: str) -> Tuple[np.ndarray, np.ndarr
       'h idx aa value'
 
     Returns:
-      h: (L, q) float64 array
-      J: (L, q, L, q) float64 array (symmetrized)
+      h: (L, q) array
+      J: (L, q, L, q) array (symmetrized)
+
+    MEMORY. J is dense (L, L, q, q) and that is the whole cost of this function:
+
+        gene          L     q   one J    old peak   this peak
+        SMN2 codon   294    64   2.6 G      5.3 G       1.3 G
+        F9   codon   461    64   6.5 G     13.0 G       3.2 G
+        PAM  codon   974    64  29.0 G     57.9 G      14.5 G
+        BRCA1 codon 1863    64 105.9 G    211.8 G      53.0 G
+        BRCA1 aa    1863    21  11.4 G     22.8 G       5.7 G
+
+    Two changes get that 4x:
+
+    1. The symmetrization used to be `J = J + J.transpose(1, 0, 3, 2)`, which
+       allocates a SECOND full-size array before the first is released -- peak
+       2x, for an operation that writes each value exactly once. The mirrored
+       write below fills both halves in the record loop instead, so peak is 1x.
+       Exact for the documented format: entries are strictly upper-triangular
+       (i < j), so `J[i,j,a,b] = v; J[j,i,b,a] = v` and "assign upper, then add
+       the transpose" produce the same array -- the transpose contributes 0 to
+       the upper half and v to the lower.
+    2. float32 rather than float64. These are DCA couplings consumed by
+       _delta_hamiltonian_multi as a sum of differences; float64 was never a
+       precision requirement, and params.adabmdca_dtype in bin/main.nf already
+       defaults the TRAINING side to float32. Pass dtype=np.float64 to restore
+       the old precision.
+
+    NOT fixed here: J is still materialized in full. _delta_hamiltonian_multi
+    only ever touches rows for mutated positions, so streaming straight from
+    j_records would make this O(mutated sites) instead of O(L^2 q^2) and is what
+    a codon-alphabet BRCA1 actually needs. That is a change to the scoring path,
+    not to this loader.
     """
     token_to_idx = {ch: i for i, ch in enumerate(alphabet)}
     q = len(alphabet)
@@ -624,17 +759,19 @@ def load_adabmdca_params(path: str, alphabet: str) -> Tuple[np.ndarray, np.ndarr
     if j_records:
         L = max(L, max(rec[0] for rec in j_records) + 1, max(rec[1] for rec in j_records) + 1)
 
-    h = np.zeros((L, q), dtype=np.float64)
+    h = np.zeros((L, q), dtype=dtype)
     for idx, ai, val in h_records:
         h[idx, ai] = val
 
-    J = np.zeros((L, L, q, q), dtype=np.float64)
+    # Mirrored write, not assign-then-add-transpose: see MEMORY in the docstring.
+    J = np.zeros((L, L, q, q), dtype=dtype)
     for i, j, ai, bj, val in j_records:
         J[i, j, ai, bj] = val
-    # Upper-triangular only is saved; symmetrize so J[j,i,b,a] = J[i,j,a,b]
-    J = J + J.transpose(1, 0, 3, 2)
+        J[j, i, bj, ai] = val
 
-    # Reorganize to (L, q, L, q) — matches EVmutation's J_ij[i, a, j, b] layout
+    # Reorganize to (L, q, L, q) — matches EVmutation's J_ij[i, a, j, b] layout.
+    # transpose returns a VIEW, so this costs nothing; the copy happens later in
+    # apply_zero_sum_gauge, which is the other place peak memory is set.
     J = J.transpose(0, 2, 1, 3)
 
     return h, J
@@ -841,6 +978,399 @@ def aa_symbol(aa: str) -> str:
     return "*" if aa == "Stop" else aa
 
 
+# ---------------------------------------------------------------------------
+# Multi-site Hamiltonian
+# ---------------------------------------------------------------------------
+
+class ModelContext:
+    """Everything needed to evaluate the Hamiltonian at arbitrary sites.
+
+    build_lookup already computes all of this and used to discard it: the
+    builders returned `[0]`, keeping only the single-mutant dict, so a change
+    spanning more than one site had no key and could never acquire one. This
+    carries the arrays forward instead.
+
+    Fields:
+      h, J           zero-sum-gauged parameters. J is (L, q, L, q) indexed
+                     J[i, a, j, b] -- the same layout EVmutation's CouplingsModel
+                     uses, which is why _delta_hamiltonian_multi ports across with
+                     only the index lookup changed.
+      pos_to_col     1-based sequence position -> alignment column. The inverse of
+                     build_lookup's col_to_seq. Alignment columns are NOT sequence
+                     positions whenever the focus row carries a gap, and handing a
+                     position straight to J silently evaluates a different site.
+      wt_idx_per_col alphabet index of the focus symbol at each column, i.e. the
+                     wild-type background the deltas are taken against.
+      column_freqs   (L, q) non-gap column frequencies, for the frequency column.
+      alphabet       symbol order; index 0 is the gap in both BFF alphabets.
+    """
+
+    __slots__ = ("h", "J", "pos_to_col", "wt_idx_per_col", "column_freqs", "alphabet")
+
+    def __init__(self, h, J, col_to_seq, wt_idx_per_col, column_freqs, alphabet):
+        self.h = h
+        self.J = J
+        self.pos_to_col = {sp: col for col, sp in col_to_seq.items()}
+        self.wt_idx_per_col = wt_idx_per_col
+        self.column_freqs = column_freqs
+        self.alphabet = alphabet
+
+
+def _delta_hamiltonian_multi(ctx: ModelContext, plan) -> Tuple[float, float, float]:
+    """Delta statistical energy for SIMULTANEOUS substitutions at several sites.
+
+    plan is [(seq_pos, wt_symbol, mut_symbol), ...] in 1-based sequence positions.
+    Returns (epistatic, independent, pairwise) where
+        independent = sum_m [ h_i(b_m) - h_i(a_m) ]
+        epistatic   = independent + the coupling terms below
+        pairwise    = epistatic - independent
+
+    Same arithmetic as evmutation_pipeline._delta_hamiltonian_multi, which in turn
+    reproduces the vendored CouplingsModel: for each moved site, the coupling delta
+    is taken against the WILD-TYPE background at every other site, then pairs where
+    BOTH sites moved are corrected -- remove the double count and re-add the
+    coupling in the new background. Without that correction a two-site change is
+    not the same as two one-site changes evaluated independently, which is the
+    entire reason a multi-site evaluator is needed rather than summing lookups.
+
+    Raises KeyError for a position outside the model or a symbol outside the
+    alphabet; ValueError when the model's own focus symbol disagrees with the ORF.
+    """
+    token_to_idx = {ch: i for i, ch in enumerate(ctx.alphabet)}
+    L = ctx.h.shape[0]
+    wt = ctx.wt_idx_per_col
+
+    cols, muts = [], []
+    for pos, wt_symbol, mut_symbol in plan:
+        col = ctx.pos_to_col[pos]                 # KeyError => not in model
+        b = token_to_idx[mut_symbol]              # KeyError => not in alphabet
+        a = token_to_idx[wt_symbol]
+        if wt[col] != a:
+            raise ValueError(
+                f"model column {col} (seq pos {pos}) carries "
+                f"{ctx.alphabet[wt[col]]!r}, ORF declares {wt_symbol!r}")
+        cols.append(col)
+        muts.append(b)
+
+    all_j = np.arange(L)
+    delta_h = 0.0
+    delta_J = 0.0
+    for m, (i, b) in enumerate(zip(cols, muts)):
+        a = int(wt[i])
+        delta_h += float(ctx.h[i, b] - ctx.h[i, a])
+        # couplings to every other column, in the wild-type background
+        new = ctx.J[i, b, all_j, wt]
+        old = ctx.J[i, a, all_j, wt]
+        delta_J += float(new.sum() - old.sum() - (new[i] - old[i]))   # drop j == i
+        # pairs where BOTH sites moved
+        for n in range(m + 1, len(cols)):
+            j, b2 = cols[n], muts[n]
+            a2 = int(wt[j])
+            delta_J -= float(ctx.J[i, b, j, a2])
+            delta_J -= float(ctx.J[i, a, j, b2])
+            delta_J += float(ctx.J[i, a, j, a2])
+            delta_J += float(ctx.J[i, b, j, b2])
+
+    epistatic = delta_J + delta_h
+    return epistatic, delta_h, delta_J
+
+
+def _score_plan_adabm(ctx: Optional[ModelContext], plan):
+    """Score a substitution plan. Returns (columns, reason); one is meaningful.
+
+    No DELETION_NO_GAP_SYMBOL_IN_MODEL guard, deliberately: plmc's -g strips the
+    gap out of the params file, which is why evmutation_pipeline must refuse
+    deletions, but adabmDCA keeps '-' at index 0 of both alphabets and
+    build_lookup iterates every symbol including it. A deletion is an ordinary
+    substitution to the gap state here.
+    """
+    if ctx is None:
+        return {}, "NO_MODEL"
+    try:
+        epistatic, independent, pairwise = _delta_hamiltonian_multi(ctx, plan)
+    except KeyError:
+        return {}, "NOT_IN_MODEL"
+    except ValueError:
+        return {}, "MODEL_WT_MISMATCH"
+    freqs = []
+    for pos, _, mut_symbol in plan:
+        col = ctx.pos_to_col[pos]
+        freqs.append(float(ctx.column_freqs[col, ctx.alphabet.index(mut_symbol)]))
+    return {
+        "epistatic": epistatic,
+        "independent": independent,
+        "pairwise": pairwise,
+        # Comma-joined per site, matching the mutant/pos columns. The gap column is
+        # zeroed by _column_frequencies (gaps are excluded from the denominator),
+        # so a deleted site reports empty rather than a fabricated 0.0.
+        "frequency": ",".join("" if (f == 0.0 and s == "-") else f"{f}"
+                              for f, (_, _, s) in zip(freqs, plan)),
+    }, None
+
+
+# ---------------------------------------------------------------------------
+# Non-SNV support
+# ---------------------------------------------------------------------------
+# Ported from evmutation_pipeline.py so both DCA backends label a token the same
+# way. What differs is SCORING: EVmutation evaluates a multi-site plan directly
+# off a live CouplingsModel via _delta_hamiltonian_multi, and adabmDCA has no
+# equivalent -- build_lookup computes h, J, col_to_seq and column_freqs and then
+# _build_protein_lookup_from_params returns only [0], discarding all of it. The
+# precomputed lookup holds SINGLE mutants keyed by (seq_pos, token), so nothing
+# spanning more than one site can be answered from it.
+#
+# So these rows are ANNOTATED but not scored: mutation_class, the aa consequence,
+# the span, and the model form of the change are all recorded, and every metric
+# column stays EMPTY with qc_flags naming why. That is strictly better than the
+# status quo, where nt_re rejected the token and it was filed as INVALID_MUTATION
+# -- a false label, since 'AAA200GGG' is perfectly well formed.
+
+# protein_consequence's class -> the mutation_class column. The classes the
+# original vocabulary cannot express are carried under their own names rather
+# than flattened into MISSENSE, which means "one residue swapped". 'mnv' IS a
+# substitution (nothing added or removed), so it stays MISSENSE; the multiplicity
+# shows up in the comma-joined mutant/pos columns and in qc_flags as AA:mnv.
+_AA_CONSEQUENCE_TO_CLASS = {
+    "synonymous":     "SYNONYMOUS",
+    "stop_gained":    "STOP_GAIN",
+    "stop_lost":      "STOP_LOSS",
+    "snv":            "MISSENSE",
+    "mnv":            "MISSENSE",
+    "inframe_del":    "INFRAME_DEL",
+    "inframe_ins":    "INFRAME_INS",
+    "inframe_delins": "INFRAME_DELINS",
+    "frameshift":     "FRAMESHIFT",
+}
+
+
+def _join(values) -> str:
+    """Comma-join per-site values. A single-site change produces no comma, so an
+    SNV row is unchanged."""
+    return ",".join(str(v) for v in values)
+
+
+def _blank_row(fieldnames: List[str], pkey: str, nt_mut: str, qc_flags: List[str]) -> Dict:
+    row = {f: "" for f in fieldnames}
+    row.update({"pkey": pkey, "nt_mutant": nt_mut, "qc_flags": ";".join(qc_flags)})
+    return row
+
+
+def _wt_residue(orf_seq: str, aa_pos: int) -> str:
+    """The wild-type residue at a 1-based codon position, '' if there is no codon."""
+    codon = orf_seq[(aa_pos - 1) * 3:aa_pos * 3]
+    if len(codon) != 3:
+        return ""
+    return aa_symbol(codon_to_aa.get(codon, "X"))
+
+
+def _anchor_aa_alleles(aa_pos: int, wt_aa: str, mut_aa: str, orf_seq: str):
+    """Re-anchor a one-sided aa change on a neighbouring residue.
+
+    protein_consequence returns the MINIMAL span, so a pure insertion has an empty
+    wild-type allele. An empty allele does not render as a token and a consumer
+    handed one drops the row. Anchor 5' where there is a preceding residue, 3' at
+    residue 1 -- the convention infer_aavariant_from_nt uses for the mapping CSVs.
+    """
+    if wt_aa and mut_aa:
+        return aa_pos, wt_aa, mut_aa
+    if aa_pos > 1:
+        anchor = _wt_residue(orf_seq, aa_pos - 1)
+        if anchor:
+            return aa_pos - 1, anchor + wt_aa, anchor + mut_aa
+    anchor = _wt_residue(orf_seq, aa_pos + len(wt_aa))
+    if anchor:
+        return aa_pos, wt_aa + anchor, mut_aa + anchor
+    return aa_pos, wt_aa, mut_aa
+
+
+def _substitution_plan(consequence: str, aa_pos: int, wt_aa: str, mut_aa: str):
+    """Write a protein change as fixed-L site substitutions, or refuse by name.
+
+    Returns (plan, refusal); exactly one is meaningful. The mutant residues are laid
+    down from the 5' end of the changed span and any residues left over on the
+    wild-type side become gaps, so a 2-residue deletion written 'MK'->'' and one
+    written 'MKL'->'M' land on the same sites.
+
+    A deleted residue is written '-' regardless of what a model turns out to carry.
+    Unlike plmc -- whose -g flag strips the gap out of the params file, which is why
+    evmutation_pipeline refuses deletions with DELETION_NO_GAP_SYMBOL_IN_MODEL --
+    adabmDCA keeps '-' at index 0 of both alphabets (protein default
+    '-ACDEFGHIKLMNPQRSTVWY', CODON_ALPHABET 65 chars), and build_lookup:794 iterates
+    every b_idx including the gap. So a single-residue deletion is already present in
+    the lookup as (aa_pos, '-'), and multi-residue ones become scorable as soon as the
+    Hamiltonian evaluator lands. Do NOT port that refusal here.
+    """
+    if consequence == "frameshift":
+        # wt_aa/mut_aa are deliberately empty (protein_consequence declines to pair
+        # residues across a frame change) and every downstream site changes identity,
+        # so there is nothing to write even in principle.
+        return [], "FRAMESHIFT_NOT_REPRESENTABLE_FIXED_L"
+    if len(mut_aa) > len(wt_aa):
+        return [], "INSERTION_NOT_REPRESENTABLE_FIXED_L"
+    plan = [(aa_pos + i, wt_aa[i], mut_aa[i]) for i in range(len(mut_aa))]
+    plan += [(aa_pos + i, wt_aa[i], "-") for i in range(len(mut_aa), len(wt_aa))]
+    return plan, None
+
+
+def _non_snv_rows_adabm(pkey, nt_mut, variant, orf_seq, skip_codon,
+                        aa_ctx=None, codon_ctx=None):
+    """Build the row for one non-SNV token. Returns (protein_row, codon_row).
+
+    Exactly one is not None -- the routing mirrors the SNV path: synonymous and stop
+    variants belong to the codon table unless --skip-codon sends them to the protein
+    table. Metric columns are always EMPTY (see the module note above); qc_flags
+    carries NON_SNV:<kind>, AA:<consequence> and the reason no score exists.
+    """
+    qc = [f"NON_SNV:{variant.kind}"]
+
+    # Bound the END of the REF span, not its start: a multi-base REF can begin inside
+    # the ORF and run off the end, which seq[pos] never catches.
+    if variant.pos0 + len(variant.ref) > len(orf_seq):
+        return _blank_row(PROTEIN_FIELDNAMES_ADABM, pkey, nt_mut, qc + ["OUT_OF_RANGE"]), None
+
+    first_codon = variant.pos0 // 3
+    last_codon = (variant.pos0 + len(variant.ref) - 1) // 3
+    # Bound the codon the span ENDS in. A REF that begins in a whole codon can finish
+    # inside a ragged final one, and checking only first_codon lets that through as a
+    # 4- or 5-base "codon" in wt_codon.
+    if last_codon * 3 + 3 > len(orf_seq):
+        return _blank_row(PROTEIN_FIELDNAMES_ADABM, pkey, nt_mut, qc + ["PARTIAL_CODON"]), None
+
+    # Guard the WHOLE REF span, not just its first base. Flag and keep going, which is
+    # what the SNV path does: the ORF's own bases still describe a real codon, and
+    # dropping the row would hide the disagreement.
+    if orf_seq[variant.pos0:variant.pos0 + len(variant.ref)].upper() != variant.ref.upper():
+        qc.append("REF_MISMATCH")
+
+    cons = protein_consequence(variant, orf_seq)
+    consequence = cons["aa_consequence"]
+    aa_pos, wt_aa, mut_aa = cons["aa_pos"], cons["wt_aa"], cons["mut_aa"]
+    qc.append(f"AA:{consequence}")
+    if consequence == "frameshift" and cons["new_stop_aa_pos"] is not None:
+        qc.append(f"NEW_STOP_AA:{cons['new_stop_aa_pos']}")
+
+    mut_orf = splice_seq(orf_seq, variant.pos0, variant.ref, variant.alt, validate=False)
+    wt_span = orf_seq[first_codon * 3:(last_codon + 1) * 3]
+    delta = variant.length_delta
+    # A frame-preserving edit shortens or lengthens the mutant span by exactly its
+    # length delta. A frameshift does not: the codons after it are re-read rather than
+    # removed, so the mutant span is the SAME width and reports what the ribosome now
+    # reads over those bases.
+    mut_width = len(wt_span) + (delta if delta % 3 == 0 else 0)
+    mut_span = mut_orf[first_codon * 3:first_codon * 3 + mut_width]
+
+    shared = {
+        "codon_position": first_codon + 1,
+        "wt_codon": wt_span,
+        "mut_codon": mut_span,
+        "mutation_class": _AA_CONSEQUENCE_TO_CLASS.get(consequence, "UNKNOWN"),
+    }
+
+    # ---- codon-table classes: synonymous and stop, exactly as for an SNV ----
+    if consequence in ("synonymous", "stop_gained", "stop_lost"):
+        if skip_codon:
+            prow = _blank_row(PROTEIN_FIELDNAMES_ADABM, pkey, nt_mut, qc)
+            prow.update(shared)
+            if consequence == "synonymous":
+                # h_i(M) - h_i(M) = 0 for an unchanged protein: a measured zero, not a
+                # coalesced one, which is why it is written rather than left blank.
+                prow.update({
+                    "prediction_protein_independent_adabm": 0.0,
+                    "prediction_protein_epistatic_adabm":   0.0,
+                    "protein_pairwise_contribution_adabm":  0.0,
+                    "protein_concordance_adabm":            "NEUTRAL",
+                })
+                qc.append("SYNONYMOUS_PROTEIN_LEVEL")
+            else:
+                qc.append(_AA_CONSEQUENCE_TO_CLASS[consequence])
+            prow["qc_flags"] = ";".join(qc)
+            return prow, None
+
+        crow = _blank_row(CODON_FIELDNAMES_ADABM, pkey, nt_mut, qc)
+        crow.update({k: v for k, v in shared.items() if k in CODON_FIELDNAMES_ADABM})
+        if consequence != "synonymous":
+            qc.append(_AA_CONSEQUENCE_TO_CLASS[consequence])
+        else:
+            codon_plan = [c for c in range(first_codon, last_codon + 1)
+                          if orf_seq[c * 3:c * 3 + 3] != mut_orf[c * 3:c * 3 + 3]]
+            if not codon_plan:
+                # Length-preserving and every codon identical: the token names no change
+                # at all. Say so instead of emitting a row of zeros.
+                qc.append("NO_CODON_CHANGED")
+            else:
+                # Both single- and multi-codon changes go through the SAME evaluator,
+                # so a token never scores two different ways depending on how many
+                # codons it happens to touch. For one codon this reproduces the
+                # lookup; for several it is the only route.
+                plan = [(c + 1, orf_seq[c * 3:c * 3 + 3], mut_orf[c * 3:c * 3 + 3])
+                        for c in codon_plan]
+                cols, reason = _score_plan_adabm(codon_ctx, plan)
+                if cols:
+                    crow.update({
+                        "prediction_codon_independent_adabm": cols["independent"],
+                        "prediction_codon_epistatic_adabm":   cols["epistatic"],
+                        "codon_pairwise_contribution_adabm":  cols["pairwise"],
+                        "codon_frequency_adabm":              cols["frequency"],
+                        "codon_concordance_adabm": "" if len(plan) > 1 else
+                            ("CONCORDANT" if (cols["epistatic"] >= 0) == (cols["independent"] >= 0)
+                             else "DISCORDANT"),
+                    })
+                    qc.append("SYNONYMOUS_SCORED")
+                    if len(plan) > 1:
+                        qc.append("CONCORDANCE_UNDEFINED_MULTICODON")
+                else:
+                    qc.append(f"SYNONYMOUS_{reason}")
+        crow["qc_flags"] = ";".join(qc)
+        return None, crow
+
+    # ---- protein-table classes ----
+    prow = _blank_row(PROTEIN_FIELDNAMES_ADABM, pkey, nt_mut, qc)
+    prow.update(shared)
+
+    plan, refusal = _substitution_plan(consequence, aa_pos, wt_aa, mut_aa)
+    if plan:
+        # The model form: one 'M30V' per site moved, comma-joined, a deleted residue
+        # written 'K61-'.
+        prow.update({"pos":    _join(p for p, _, _ in plan),
+                     "wt":     _join(w for _, w, _ in plan),
+                     "subs":   _join(s for _, _, s in plan),
+                     "mutant": _join(f"{w}{p}{s}" for p, w, s in plan)})
+        cols, reason = _score_plan_adabm(aa_ctx, plan)
+        if cols:
+            prow.update({
+                "prediction_protein_independent_adabm": cols["independent"],
+                "prediction_protein_epistatic_adabm":   cols["epistatic"],
+                "protein_pairwise_contribution_adabm":  cols["pairwise"],
+                "frequency_adabm":                      cols["frequency"],
+                # Concordance is a comparison against ONE position's pairwise noise
+                # floor (build_lookup's per-position std). Several sites moved, so
+                # that floor does not exist; left empty and named rather than
+                # borrowed from one of them.
+                "protein_concordance_adabm": "" if len(plan) > 1 else
+                    ("CONCORDANT" if (cols["epistatic"] >= 0) == (cols["independent"] >= 0)
+                     else "DISCORDANT"),
+            })
+            qc.append("PASS")
+            if len(plan) > 1:
+                qc.append("CONCORDANCE_UNDEFINED_MULTISITE")
+        else:
+            qc.append(reason)
+    else:
+        # No model form exists -- that IS the refusal. Fall back to the aa-level token
+        # so the row still names the change.
+        if consequence == "frameshift":
+            wt_res = _wt_residue(orf_seq, aa_pos)
+            prow.update({"pos": aa_pos, "wt": wt_res, "subs": "",
+                         "mutant": format_aa_token(aa_pos, wt_res, "", "frameshift")})
+        else:
+            tp, tw, tm = _anchor_aa_alleles(aa_pos, wt_aa, mut_aa, orf_seq)
+            prow.update({"pos": tp, "wt": tw, "subs": tm, "mutant": f"{tw}{tp}{tm}"})
+        qc.append(refusal)
+
+    prow["qc_flags"] = ";".join(qc)
+    return prow, None
+
+
 def score_nt_mutations_adabm(
     nt_mutations: List[str],
     gene: str,
@@ -849,6 +1379,8 @@ def score_nt_mutations_adabm(
     codon_lookup: Optional[Dict[Tuple[int, str], Dict]] = None,
     failure_map: Optional[Dict] = None,
     skip_codon: bool = False,
+    aa_ctx: Optional["ModelContext"] = None,
+    codon_ctx: Optional["ModelContext"] = None,
 ) -> Tuple[List[Dict], List[Dict]]:
     """
     Map and score NT mutations through the adabmDCA backend.
@@ -872,11 +1404,38 @@ def score_nt_mutations_adabm(
         if should_skip_mutation(gene, nt_mut, failure_map):
             continue
 
-        pkey = f"{gene}-{nt_mut}"
+        # {GENE}-{sha}. nt_mut comes from trim_muts, which strips only '*' and
+        # whitespace, so it is the verbatim token variant_mapping hashed. The old
+        # f"{gene}-{nt_mut}" was unbounded in length, which is what broke the SQL key
+        # limit on knockout-scale tokens; mint_pkey is len(gene)+13 for every class.
+        pkey = mint_pkey(gene, nt_mut)
         qc_flags: List[str] = []
 
         m = nt_re.match(nt_mut)
         if not m:
+            # nt_re is uppercase-ACGT only, so a valid SNV written lowercase or with U
+            # (RNA notation) missed it and fell through to INVALID_MUTATION -- a false
+            # label, since parse_variant accepts all three spellings. Canonicalise for
+            # the GATE only; pkey and nt_mutant keep the user's original spelling, and
+            # an already-uppercase token cannot reach here, so SNV output is unchanged.
+            m = nt_re.match(nt_mut.upper().replace("U", "T"))
+        if not m:
+            # nt_re stays the SNV gate and stays FIRST, so every token it accepts takes
+            # byte-identical the path it always did. Of the tokens it rejects, only the
+            # ones that parse as a genuine multi-base variant are treated differently;
+            # an SNV-shaped token it declines still falls through to INVALID_MUTATION.
+            #
+            # parse_variant is what makes "indel" distinguishable from "garbage";
+            # try/except around the legacy parser cannot, because both raise ValueError.
+            variant = parse_variant(nt_mut, is_nt=True)
+            if variant is not None and not variant.is_snv:
+                prow, crow = _non_snv_rows_adabm(pkey, nt_mut, variant, orf_seq, skip_codon,
+                                                 aa_ctx=aa_ctx, codon_ctx=codon_ctx)
+                if prow is not None:
+                    protein_rows.append(prow)
+                else:
+                    codon_rows.append(crow)
+                continue
             prow = {f: "" for f in PROTEIN_FIELDNAMES_ADABM}
             prow.update({"pkey": pkey, "nt_mutant": nt_mut, "qc_flags": "INVALID_MUTATION"})
             protein_rows.append(prow)
@@ -1036,7 +1595,7 @@ def _build_codon_lookup_from_params(
     _, focus_seq = _load_focus_sequence(codon_msa_encoded_path, codon_focus_id)
     column_freqs = _column_frequencies(codon_msa_encoded_path, CODON_ALPHABET, encoded=True)
 
-    char_lookup, _ = build_lookup(h, J, focus_seq, CODON_ALPHABET, column_freqs)
+    char_lookup, col_to_seq = build_lookup(h, J, focus_seq, CODON_ALPHABET, column_freqs)
 
     # Re-key from (seq_pos, mut_char) → (seq_pos, mut_codon_triplet) for downstream consumption
     out: Dict[Tuple[int, str], Dict] = {}
@@ -1045,7 +1604,15 @@ def _build_codon_lookup_from_params(
         if triplet is None:
             continue
         out[(sp, triplet)] = score
-    return out
+
+    # Carry the parameters forward. Previously this returned `out` alone and h/J
+    # went out of scope here, which is why nothing spanning more than one codon
+    # could ever be scored.
+    token_to_idx = {ch: i for i, ch in enumerate(CODON_ALPHABET)}
+    wt_idx_per_col = np.array(
+        [token_to_idx.get(ch, 0) for ch in focus_seq], dtype=np.int64)
+    ctx = ModelContext(h, J, col_to_seq, wt_idx_per_col, column_freqs, CODON_ALPHABET)
+    return out, ctx
 
 
 def _build_protein_lookup_from_params(
@@ -1063,7 +1630,12 @@ def _build_protein_lookup_from_params(
     _, focus_seq = _load_focus_sequence(protein_msa_path, protein_focus_id)
     column_freqs = _column_frequencies(protein_msa_path, alphabet, encoded=False)
 
-    return build_lookup(h, J, focus_seq, alphabet, column_freqs)[0]
+    lookup, col_to_seq = build_lookup(h, J, focus_seq, alphabet, column_freqs)
+    token_to_idx = {ch: i for i, ch in enumerate(alphabet)}
+    wt_idx_per_col = np.array(
+        [token_to_idx.get(ch, 0) for ch in focus_seq], dtype=np.int64)
+    ctx = ModelContext(h, J, col_to_seq, wt_idx_per_col, column_freqs, alphabet)
+    return lookup, ctx
 
 
 def _process_gene(
@@ -1080,23 +1652,61 @@ def _process_gene(
         return 0, 0
     print(f"  Loaded {len(nt_mutations)} NT mutations")
 
+    # Intronic gate, before any params are loaded or any row is built. A Potts model
+    # has a fixed number of SITES -- residues in the protein model, codons in the codon
+    # model -- and an intron occupies neither, so there is no index to evaluate the
+    # Hamiltonian at.
+    #
+    # Unguarded these tokens do not crash: nt_re declines them, parse_variant returns
+    # None, and they land in the protein TSV flagged INVALID_MUTATION. That label is
+    # false -- 'gd.T5000C' is well formed in a coordinate space this model has no sites
+    # for -- and the row's presence implies it was evaluated and found unscorable
+    # rather than never being scoreable at all.
+    nt_mutations, intronic = split_intronic_tokens(nt_mutations)
+    warn_intronic_unsupported(
+        'adabmdca', gene, intronic,
+        "A Potts model is indexed by residue or codon site; an intron occupies "
+        "neither. Score these with RNAfold, miranda, genesplicer or AlphaFold3.")
+    # A named row per excluded token, the same contract netNglyc, netphos, netMHC and
+    # NetSurfP3 keep. The token is unscorable, not absent: dropping it entirely leaves a
+    # hole at adabmDCA for anyone joining the pipelines on pkey, and is
+    # indistinguishable from a mutation that was never submitted. Every metric column
+    # stays EMPTY -- there is no site index to evaluate.
+    intronic_rows = [
+        _blank_row(PROTEIN_FIELDNAMES_ADABM, mint_pkey(gene, tok), tok,
+                   ["NON_ORF_TOKEN:no_residue_or_codon_site_in_potts_model"])
+        for tok in intronic
+    ]
+    if not nt_mutations:
+        print("  (every mutation was intronic)")
+        gene_dir = output_dir / gene / "adabmDCA"
+        gene_dir.mkdir(parents=True, exist_ok=True)
+        write_tsv(intronic_rows, str(gene_dir / f"{gene}.protein.tsv"),
+                  PROTEIN_FIELDNAMES_ADABM, extrasaction="ignore")
+        if not args.skip_codon:
+            write_tsv([], str(gene_dir / f"{gene}.codon.tsv"),
+                      CODON_FIELDNAMES_ADABM, extrasaction="ignore")
+        return len(intronic_rows), 0
+
     # Resolve params (training if needed) + the MSA paths the scorer reads.
     protein_params_path, codon_params_path, protein_msa_path, codon_msa_path = \
         _resolve_per_gene_adabm_params(gene, args)
 
     aa_lookup = None
+    aa_ctx = None
     if protein_params_path and protein_msa_path:
         if not args.quiet:
             print(f"  Loading protein adabmDCA params: {protein_params_path}")
-        aa_lookup = _build_protein_lookup_from_params(
+        aa_lookup, aa_ctx = _build_protein_lookup_from_params(
             protein_params_path, protein_msa_path, args.focus or gene, args.protein_alphabet
         )
 
     codon_lookup = None
+    codon_ctx = None
     if codon_params_path and codon_msa_path and not args.skip_codon:
         if not args.quiet:
             print(f"  Loading codon adabmDCA params: {codon_params_path}")
-        codon_lookup = _build_codon_lookup_from_params(
+        codon_lookup, codon_ctx = _build_codon_lookup_from_params(
             codon_params_path, codon_msa_path, args.codon_focus or "ORF",
         )
 
@@ -1105,7 +1715,10 @@ def _process_gene(
         nt_mutations, gene, orf_seq,
         aa_lookup=aa_lookup, codon_lookup=codon_lookup,
         failure_map=failure_map, skip_codon=args.skip_codon,
+        aa_ctx=aa_ctx, codon_ctx=codon_ctx,
     )
+    # Excluded tokens keep their row so a pkey join across pipelines has no hole.
+    protein_rows = intronic_rows + protein_rows
 
     gene_dir = output_dir / gene / "adabmDCA"
     gene_dir.mkdir(parents=True, exist_ok=True)
@@ -1197,17 +1810,30 @@ def _build_adabmdca_params(gene: str, msa_file: str, focus: str, output_path: st
     # pseudoDCA uses pseudolikelihood maximization — different algorithm,
     # different memory footprint (no MCMC chains).
     Path(output_path).parent.mkdir(parents=True, exist_ok=True)
+    # Resolve the backend-aware epoch ceiling. Boltzmann self-terminates at
+    # target_pearson so a large ceiling is harmless there; pseudoDCA runs every
+    # epoch it is given, so inheriting 50000 was a 100x multiplier on the one path
+    # that pays for it. None => per-backend default; an explicit value always wins.
+    nepochs = args.adabmdca_nepochs
+    if nepochs is None:
+        nepochs = 500 if args.adabmdca_model == "pseudoDCA" else 50000
+        if not args.quiet:
+            print(f"  --adabmdca-nepochs not set; using {nepochs} for "
+                  f"{args.adabmdca_model}")
     if args.adabmdca_model == "pseudoDCA":
         train_adabmdca_pseudolikelihood_in_process(
             msa_path=effective_msa,
             alphabet=alphabet,
             output_params_path=output_path,
-            nepochs=args.adabmdca_nepochs,
+            nepochs=nepochs,
             lr=args.adabmdca_lr,
             device_str=args.adabmdca_device,
             dtype_str=args.adabmdca_dtype,
             seed=args.adabmdca_seed,
             quiet=args.quiet,
+            tol=args.adabmdca_tol,
+            patience=args.adabmdca_patience,
+            check_every=args.adabmdca_check_every,
         )
     else:
         train_adabmdca_in_process(
@@ -1215,7 +1841,7 @@ def _build_adabmdca_params(gene: str, msa_file: str, focus: str, output_path: st
             alphabet=alphabet,
             output_params_path=output_path,
             model=args.adabmdca_model,
-            nepochs=args.adabmdca_nepochs,
+            nepochs=nepochs,
             target=args.adabmdca_target,
             lr=args.adabmdca_lr,
             nchains=args.adabmdca_nchains,
@@ -1301,9 +1927,9 @@ def main() -> None:
     parser = argparse.ArgumentParser(
         description="BioFeatureFactory: adabmDCA mutation pipeline (train + score)",
     )
-    parser.add_argument("--fasta", required=True,
+    parser.add_argument("-f", "--fasta", required=True,
                         help="ORF FASTA file (single gene) or directory")
-    parser.add_argument("--mutations", required=True,
+    parser.add_argument("-m", "--mutations", required=True,
                         help="Mutations CSV file or directory")
     # MSAs are the primary inputs: training is invoked here if params don't exist.
     parser.add_argument("--msa",
@@ -1332,7 +1958,22 @@ def main() -> None:
                         help="Training algorithm. bmDCA/eaDCA/edDCA are Boltzmann-learning "
                              "variants (high memory); pseudoDCA is pseudolikelihood maximization "
                              "(~2× less peak memory, no MCMC).")
-    parser.add_argument("--adabmdca-nepochs", type=int, default=50000)
+    # Backend-aware: None resolves in _build_adabmdca_params to 50000 for the
+    # Boltzmann routines and 500 for pseudoDCA. A single default cannot serve both
+    # -- 50000 is Boltzmann-sized, and the pseudoDCA function's own signature says
+    # 500 (plmc's default), so the CLI silently multiplied that path by 100x.
+    parser.add_argument("--adabmdca-nepochs", type=int, default=None,
+                        help="Max gradient steps / epochs. Default: 500 for pseudoDCA, "
+                             "50000 for bmDCA/eaDCA/edDCA. On pseudoDCA this is a "
+                             "CEILING -- the run stops early at convergence.")
+    parser.add_argument("--adabmdca-tol", type=float, default=1e-3,
+                        help="pseudoDCA convergence threshold on ||grad||/||grad||_0 "
+                             "(default: 1e-3). 0 disables early stopping.")
+    parser.add_argument("--adabmdca-patience", type=int, default=3,
+                        help="Consecutive convergence checks below --adabmdca-tol "
+                             "required to stop (default: 3)")
+    parser.add_argument("--adabmdca-check-every", type=int, default=10,
+                        help="Epochs between convergence checks (default: 10)")
     parser.add_argument("--adabmdca-target", type=float, default=0.95)
     parser.add_argument("--adabmdca-lr", type=float, default=0.01)
     parser.add_argument("--adabmdca-nchains", type=int, default=10000)

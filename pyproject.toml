@@ -7,10 +7,13 @@ build-backend = "setuptools.build_meta"
 name = "biofeaturefactory"
 version = "0.1.0"
 description = "BioFeatureFactory — feature extraction for disease-associated mutations"
-# Upper bound is load-bearing: numpy is pinned <2 below, and numpy 1.26.4 (the
-# last 1.x) publishes no wheel past cp312. Without the cap, pip on cp313+ falls
-# back to the numpy sdist and tries to compile it. Raise both together or neither.
-requires-python = ">=3.9,<3.13"
+# Tracks the numpy pin below; the two move together. The old <3.13 cap existed
+# only because numpy was pinned <2 and 1.26.4 (the last 1.x) publishes no wheel
+# past cp312 -- lifting the numpy floor to 1.26.4 removed that reason. The <3.14
+# cap is a DIFFERENT constraint and still real: pandas 3.0.5 switches to
+# `numpy>=2.3.3` at python_version >= "3.14", which collides with numba's
+# `numpy<2.5` ceiling (see below). Floor is 3.10 because adabmDCA requires it.
+requires-python = ">=3.10,<3.14"
 license = "AGPL-3.0-or-later"
 license-files = ["LICENSE"]
 authors = [{ name = "Jacob Goldmintz" }]
@@ -31,10 +34,47 @@ classifiers = [
 dependencies = [
     "biopython>=1.79",
     "pandas>=1.3.0",
-    "numpy>=1.20.0,<2",
+    # Bounds are read off the tightest constraints actually declared by the
+    # installed dependency set, not chosen for caution:
+    #   floor   scipy 1.17.1 and adabmDCA 0.7.8 both require numpy>=1.26.4
+    #   ceiling numba 0.64.0 requires numpy<2.5 -- the only upper bound anywhere
+    #           in the tree (numba arrives via the `evmutation` extra)
+    #
+    # The previous `<2` was not merely conservative, it was UNSATISFIABLE with
+    # this project's own optional deps: scipy's floor is 1.26.4 and numba wants
+    # >=1.22,<2.5, so `pip install -e ".[all]"` resolved to numpy 1.26.4 --
+    # clearing scipy's floor by a single patch release. Meanwhile the working
+    # environment has been running 2.4.6 the whole time; `biofeaturefactory` was
+    # the ONLY installed distribution asking for <2, and pip said so:
+    #   "biofeaturefactory 0.1.0 requires numpy<2,>=1.20.0, but you have numpy
+    #    2.4.6 which is incompatible."
+    # Verified on 2.4.6: numba, tensorflow, torch, torchvision, prody, RNA,
+    # adabmDCA, h5py, scipy, pandas, sklearn, pysam, biopython all import, and
+    # spliceai-parser.py produced byte-identical output to the 1.26.4 run.
+    # NOT verified: numerical equivalence of numba-jitted EVmutation, prody in
+    # rare_codon, ViennaRNA, or adabmDCA under numpy 2.x.
+    "numpy>=1.26.4,<2.5",
     "requests>=2.25.0",
     "pysam>=0.19.0",
     "scipy>=1.7.0",
+    # RUNTIME, and the UPPER bound is the load-bearing half -- not the build
+    # requirement on line 3, which does not put setuptools in the runtime env.
+    #
+    # spliceai/__init__.py:2 does `from pkg_resources import get_distribution`.
+    # pkg_resources ships with setuptools and was REMOVED in setuptools 81
+    # ("The pkg_resources package is slated for removal as early as 2025-11-30.
+    # Refrain from using this package or pin to Setuptools<81" -- setuptools' own
+    # DeprecationWarning). Measured on this env: setuptools 84.0.0 was already
+    # installed and `spliceai -I ...` still died with
+    #   ModuleNotFoundError: No module named 'pkg_resources'
+    # before reading a variant; 80.9.0 imports it fine. So `>=77` alone fixes
+    # nothing -- the pin has to cap the version.
+    #
+    # spliceai is conda-installed by bootstrap step 6d rather than declared here,
+    # so nothing else pulls setuptools into the runtime environment. Revisit when
+    # spliceai stops importing pkg_resources; this cap holds BFF on a setuptools
+    # line that is already deprecated upstream.
+    "setuptools>=77.0,<81",
 ]
 
 [project.urls]

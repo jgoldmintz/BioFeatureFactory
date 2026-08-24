@@ -1387,6 +1387,11 @@ def main():
     total_skipped_runtime = 0
     total_cluster_members_discarded = 0
     skipped_detail = []
+    # Per-gene stats, kept so each gene can carry its OWN summary next to its
+    # TSVs. The run-level totals below are a sum and cannot be read backwards:
+    # given only genesplicer.run_summary.json at the output root, there is no way
+    # to say which gene a skip belonged to.
+    stats_by_gene = {}
     genes_skipped = []
 
     with concurrent.futures.ProcessPoolExecutor(max_workers=max_workers) as ex:
@@ -1429,6 +1434,7 @@ def main():
             skipped_detail.extend(gene_stats.get("skipped_detail", []))
 
             gene_name = gene_stats.get("gene") or fut_meta.get(fut, "unknown")
+            stats_by_gene[gene_name] = gene_stats
             events_by_gene[gene_name] = gene_events
             sites_by_gene[gene_name] = gene_sites
             variants_by_gene[gene_name] = gene_variants
@@ -1565,7 +1571,42 @@ def main():
         g_summary_df.to_csv(str(gene_out_dir / f"{gname}.tsv"), sep="\t", index=False)
         g_events_df.to_csv(str(gene_out_dir / f"{gname}.events.tsv"), sep="\t", index=False)
         g_sites_df.to_csv(str(gene_out_dir / f"{gname}.sites.tsv"), sep="\t", index=False)
-        print(f"wrote {gname} outputs to {gene_out_dir}")
+
+        # Same ledger as the run-level file, scoped to this gene and written
+        # BESIDE its TSVs. A reader holding <gene>/GeneSplicer/<gene>.tsv could
+        # not otherwise tell an empty table from a gene whose tokens were all
+        # skipped -- the only record of that lived in one aggregate file at the
+        # output root, keyed by nothing.
+        gs = stats_by_gene.get(gname, {})
+        g_seen = gs.get("total_rows", 0)
+        g_processed = gs.get("processed", 0)
+        g_skips = {
+            "skipped_validation":   gs.get("skipped_validation", 0),
+            "skipped_invalid":      gs.get("skipped_invalid", 0),
+            "skipped_out_of_range": gs.get("skipped_out_of_range", 0),
+            "skipped_ref_mismatch": gs.get("skipped_ref_mismatch", 0),
+            "skipped_runtime":      gs.get("skipped_runtime", 0),
+        }
+        g_summary = {
+            "gene": gname,
+            "variants_total": g_seen,
+            "variants_processed": g_processed,
+            "rows_written": int(len(g_summary_df)),
+            "events_written": int(len(g_events_df)),
+            "sites_written": int(len(g_sites_df)),
+            "cluster_members_discarded": gs.get("cluster_members_discarded", 0),
+            "gene_skipped": gs.get("gene_skipped"),
+            "skipped_detail": gs.get("skipped_detail", []),
+        }
+        g_summary.update(g_skips)
+        # Reconciles for this gene alone, for the same reason the run-level
+        # ledger does: a leftover is a drop with no reason attached.
+        g_summary["variants_unaccounted"] = g_seen - g_processed - sum(g_skips.values())
+        with open(gene_out_dir / f"{gname}.run_summary.json", "w") as fh:
+            json.dump(g_summary, fh, indent=2)
+
+        print(f"wrote {gname} outputs to {gene_out_dir} "
+              f"({g_summary['rows_written']} rows, {g_processed}/{g_seen} variants)")
 
     # Durable skip accounting. The printed line below is ephemeral, and a token
     # that was dropped is exactly the thing a reader of the outputs cannot

@@ -583,7 +583,7 @@ Metrics:
     )
 
     # Input options
-    parser.add_argument('--fasta', required=True, help='FASTA file or directory of FASTA files')
+    parser.add_argument('-f', '--fasta', required=True, help='FASTA file or directory of FASTA files')
     parser.add_argument('--mutations', help='Mutations CSV file or directory of CSV files')
     parser.add_argument('--validation-log', help='Validation log for filtering failed mutations')
 

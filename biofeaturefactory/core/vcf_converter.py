@@ -502,12 +502,59 @@ def process_single_file(
 
         # Sort and write VCF
         variants.sort(key=lambda x: x[0])
-        out_vcf = Path(outdir) / f"{gene_name}.vcf"
+        # Per-gene layout: <outdir>/<GENE>/vcf/<GENE>.vcf, matching every other
+        # BFF producer (<outdir>/<GENE>/{CodonMSA,RareCodon,EVmutation,adabmDCA}/...)
+        # rather than dumping every gene's VCF into one flat directory.
+        #
+        # NOTE for the SpliceAI workflow: spliceai/bin/main.nf:135 discovers inputs
+        # with `Channel.fromPath("${params.input_vcf_dir}/*.vcf")` -- a FLAT glob, so
+        # --input_vcf_dir must now be pointed at <outdir>/<GENE>/vcf, not <outdir>.
+        # main.nf:254 also publishes SpliceAI OUTPUT to "${gene_id}/VCF" (capital),
+        # which is a DIFFERENT directory from this one on a case-sensitive
+        # filesystem -- i.e. on the Linux target, though not on this macOS dev box.
+        out_dir_gene = Path(outdir) / gene_name / "vcf"
+        out_dir_gene.mkdir(parents=True, exist_ok=True)
+        out_vcf = out_dir_gene / f"{gene_name}.vcf"
+        # ##contig lines are REQUIRED by every pysam-based reader, which is what
+        # SpliceAI uses. Without them `spliceai -I <this file>` reads the variants,
+        # runs the model, and then dies on the FIRST write:
+        #     OSError: [Errno 22] Can't write record: Invalid argument
+        # because pysam cannot resolve the CHROM against a contig dictionary. The
+        # file looked valid -- correct header, correct rows, REF verified against
+        # the reference -- and was unusable by the one tool it is built for.
+        #
+        # Lengths come from the reference .fai, the same file the REF checks above
+        # read through. When there is no .fai the ID is still emitted: a contig line
+        # without length satisfies the dictionary lookup, and a wrong length would
+        # be worse than an absent one.
+        contig_lengths = {}
+        if reference_fasta:
+            fai = Path(f"{reference_fasta}.fai")
+            if fai.exists():
+                try:
+                    with open(fai) as fh:
+                        for line in fh:
+                            parts = line.split("\t")
+                            if len(parts) >= 2:
+                                contig_lengths[parts[0]] = parts[1]
+                except OSError:
+                    pass  # fall through to ID-only contig lines
+
+        # Preserve first-appearance order rather than sorting: VCF requires the
+        # contig order in the header to match the order records appear.
+        seen_chroms = list(dict.fromkeys(v[1] for v in variants))
+
         with open(out_vcf, "w") as f:
             f.write("##fileformat=VCFv4.3\n")
             f.write(f"##fileDate={datetime.datetime.now():%Y%m%d}\n")
             f.write("##source=SnpToVcfConverter\n")
             f.write(f"##gene_context={gene_name}\n")
+            for chrom_id in seen_chroms:
+                length = contig_lengths.get(chrom_id)
+                if length:
+                    f.write(f"##contig=<ID={chrom_id},length={length}>\n")
+                else:
+                    f.write(f"##contig=<ID={chrom_id}>\n")
             f.write("#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\n")
             for pos, chrom, ref, alt in variants:
                 f.write(f"{chrom}\t{pos}\t.\t{ref}\t{alt}\t.\t.\t.\n")

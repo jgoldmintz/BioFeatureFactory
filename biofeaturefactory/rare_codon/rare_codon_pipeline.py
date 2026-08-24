@@ -98,6 +98,231 @@ except ImportError:
     from codons import codon_to_aa
 
 
+# ---------------------------------------------------------------------------
+# cg_cotrans prob_ntuple: exponential -> O(N^2)
+# ---------------------------------------------------------------------------
+# calc_rare_enrichment.prob_ntuple(p, n) returns P(X >= n) for a Poisson-binomial
+# X, by enumerating EVERY subset of `p` (itertools.combinations, two
+# functools.reduce per subset). Cost is sum_m C(N, m) subsets at O(N) apiece.
+#
+# msa_rare_codon_analysis_wtalign_nseq calls it two ways. The per-window call
+# (calc_rare_enrichment.py:210, :218) passes one entry per codon -- N ~ 15,
+# 2^15 subsets, instant, and the only shape cg_cotrans was exercised at. The
+# per-window-across-sequences call (:222, :224) passes one entry per MSA
+# SEQUENCE, and that is the one that does not terminate:
+#
+#   N=35   worst case 2^34 = 17,179,869,184 subsets = 17.8 h for ONE call
+#   N=709  worst case 2^708                         = not a runnable quantity
+#
+# A run against the 35-sequence SMN2 codon MSA (280 windows, 560 such calls)
+# was killed after 19 h 21 m at 100% CPU having completed zero windows.
+#
+# BOTH branches of the original return the same quantity, P(X >= n); the
+# `if n < len(p)/2` split only picks whichever half is cheaper to enumerate.
+# So the standard Poisson-binomial recurrence below is a drop-in with identical
+# semantics, not an approximation -- verified against the original over
+# N in {1,2,3,5,8,12,16,18}, every n in 0..N+1, plus degenerate p=0 / p=1 /
+# mixed: 267 comparisons, max absolute difference 4.8e-15 (float64 round-off).
+#
+#   N=35   51.9 us/call    (vs 17.8 h)
+#   N=556   1.07 ms/call
+#   N=709   1.41 ms/call
+#
+# Rebound onto the module rather than edited in place: calc_rare_enrichment.py
+# is vendored cg_cotrans (GPL v3, Copyright 2017 William M. Jacobs) and is not
+# ours to modify. msa_rare_codon_analysis_wtalign_nseq resolves `prob_ntuple`
+# as a module global at CALL time, so assigning it here takes effect inside the
+# vendored caller with the vendored file untouched.
+import math as _math
+import numpy as _np
+import calc_rare_enrichment as _cre
+
+
+def _prob_ntuple_poisson_binomial(p, n):
+    """P(X >= n) where X ~ Poisson-binomial with per-trial probabilities `p`.
+
+    dp[k] holds P(exactly k successes) over the trials consumed so far. Adding
+    trial i moves probability mass up one slot with weight p_i and leaves it in
+    place with weight 1 - p_i:
+
+        dp'[k] = dp[k-1] * p_i + dp[k] * (1 - p_i)
+
+    The slice assignment evaluates its whole right-hand side before storing, so
+    every k >= 1 is updated from the PRE-update dp and no reverse iteration is
+    needed. dp[0] is scaled afterwards because dp[:-1] above still had to read
+    its old value.
+    """
+    N = len(p)
+    if n <= 0:
+        return 1.0
+    if n > N:
+        return 0.0
+    dp = _np.zeros(N + 1)
+    dp[0] = 1.0
+    for pi in p:
+        dp[1:] = dp[1:] * (1.0 - pi) + dp[:-1] * pi
+        dp[0] *= (1.0 - pi)
+    return float(dp[n:].sum())
+
+
+_cre.prob_ntuple = _prob_ntuple_poisson_binomial
+
+
+# ---------------------------------------------------------------------------
+# cg_cotrans msa_rare_codon_analysis_wtalign_nseq: guard the empty window
+# ---------------------------------------------------------------------------
+# VERBATIM COPY of calc_rare_enrichment.py:158-249 with ONE behavioural change,
+# marked <<GUARD>> below. Keep it a verbatim copy: if cg_cotrans is ever updated,
+# re-copy the upstream body and re-apply the guard rather than merging by hand.
+#
+# Upstream divides by the number of codons a sequence has in the current window:
+#
+#     f_enriched[gi][center] = n_rare[gi][center] / len(all_indices)      (:207)
+#
+# len(all_indices) is 0 whenever a sequence is entirely gapped across the window.
+# Measured: 105 of F9's 531 sequences have a gap run >= L, and one of them starts
+# at window 0, so the run dies immediately and writes nothing. SMN2 has 2 of 35
+# (both 85% coverage with the same 32-codon deletion -- exon-skip isoforms).
+#
+# Upstream INTENDED to handle this: :215 already guards `if len(all_indices) > 0`
+# for nseq_possible_depleted_center, eight lines below the line that divides. So
+# the fix is per-WINDOW exclusion, which is what that guard implies -- a sequence
+# sits out the windows where it has no data and counts in the ones where it does.
+#
+# The alternative, dropping such sequences from the alignment entirely, costs far
+# more: 19.8% of F9's (sequence, window) observations versus the 1.49% that are
+# genuinely empty.
+#
+# This is a copy rather than a rebind of the inner arithmetic because the division
+# is an inline statement, not a call that could be swapped -- unlike prob_ntuple.
+# calc_rare_enrichment.py is vendored cg_cotrans (GPL v3, (C) 2017 William M.
+# Jacobs) and is not ours to edit.
+
+def _msa_rare_codon_analysis_guarded(msa_codons, wtgi, msa_index_dict,
+                                     rare_codons, rare_codon_prob, L=10, zsig=1.,
+                                     verbose=True):
+    sorted_gis_ = _cre.sorted_gis
+    prob_ntuple = _cre.prob_ntuple          # the O(N^2) recurrence bound above
+    gis = sorted_gis_(msa_codons, wtgi)
+    wt_ncodons = sum(1 for i in range(len(msa_codons[wtgi]))
+                     if msa_codons[wtgi][i] != '---' and codon_to_aa[msa_codons[wtgi][i]] != 'Stop')
+    f_enriched_avg = {gi: (sum(1 for i in range(wt_ncodons) for j in msa_index_dict[i]
+                               if msa_codons[gi][j] != '---'
+                               and msa_codons[gi][j] in rare_codons[gi]) /
+                           sum(1 for i in range(wt_ncodons) for j in msa_index_dict[i]
+                               if msa_codons[gi][j] != '---')) for gi in gis}
+    f_gi_avg = _np.mean(list(f_enriched_avg.values()))
+
+    def prob_poisson(l, n):
+        return l ** n * _math.exp(-l) / _math.factorial(n)
+
+    def min_n_poisson_cum(l, z):
+        pz = _math.erf(z)
+        s = 0
+        n = -1
+        while s < pz:
+            n += 1
+            s += prob_poisson(l, n)
+        return n
+
+    def max_n_poisson_cum(l, z):
+        pz = _math.erfc(z)
+        s = 0
+        n = -1
+        while s < pz:
+            n += 1
+            s += prob_poisson(l, n)
+        return n
+
+    p_enriched = {gi: {} for gi in gis}
+    p_depleted = {gi: {} for gi in gis}
+    f_enriched = {gi: {} for gi in gis}
+    n_rare = {gi: {} for gi in gis}
+    nseq_enriched = {}
+    nseq_depleted = {}
+    fseq_enriched = {}
+    fseq_depleted = {}
+    p_nseq_enriched = {}
+    p_nseq_depleted = {}
+    for i in range(wt_ncodons - L + 1):
+        center = i + L // 2
+        nseq_enriched[center] = nseq_depleted[center] = 0
+        nseq_possible_enriched_center = nseq_possible_depleted_center = 0
+        present = []                                            # <<GUARD>>
+        for gi in gis:
+            all_indices = sorted(k for j in range(i, i + L) for k in msa_index_dict[j]
+                                 if msa_codons[gi][k] != '---')
+            # <<GUARD>> This sequence has no codons at all in this window, so every
+            # quantity below is undefined for it -- not zero. Leave n_rare and
+            # f_enriched UNSET for (gi, center) so a consumer reading them with
+            # .get() sees None and renders an empty cell, and leave gi out of the
+            # cross-sequence tallies. Upstream instead divided by 0 here, and
+            # counted the sequence as BOTH enriched and depleted when it didn't:
+            # with len(all_indices) == 0 the thresholds collapse to
+            # min_n_poisson_cum(0, z) == max_n_poisson_cum(0, z) == 0, so
+            # `n_rare >= 0` and `n_rare <= 0` are both true.
+            if not all_indices:
+                continue
+            present.append(gi)
+            indices = [j for j in all_indices
+                       if rare_codon_prob[gi][codon_to_aa[msa_codons[gi][j]]] > 0]
+            n_rare[gi][center] = sum(1 for j in indices if msa_codons[gi][j] in rare_codons[gi])
+            f_enriched[gi][center] = n_rare[gi][center] / len(all_indices)
+            p_rc = _np.array([rare_codon_prob[gi][codon_to_aa[msa_codons[gi][j]]] for j in indices])
+            nmin_enriched = min_n_poisson_cum(f_gi_avg * len(all_indices), zsig)
+            p_enriched[gi][center] = prob_ntuple(p_rc, nmin_enriched)
+            if n_rare[gi][center] >= nmin_enriched:
+                nseq_enriched[center] += 1
+            if len(p_rc) >= nmin_enriched:
+                nseq_possible_enriched_center += 1
+            nseq_possible_depleted_center += 1      # <<GUARD>> was `if len(all_indices) > 0`
+            nmax_depleted = max_n_poisson_cum(f_gi_avg * len(all_indices), zsig)
+            p_depleted[gi][center] = prob_ntuple(1. - p_rc, len(p_rc) - nmax_depleted)
+            if n_rare[gi][center] <= nmax_depleted:
+                nseq_depleted[center] += 1
+        # <<GUARD>> aggregate over the sequences that had data, not over all gis:
+        # an absent sequence has no p_enriched[gi][center] to read, and including
+        # a placeholder would let "no data" vote in the cross-sequence test.
+        p_enriched_center = _np.array([p_enriched[gi][center] for gi in present])
+        p_depleted_center = _np.array([p_depleted[gi][center] for gi in present])
+        if len(present):
+            p_nseq_enriched[center] = prob_ntuple(p_enriched_center, nseq_enriched[center])
+            p_nseq_depleted[center] = prob_ntuple(p_depleted_center, nseq_depleted[center])
+        else:
+            p_nseq_enriched[center] = p_nseq_depleted[center] = _np.nan
+        if nseq_possible_enriched_center > 0:
+            fseq_enriched[center] = nseq_enriched[center] / nseq_possible_enriched_center
+        else:
+            fseq_enriched[center] = _np.nan
+        if nseq_possible_depleted_center > 0:
+            fseq_depleted[center] = nseq_depleted[center] / nseq_possible_depleted_center
+        else:
+            fseq_depleted[center] = _np.nan
+        if verbose:
+            print("> %4d %2d %2d %6.3f %6.3f" %
+                  (center, nseq_enriched[center], nseq_depleted[center],
+                   _np.mean(list(f_enriched[g][center] for g in present)) if present else _np.nan,
+                   f_gi_avg))
+            print(' p =', ' '.join("%5.3f" % x for x in p_enriched_center))
+    return {'nmin_enriched': min_n_poisson_cum(f_gi_avg * L, zsig),
+            'nmax_depleted': max_n_poisson_cum(f_gi_avg * L, zsig),
+            'p_enriched': p_enriched,
+            'f_enriched': f_enriched,
+            'f_enriched_avg': f_enriched_avg,
+            'n_rare': n_rare,
+            'nseq_enriched': nseq_enriched,
+            'fseq_enriched': fseq_enriched,
+            'p_nseq_enriched': p_nseq_enriched,
+            'nseq_depleted': nseq_depleted,
+            'fseq_depleted': fseq_depleted,
+            'p_nseq_depleted': p_nseq_depleted}
+
+
+# Shadow the name this module imported at the top, so run_rare_codon_analysis's
+# call site picks up the guarded version without any change there.
+msa_rare_codon_analysis_wtalign_nseq = _msa_rare_codon_analysis_guarded
+
+
 FIELDNAMES = [
     'pkey',
     'Gene',
@@ -115,7 +340,8 @@ FIELDNAMES = [
 
 def run_rare_codon_analysis(gene, msa_path, usage_path, wt_gi, window_size=15,
                             rare_model='no_norm', rare_threshold=0.1,
-                            null_model='genome', max_len_diff=0.2, min_aa_iden=0.5):
+                            null_model='genome', max_len_diff=0.2, min_aa_iden=0.5,
+                            reference_usage=None):
     """
     Run rare codon enrichment analysis on an MSA.
 
@@ -130,6 +356,10 @@ def run_rare_codon_analysis(gene, msa_path, usage_path, wt_gi, window_size=15,
         null_model: 'genome', 'eq', or 'groups'
         max_len_diff: Max relative sequence length difference vs WT
         min_aa_iden: Min amino acid identity vs WT
+        reference_usage: Path to a genome-wide codon usage TSV (see
+            _reference_usage_pgz). When given, it defines "rare" for every sequence
+            instead of the per-gene table auto-built from this MSA. None keeps the
+            historical self-referential behaviour.
 
     Returns:
         dict: Position -> {p_enriched, p_depleted, f_enriched_wt, etc.}
@@ -207,9 +437,30 @@ def run_rare_codon_analysis(gene, msa_path, usage_path, wt_gi, window_size=15,
 
     msa_index_dict = align_sequences(msa_codons, wt_gi)
 
-    # Load null model
+    # Load null model.
+    #
+    # With a genome-wide reference the rare set is defined ONCE, from the reference,
+    # and applied to every gi -- which is what cg_cotrans' use_wt_rare_codons flag
+    # does. Without one we keep the historical per-gi behaviour so existing runs are
+    # byte-identical.
+    #
+    # cl_wt_gi is set on the MODULE, not passed: calc_rare_enrichment.py:262 reads it
+    # as a free name inside the use_wt_rare_codons branch, but it is not a parameter of
+    # load_null_model and not a module-level global (verified: hasattr is False), so
+    # that branch raises NameError on any input as shipped. It has never fired because
+    # this call hardcoded the flag to False. Assigning the attribute here makes the
+    # name resolve without editing the vendored file -- the same technique used for
+    # the prob_ntuple rebind above.
+    use_wt_rare_codons = False
+    if reference_usage:
+        usage_path = _reference_usage_pgz(
+            reference_usage, gene, gis,
+            Path(usage_path).parent / f"{gene}.reference_codon_usage.p.gz")
+        use_wt_rare_codons = True
+        _cre.cl_wt_gi = wt_gi
+
     rare_codons, gene_codon_usage, rare_codon_prob, _ = load_null_model(
-        msa_codons, gis, usage_path, rare_model, False,
+        msa_codons, gis, usage_path, rare_model, use_wt_rare_codons,
         rare_threshold, null_model, gene
     )
 
@@ -616,6 +867,62 @@ def _build_usage_pgz_from_msa(msa_inputs, usage_path, pseudocount=1.0):
         pickle.dump(usage_obj, f)
 
 
+def _reference_usage_pgz(ref_tsv, gene, gis, usage_path):
+    """Build a codon_usage.p.gz from a genome-wide reference table.
+
+    cg_cotrans' README specifies GENOME-WIDE codon statistics, built by running
+    calc_codon_usage.py across many genes ("input MSA fasta file(s)", plural) before
+    running calc_rare_enrichment.py once per gene. BFF never does that: the auto-build
+    fails on every real input tried (KeyError 'gi|556503834|ref|NC_000913.3|' -- their
+    default E. coli WT GI -- on SMN2, KeyError 'NNN' on F9), so _build_usage_pgz_from_msa
+    takes over and derives "rare codon" from the ONE gene under analysis. That makes the
+    reference distribution and the test sequence the same data, and it is wrong by a lot:
+    against CoCoPUTs human genome-wide usage it produced 7 false rare codons and missed 2
+    real ones out of a true set of 4, including calling GCC rare at 9.5% when it is 39.9%
+    of all alanine codons in the human transcriptome.
+
+    ref_tsv is the derived table at <Bio_DBs>/cocoputs/human_GRCh38_codon_usage.tsv,
+    built by scripts/build_cocoputs_cut.py and installed by bootstrap step 9b alongside
+    the other prepared databases (19,322 genes, 10,908,112 codon observations; see the
+    README written beside it for derivation and validation). Its relative_usage_within_aa column uses the same within-amino-acid-family
+    normalisation as calc_codon_usage.py:172, so the values drop straight into the slots
+    load_null_model reads.
+
+    The SAME table is assigned to every gi. cg_cotrans gives each organism its own rare
+    set because a codon rare in E. coli is not rare in another bacterium; BFF scores human
+    disease variants, so the question is whether a position is rare IN HUMANS, and the
+    orthologs are evidence about that position rather than organisms to be scored on their
+    own terms. The caller pairs this with use_wt_rare_codons=True so the rare set is
+    likewise defined once.
+    """
+    rel = {}
+    with open(ref_tsv, newline="") as fh:
+        for row in csv.DictReader(fh, delimiter="\t"):
+            rel[row["codon"]] = float(row["relative_usage_within_aa"])
+
+    missing = [c for c, aa in codon_to_aa.items() if aa != "Stop" and c not in rel]
+    if missing:
+        raise ValueError(
+            f"reference codon usage {ref_tsv} is missing {len(missing)} sense codons "
+            f"({','.join(sorted(missing)[:6])}...); load_null_model indexes every sense "
+            f"codon and would KeyError"
+        )
+
+    # One shared table per gi. load_null_model only reads these, never mutates them.
+    relative_usage = {gi: rel for gi in gis}
+    usage_obj = {
+        "groups": ["all"],
+        "gene_groups": {gene: 0},
+        "overall_codon_usage": relative_usage,
+        "unweighted_codon_usage": relative_usage,
+        "gene_group_codon_usage": {gi: {0: rel} for gi in gis},
+    }
+    Path(usage_path).parent.mkdir(parents=True, exist_ok=True)
+    with gzip.open(usage_path, "wb") as f:
+        pickle.dump(usage_obj, f)
+    return str(usage_path)
+
+
 def _resolve_wt_gi(seqs, wt_gi, gene):
     """Which MSA record is the WT/focus sequence.
 
@@ -721,6 +1028,7 @@ def _run_single_gene(gene, msa_file, mut_file, args, wt_gi, output_dir):
             null_model=args.null_model,
             max_len_diff=args.max_len_diff,
             min_aa_iden=args.min_aa_iden,
+            reference_usage=args.reference_codon_usage,
         )
         print(f"  MSA sequences used: {n_seqs}")
         print(f"  Positions analyzed: {len(rc_results)}")
@@ -781,7 +1089,7 @@ Copyright notice:
     )
 
     # MSA and codon usage inputs
-    parser.add_argument('--msa', required=True,
+    parser.add_argument('-a', '--msa', required=True,
                         help='Path to codon-aware MSA FASTA file or directory')
     parser.add_argument('--usage', help='Path to codon usage .p.gz file (optional; auto-built if missing)')
     parser.add_argument('--wt-gi', help='Identifier for WT/focus sequence in MSA (single-gene mode)')
@@ -790,7 +1098,7 @@ Copyright notice:
     # --fasta was removed: its only informational job was to supply the WT ORF,
     # and the MSA already carries it as the wt_gi record. Everything else the flag
     # did (enumerating genes in directory mode) the MSA resolver does too.
-    parser.add_argument('--mutations', required=True,
+    parser.add_argument('-m', '--mutations', required=True,
                         help='Mutations CSV file or directory of CSV files')
     parser.add_argument('--validation-log', help='Validation log for filtering')
 
@@ -803,6 +1111,13 @@ Copyright notice:
                         help='Threshold for codon rarity (default: 0.1)')
     parser.add_argument('--null-model', choices=['genome', 'eq', 'groups'], default='genome',
                         help='Null model for codon usage (default: genome)')
+    parser.add_argument('--reference-codon-usage',
+                        help='Genome-wide codon usage TSV defining which codons are rare '
+                             '(columns: codon, amino_acid, count, relative_usage_within_aa). '
+                             'Without it, "rare" is derived from the single gene under '
+                             'analysis, which makes the null model self-referential -- see '
+                             'the README beside the table in <Bio_DBs>/cocoputs/ for the '
+                             'measured error.')
     parser.add_argument('--max-len-diff', type=float, default=0.2,
                         help='Max relative length difference vs WT (default: 0.2)')
     parser.add_argument('--min-aa-iden', type=float, default=0.5,

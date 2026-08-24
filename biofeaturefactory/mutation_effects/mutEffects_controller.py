@@ -212,7 +212,14 @@ def parse_args() -> argparse.Namespace:
                              "pseudolikelihood (~2x less peak GPU memory, no MCMC). The "
                              "Boltzmann path emits an OOM-triggered hint suggesting "
                              "pseudoDCA when memory becomes the bottleneck.")
-    parser.add_argument("--adabmdca-nepochs", type=int, default=50000)
+    # None => adabmdca_pipeline.py picks per backend (500 pseudoDCA / 50000 Boltzmann).
+    # A single 50000 default silently multiplied the pseudoDCA path by 100x.
+    parser.add_argument("--adabmdca-nepochs", type=int, default=None,
+                        help="Max epochs. Default: 500 for pseudoDCA, 50000 otherwise.")
+    parser.add_argument("--adabmdca-tol", type=float, default=1e-3,
+                        help="pseudoDCA convergence threshold on ||grad||/||grad||_0 (default: 1e-3; 0 disables)")
+    parser.add_argument("--adabmdca-patience", type=int, default=3)
+    parser.add_argument("--adabmdca-check-every", type=int, default=10)
     parser.add_argument("--adabmdca-target", type=float, default=0.95,
                         help="Pearson Cij target (default: 0.95)")
     parser.add_argument("--adabmdca-lr", type=float, default=0.01)
@@ -363,7 +370,11 @@ def build_nextflow_cmd(args: argparse.Namespace, manifest_path: str) -> List[str
     # adabmDCA tunables — only forward when the adabmDCA backend runs
     if args.run_adabmdca:
         add_param("adabmdca_model",   args.adabmdca_model)
-        add_param("adabmdca_nepochs", args.adabmdca_nepochs)
+        if args.adabmdca_nepochs is not None:
+            add_param("adabmdca_nepochs", args.adabmdca_nepochs)
+        add_param("adabmdca_tol",         args.adabmdca_tol)
+        add_param("adabmdca_patience",    args.adabmdca_patience)
+        add_param("adabmdca_check_every", args.adabmdca_check_every)
         add_param("adabmdca_target",  args.adabmdca_target)
         add_param("adabmdca_lr",      args.adabmdca_lr)
         add_param("adabmdca_nchains", args.adabmdca_nchains)

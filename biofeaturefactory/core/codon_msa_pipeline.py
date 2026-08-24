@@ -1084,10 +1084,10 @@ Example:
 """
     )
 
-    parser.add_argument('--fasta', required=True,
+    parser.add_argument('-f', '--fasta', required=True,
                         help='FASTA with focus ORF nt sequence (variant_mapping output)')
 
-    parser.add_argument('--db-root', required=True,
+    parser.add_argument('-d', '--db-root', required=True,
                         help='Bio_DBs root directory produced by scripts/build_db.sh '
                              '(contains refseq_assemblies/ and refseq_proteins_merged.faa)')
 

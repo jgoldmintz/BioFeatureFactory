@@ -36,7 +36,7 @@ set -euo pipefail
 #                  8b-8c). No clones, no source builds, no dataset downloads.
 #   git-phase      Clones, source builds, the conda installs, and editable installs
 #                  (steps 1b, 3-8c, 10-12).
-#   db-phase       FTP dataset downloads and build_db (steps 9, 12).
+#   db-phase       FTP dataset downloads, CoCoPUTs codon table, build_db (steps 9, 9b, 12).
 #   (none)         Run every phase.
 #
 #   Each phase may be written bare: `env`, `git`, `db` are accepted for
@@ -57,12 +57,19 @@ set -euo pipefail
 #   --exclude-signalp         Skip the SignalP 6.0 presence check.
 #   --exclude-miranda         Skip conda install of miranda.
 #   --exclude-spliceai        Skip conda install of spliceai.
+#   --exclude-spliceai-env    Install spliceai into the ACTIVE env instead of its own.
+#                             Reintroduces the pyarrow/TensorFlow Abseil deadlock; see
+#                             step 6d.
+#   --spliceai-env NAME       Name of the dedicated spliceai env (default: bff-spliceai).
 #   --exclude-mmseqs2         Skip conda install of mmseqs2.
 #   --exclude-hmmer           Skip conda install of HMMER (jackhmmer).
 #   --exclude-editable-repos  Skip `pip install -e` of cloned python repos (nsp3, adabmDCApy).
 #   --exclude-genesplicer     Skip downloading/building GeneSplicer from JHU source.
 #   --exclude-clone-af3       Skip cloning AlphaFold3.
 #   --exclude-uniref90        Skip UniRef90 FTP download.
+#   --exclude-cocoputs        Skip the CoCoPUTs codon-usage table build (rare_codon).
+#   --bio-dbs DIR             Prepared-database root (default: nearest Bio_DBs above the
+#                             repo, else BFF_BIO_DBS, else scripts/_downloads).
 #   --exclude-idmapping       Skip UniProt idmapping FTP download.
 #   --exclude-build-db        Skip calling build_db.sh.
 #
@@ -89,6 +96,9 @@ INSTALL_NEXTFLOW=1
 CLONE_AF3=1
 DOWNLOAD_UNIREF90=1
 DOWNLOAD_IDMAPPING=1
+BUILD_COCOPUTS_CUT=1
+SPLICEAI_OWN_ENV=1
+SPLICEAI_ENV_NAME="${SPLICEAI_ENV_NAME:-bff-spliceai}"
 RUN_BUILD_DB=1
 INSTALL_EDITABLE_REPOS=1
 FIX_PYTHON=0
@@ -216,8 +226,8 @@ done
 # phase is enabled, and its step still runs exactly once.
 PHASE_ENV_FLAGS="PIP_INSTALL INSTALL_MIRANDA INSTALL_SPLICEAI INSTALL_MMSEQS2 INSTALL_HMMER INSTALL_NEXTFLOW INSTALL_EDITABLE_REPOS"
 PHASE_GIT_FLAGS="INSTALL_BUILD_TOOLS CLONE_EVMUTATION BUILD_PLMC CLONE_ADABMDCA DOWNLOAD_CG_COTRANS CLONE_NETSURFP3 INSTALL_SIGNALP INSTALL_MIRANDA INSTALL_SPLICEAI INSTALL_MMSEQS2 INSTALL_HMMER BUILD_GENESPLICER INSTALL_NEXTFLOW CLONE_AF3 INSTALL_EDITABLE_REPOS"
-PHASE_DB_FLAGS="DOWNLOAD_UNIREF90 DOWNLOAD_IDMAPPING RUN_BUILD_DB"
-ALL_PHASE_FLAGS="PIP_INSTALL INSTALL_BUILD_TOOLS CLONE_EVMUTATION BUILD_PLMC CLONE_ADABMDCA DOWNLOAD_CG_COTRANS CLONE_NETSURFP3 INSTALL_SIGNALP INSTALL_MIRANDA INSTALL_SPLICEAI INSTALL_MMSEQS2 INSTALL_HMMER BUILD_GENESPLICER INSTALL_NEXTFLOW CLONE_AF3 INSTALL_EDITABLE_REPOS DOWNLOAD_UNIREF90 DOWNLOAD_IDMAPPING RUN_BUILD_DB"
+PHASE_DB_FLAGS="DOWNLOAD_UNIREF90 DOWNLOAD_IDMAPPING BUILD_COCOPUTS_CUT RUN_BUILD_DB"
+ALL_PHASE_FLAGS="PIP_INSTALL INSTALL_BUILD_TOOLS CLONE_EVMUTATION BUILD_PLMC CLONE_ADABMDCA DOWNLOAD_CG_COTRANS CLONE_NETSURFP3 INSTALL_SIGNALP INSTALL_MIRANDA INSTALL_SPLICEAI INSTALL_MMSEQS2 INSTALL_HMMER BUILD_GENESPLICER INSTALL_NEXTFLOW CLONE_AF3 INSTALL_EDITABLE_REPOS DOWNLOAD_UNIREF90 DOWNLOAD_IDMAPPING BUILD_COCOPUTS_CUT RUN_BUILD_DB"
 
 enable_phase_flags() {
   local f
@@ -250,12 +260,16 @@ while [[ $# -gt 0 ]]; do
     --exclude-signalp)       INSTALL_SIGNALP=0 ;;
     --exclude-miranda)       INSTALL_MIRANDA=0 ;;
     --exclude-spliceai)      INSTALL_SPLICEAI=0 ;;
+    --exclude-spliceai-env)  SPLICEAI_OWN_ENV=0 ;;
+    --spliceai-env)          SPLICEAI_ENV_NAME="${2:?--spliceai-env needs a name}"; shift ;;
     --exclude-mmseqs2)       INSTALL_MMSEQS2=0 ;;
     --exclude-hmmer)         INSTALL_HMMER=0 ;;
     --exclude-editable-repos) INSTALL_EDITABLE_REPOS=0 ;;
     --exclude-genesplicer)   BUILD_GENESPLICER=0 ;;
     --exclude-clone-af3)     CLONE_AF3=0 ;;
     --exclude-uniref90)      DOWNLOAD_UNIREF90=0 ;;
+    --exclude-cocoputs)      BUILD_COCOPUTS_CUT=0 ;;
+    --bio-dbs)               BIO_DBS_DIR="${2:?--bio-dbs needs a directory}"; shift ;;
     --exclude-idmapping)     DOWNLOAD_IDMAPPING=0 ;;
     --exclude-build-db)      RUN_BUILD_DB=0 ;;
     --fix-python)            FIX_PYTHON=1 ;;
@@ -361,6 +375,31 @@ fi
 # SCRIPT_DIR was already resolved above (apply_plmc_patch needs it before the
 # arg parser runs); ROOT_DIR is the same directory, so reuse rather than recompute.
 ROOT_DIR="$SCRIPT_DIR"
+
+# Prepared-database root. The CoCoPUTs codon-usage table belongs here with every
+# other built database, NOT in the repo: it is derived data (~11 MB of upstream
+# zips plus the table), it is shared across checkouts, and rare_codon reads it by
+# path rather than importing it.
+#
+# Bio_DBs is NOT a fixed number of levels above this script. ROOT_DIR is the
+# `scripts/` directory, so the pre-existing `$ROOT_DIR/../Bio_DBs` at the legacy
+# build_db.sh call resolves to <repo>/Bio_DBs, which is not where it lives on any
+# machine checked -- this repo sits at <base>/BFF/BioFeatureFactory while Bio_DBs
+# sits at <base>/Bio_DBs, three levels up. Searching upward finds it wherever the
+# checkout is nested, and --bio-dbs / BFF_BIO_DBS override when it is elsewhere
+# entirely. Falls back to scripts/_downloads so a machine with no Bio_DBs still
+# bootstraps rather than aborting.
+find_bio_dbs() {
+  local d="$ROOT_DIR"
+  local i
+  for i in 1 2 3 4 5; do
+    d="$(cd "$d/.." 2>/dev/null && pwd)" || return 1
+    [[ -d "$d/Bio_DBs" ]] && { echo "$d/Bio_DBs"; return 0; }
+    [[ "$d" == "/" ]] && break
+  done
+  return 1
+}
+BIO_DBS_DIR="${BIO_DBS_DIR:-${BFF_BIO_DBS:-}}"
 REPO_ROOT="$(cd "$ROOT_DIR/.." && pwd)"
 BFF_DIR="$REPO_ROOT/biofeaturefactory"
 cd "$ROOT_DIR"
@@ -664,12 +703,101 @@ fi
 # block where the spliceai CHECK lives: that block is skipped unless the git phase runs,
 # and the env phase is documented as pip/conda installs. A conda
 # package belongs in the phase that installs conda packages.
-echo "[6d/12] SpliceAI (conda)..."
+echo "[6d/12] SpliceAI (own conda env)..."
+# SpliceAI gets its OWN environment. Two independent reasons, both measured:
+#
+#  1. Abseil collision. pyarrow and tensorflow each vendor their own Abseil, and
+#     whichever loads first owns the symbols. The `spliceai` console script
+#     imports pandas -> pyarrow BEFORE tensorflow, so pyarrow wins, and tf.data's
+#     prefetch CondVar inside Keras model.predict is then waited on by libarrow's
+#     absl and signalled by tensorflow's. It never wakes. Measured on a real SMN2
+#     run in the shared `bff` env: 6.31 s of CPU in 38 MINUTES of wall clock at
+#     0.0% CPU, blocked in
+#       PrefetchDatasetOp::GetNextInternal -> absl::CondVar::WaitCommon
+#         -> AbslInternalPerThreadSemWait (in libarrow.2500.dylib)
+#     Reduced to a 6-line repro, run both ways in that env:
+#       import pyarrow    -> model.predict()  TIMEOUT (deadlock)
+#       import tensorflow -> model.predict()  0.06 s, and 0.03 s AFTER pyarrow
+#     pandas 3.0.5 REQUIRES pyarrow, so pyarrow cannot simply be dropped from a
+#     shared env. bin/main.nf works around it by importing tensorflow first; an
+#     env without pyarrow removes the hazard rather than sequencing around it.
+#
+#  2. setuptools. spliceai/__init__.py:2 does `from pkg_resources import
+#     get_distribution`, and pkg_resources was REMOVED in setuptools 81. Pinning
+#     the SHARED env to setuptools<81 holds all of BFF on a deprecated setuptools
+#     line to satisfy one tool. In its own env the pin costs nothing.
+#
+# --exclude-spliceai-env puts it back in the active env (and back in reach of both
+# problems). --spliceai-env NAME changes the env name.
 if [[ "$INSTALL_SPLICEAI" -eq 1 ]]; then
-  if command -v spliceai >/dev/null 2>&1; then
-    echo "  OK spliceai already on PATH"
+  CONDA_BIN=""
+  command -v conda >/dev/null 2>&1 && CONDA_BIN=conda
+  [[ -z "$CONDA_BIN" ]] && command -v mamba >/dev/null 2>&1 && CONDA_BIN=mamba
+
+  if [[ "$SPLICEAI_OWN_ENV" -eq 1 && -n "$CONDA_BIN" ]]; then
+    # `conda env list` is the only reliable existence test: `conda run -n` on a
+    # missing env exits non-zero for several unrelated reasons too.
+    if "$CONDA_BIN" env list | awk '{print $1}' | grep -qx "$SPLICEAI_ENV_NAME"; then
+      echo "  OK env '$SPLICEAI_ENV_NAME' already exists"
+    else
+      echo "  CREATE env '$SPLICEAI_ENV_NAME' (python=${PY_VER:-3.11})"
+      "$CONDA_BIN" create -y -n "$SPLICEAI_ENV_NAME" "python=${PY_VER:-3.11}" \
+        || record_failure "step 6d: conda create -n $SPLICEAI_ENV_NAME"
+    fi
+    echo "  INSTALL spliceai + setuptools<81 into '$SPLICEAI_ENV_NAME'"
+    "$CONDA_BIN" install -y -n "$SPLICEAI_ENV_NAME" -c bioconda spliceai "python=${PY_VER:-3.11}" \
+      || record_failure "step 6d: conda install spliceai -n $SPLICEAI_ENV_NAME"
+    "$CONDA_BIN" run -n "$SPLICEAI_ENV_NAME" python -m pip install --quiet "setuptools>=77.0,<81" \
+      || record_failure "step 6d: setuptools<81 in $SPLICEAI_ENV_NAME"
+
+    # Verify what actually breaks, not just that the CLI exists. `spliceai --help`
+    # is argparse only -- it exits before TensorFlow loads, so it passed on the
+    # very env that then deadlocked. This runs the real failure mode with a
+    # timeout instead.
+    echo "  CHECK pkg_resources + Keras predict after pyarrow (the deadlock)"
+    "$CONDA_BIN" run -n "$SPLICEAI_ENV_NAME" python - <<'SPLICEAI_CHECK' \
+      || record_failure "step 6d: '$SPLICEAI_ENV_NAME' fails the import-order/pkg_resources check"
+import faulthandler, sys, threading
+faulthandler.dump_traceback_later(180, exit=True)   # a hang is a FAILURE, not a wait
+try:
+    import pkg_resources                             # spliceai/__init__.py:2
+except Exception as exc:
+    print(f"  FAIL pkg_resources: {exc}"); sys.exit(1)
+try:
+    import pyarrow                                   # only if something pulled it in
+    print(f"  WARN pyarrow {pyarrow.__version__} present in this env")
+except ImportError:
+    print("  OK  pyarrow absent (Abseil collision impossible)")
+try:
+    import numpy as np, tensorflow as tf
+    m = tf.keras.Sequential([tf.keras.layers.Dense(2, input_shape=(4,))])
+    m.predict(np.zeros((4, 4), dtype="float32"), verbose=0)
+    print("  OK  keras predict completed")
+except Exception as exc:
+    print(f"  FAIL keras predict: {exc}"); sys.exit(1)
+faulthandler.cancel_dump_traceback_later()
+SPLICEAI_CHECK
+    echo "  OK spliceai env ready: $SPLICEAI_ENV_NAME"
   else
-    conda_install_pinned spliceai spliceai || true
+    if [[ "$SPLICEAI_OWN_ENV" -eq 1 ]]; then
+      echo "  WARN conda/mamba not found; installing into the active env instead"
+    else
+      echo "  NOTE --exclude-spliceai-env: installing into the active env"
+    fi
+    if command -v spliceai >/dev/null 2>&1; then
+      echo "  OK spliceai already on PATH"
+    else
+      conda_install_pinned spliceai spliceai || true
+    fi
+    if command -v spliceai >/dev/null 2>&1; then
+      if ! "$PY_BIN" -c 'import pkg_resources' >/dev/null 2>&1; then
+        echo "  FIX  installing setuptools<81 (spliceai needs pkg_resources)"
+        "$PY_BIN" -m pip install --quiet "setuptools>=77.0,<81" \
+          || record_failure "step 6d: pip install setuptools<81 (spliceai needs pkg_resources)"
+      fi
+      echo "  WARN shared env: spliceai is exposed to the pyarrow/TensorFlow Abseil"
+      echo "       deadlock. bin/main.nf imports tensorflow first to avoid it."
+    fi
   fi
 fi
 
@@ -1054,6 +1182,15 @@ if [[ "$DOWNLOAD_IDMAPPING" -eq 1 ]]; then
     || record_failure "step 9: download idmapping.dat.gz"
 fi
 
+# ── Step 9b: CoCoPUTs codon usage table -- MOVED ────────────────────────
+# The table is built by scripts/build_db.sh (step 9b there), not here. It is a
+# prepared database like every other artifact under Bio_DBs, and building it from
+# bootstrap gave that directory two owners with two different ideas of where it
+# lives. BUILD_COCOPUTS_CUT/--exclude-cocoputs still control it -- they are
+# forwarded to build_db.sh as SKIP_COCOPUTS at step 12. Both flags sit in
+# PHASE_DB_FLAGS and both default to 1, so any invocation that used to reach the
+# build here reaches it there.
+
 # ── Steps 10-12: summaries over what the git phase clones/builds ─────────
 if [[ "$PHASE_GIT" -eq 1 ]]; then
   echo "[10/12] SpliceAI/Nextflow checks..."
@@ -1121,15 +1258,16 @@ fi
 
 if [[ "$RUN_BUILD_DB" -eq 1 ]]; then
   DB_SCRIPT="$ROOT_DIR/build_db.sh"
-  LEGACY_DB_SCRIPT="$(cd "$ROOT_DIR/.." && pwd)/Bio_DBs/build_db.sh"
   if [[ -x "$DB_SCRIPT" ]]; then
     echo "  RUN scripts/build_db.sh"
+    # DB_ROOT and SKIP_COCOPUTS are the two things bootstrap owns about the
+    # database build: --bio-dbs picks the root, --exclude-cocoputs turns off the
+    # codon-usage table. Everything else build_db.sh decides for itself.
+    if [[ -n "$BIO_DBS_DIR" ]]; then export DB_ROOT="$BIO_DBS_DIR"; fi
+    if [[ "$BUILD_COCOPUTS_CUT" -eq 0 ]]; then export SKIP_COCOPUTS=1; fi
     "$DB_SCRIPT" || record_failure "step 12: scripts/build_db.sh"
-  elif [[ -x "$LEGACY_DB_SCRIPT" ]]; then
-    echo "  RUN Bio_DBs/build_db.sh (legacy path)"
-    "$LEGACY_DB_SCRIPT" || record_failure "step 12: Bio_DBs/build_db.sh"
   else
-    echo "  WARN build_db.sh not found/executable at $DB_SCRIPT or $LEGACY_DB_SCRIPT"
+    echo "  WARN build_db.sh not found/executable at $DB_SCRIPT"
   fi
 fi
 

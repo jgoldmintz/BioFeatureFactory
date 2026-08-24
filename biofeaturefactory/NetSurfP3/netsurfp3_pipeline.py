@@ -1149,14 +1149,14 @@ def main():
                              'Optional — when omitted, auto-detected from the WT sequence via detect_alphabet.')
 
     # Processing options
-    parser.add_argument('--mutation-dir', required=True,
+    parser.add_argument('-m', '--mutation-dir', required=True,
                         help='Mutation file or directory. For --input-type=nt: NT mutations '
                              '(A1002T, and non-SNV forms such as ACAA1002A, T28TGGT). '
                              'For --input-type=aa: AA mutations (M334V, KE100K). '
                              'Non-SNV tokens are processed by default (REQUIRED)')
-    parser.add_argument('--model', required=True,
+    parser.add_argument('-M', '--model', required=True,
                         help='Path to trained NSP3 model checkpoint (REQUIRED)')
-    parser.add_argument('--config', required=True,
+    parser.add_argument('-c', '--config', required=True,
                         help='Path to NSP3 config YAML file (REQUIRED)')
     parser.add_argument('--log',
                         help='Validation log file to skip failed mutations')
