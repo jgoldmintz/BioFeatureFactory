@@ -60,6 +60,7 @@ import pandas as pd
 # -------------------------------------------------------------------------
 HERE = os.path.dirname(os.path.abspath(__file__))
 from biofeaturefactory.lib.utility import (
+    derive_mapping_root,
     discover_mapping_files,
     discover_fasta_files,
     parse_piece_token,
@@ -1644,11 +1645,12 @@ def main():
     # --mapping-dir kept as an alias so existing invocations keep working; dest is
     # pinned so args.mapping_dir is unchanged throughout.
     parser.add_argument("-M", "--variant-mapping-root", "--mapping-dir",
-                        dest="mapping_dir", required=True,
-                        help="variant_mapping OUTPUT ROOT (<root>/<GENE>/mappings/transcript/), "
-                             "or a single transcript-mapping CSV/TSV. Given the root, "
-                             "--intron-premrna-mapping defaults to it as well, since "
-                             "mappings/intron_premRNA/ is a sibling of mappings/transcript/.")
+                        dest="mapping_dir",
+                        help="FILE MODE ONLY. In directory mode this is derived from --input, "
+                             "which IS the variant_mapping output root: mappings/ and fastas/ "
+                             "are siblings under the same <GENE>/. Supply it only to point at a "
+                             "transcript-mapping CSV/TSV outside that layout. Given a root, "
+                             "--intron-premrna-mapping is derived from it too.")
     parser.add_argument("-ipm", "--intron-premrna-mapping",
                         help="FILE MODE ONLY. In directory mode this is derived from "
                              "--variant-mapping-root, since mappings/intron_premRNA/ is a "
@@ -1678,6 +1680,17 @@ def main():
             parser.error("miranda not found on PATH; install via: conda install -c bioconda miranda")
 
     failure_map = load_validation_failures(args.log) if args.log else {}
+
+    # One root supplies both. In directory mode --input IS the variant_mapping
+    # output root, and the mappings live at <root>/<GENE>/mappings/ beside
+    # <root>/<GENE>/fastas/ -- naming it twice is pure repetition. Explicit
+    # --variant-mapping-root still wins, and FILE MODE is unaffected.
+    args.mapping_dir = derive_mapping_root(args.mapping_dir, args.input, "transcript",
+                                           label="miranda")
+    if not args.mapping_dir:
+        raise ValueError(
+            "--variant-mapping-root is required (no <GENE>/mappings/transcript/ "
+            f"under --input {args.input})")
 
     mapping_dict = load_transcript_mappings(args.mapping_dir)
     if not mapping_dict:

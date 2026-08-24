@@ -52,6 +52,7 @@ import concurrent.futures
 # imports from biofeaturefactory.lib.utility
 # ---------------------------------------------------------------------------
 from biofeaturefactory.lib.utility import (
+    derive_mapping_root,
     discover_fasta_files,
     read_fasta,
     parse_variant,
@@ -1274,9 +1275,11 @@ def main():
                              "genomic FASTA. In directory mode the gene is the DIRECTORY name, "
                              "not the filename; a flat directory of FASTAs also works.")
     parser.add_argument("-m", "--variant-mapping-root", "--mapping-dir",
-                        dest="mapping_dir", required=True,
-                        help="variant_mapping OUTPUT ROOT (<root>/<GENE>/mappings/gDNA/), or a "
-                             "single genomic-mapping CSV.")
+                        dest="mapping_dir",
+                        help="FILE MODE ONLY. In directory mode this is derived from --input, "
+                             "which IS the variant_mapping output root: mappings/gDNA/ and "
+                             "fastas/ are siblings under the same <GENE>/. Supply it only for a "
+                             "genomic-mapping CSV outside that layout.")
     parser.add_argument("-g", "--genesplicer-dir", default=None,
                         help="Directory containing GeneSplicer binary; "
                              "omit to use genesplicer from PATH (e.g. after conda install)")
@@ -1332,6 +1335,13 @@ def main():
     model_dir = _resolve_model_dir(args.model_dir, args.genesplicer_dir)
 
     input_path = Path(args.input)
+    # One root supplies both; see the note in miranda_ensemble. genesplicer reads
+    # the GENOMIC mapping, so it derives mappings/gDNA/ rather than transcript/.
+    args.mapping_dir = derive_mapping_root(args.mapping_dir, args.input, "genomic",
+                                           label="genesplicer")
+    if not args.mapping_dir:
+        parser.error("--variant-mapping-root is required (no <GENE>/mappings/gDNA/ "
+                     f"under --input {args.input})")
     mapping_dir = args.mapping_dir
     genesplicer_dir = args.genesplicer_dir
     output_base = args.output

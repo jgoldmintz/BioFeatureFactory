@@ -51,6 +51,8 @@ from biofeaturefactory.alphafold3.bin.binding_metrics import (
 )
 
 from biofeaturefactory.lib.utility import (
+    derive_mutations_root,
+    derive_mapping_root,
     mint_pkey,
     read_fasta, trim_muts, get_mutation_data_bioAccurate,
     extract_gene_from_filename, subseq, load_mapping,
@@ -1052,6 +1054,23 @@ def main():
                        help='Max GPUs for parallel AF3 execution (default: auto-detect)')
 
     args = parser.parse_args()
+
+
+    # One root supplies these: <root>/<GENE>/mappings/{mutations,chromosome,
+
+    # intron_premRNA}/ sit beside <root>/<GENE>/fastas/. --rbp-mapping is NOT
+
+    # derived -- it is a POSTAR3 RBP table, not a variant_mapping product.
+
+    args.mutations = derive_mutations_root(args.mutations, args.fasta, label="af3")
+
+    args.chromosome_mapping = derive_mapping_root(
+
+        args.chromosome_mapping, args.fasta, "chromosome", label="af3")
+
+    args.premrna_mapping = derive_mapping_root(
+
+        args.premrna_mapping, args.fasta, "premrna", label="af3")
 
     # Validate that we have either MSA dir or sequences
     if not args.msa_dir and not args.rbp_sequences:

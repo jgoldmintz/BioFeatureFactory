@@ -49,6 +49,7 @@ from concurrent.futures import ThreadPoolExecutor
 # load_wt_sequences, extract_mutation_from_sequence_name) plus `time`, `logging` and
 # the typing aliases were imported but never referenced anywhere in this module.
 from biofeaturefactory.lib.utility import (
+    derive_mutations_root,
     mint_pkey,
     token_from_name,
     write_fasta,
@@ -1051,6 +1052,10 @@ def main():
     if not args.input or not args.output:
         parser.error("input and output arguments are required")
 
+    # One root supplies both: <root>/<GENE>/mappings/ sits beside
+    # <root>/<GENE>/fastas/, so the input IS the mapping location in directory
+    # mode. Explicit values always win; FILE MODE is unaffected.
+    args.mutations = derive_mutations_root(args.mutations, args.input, label="netmhc")
     if not args.mutations:
         parser.error("--mutations is REQUIRED for full-pipeline mode")
 

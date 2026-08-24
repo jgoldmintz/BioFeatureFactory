@@ -48,6 +48,7 @@ from pathlib import Path
 from typing import Dict, List, Optional
 
 from biofeaturefactory.lib.utility import (
+    derive_mutations_root,
     discover_fasta_files,
     extract_gene_from_filename,
 )
@@ -140,7 +141,7 @@ def parse_args() -> argparse.Namespace:
     # Required
     parser.add_argument("-f", "--fasta", type=Path, required=True,
                         help="ORF FASTA file or directory of per-gene FASTA files")
-    parser.add_argument("-m", "--mutations", type=Path, required=True,
+    parser.add_argument("-m", "--mutations", type=Path, required=False,
                         help="Mutations CSV file or directory of per-gene CSVs")
     parser.add_argument("-pb", "--plmc-binary", type=str,
                         help="Path to plmc executable (required when the EVmutation backend runs; "
@@ -239,6 +240,17 @@ def parse_args() -> argparse.Namespace:
                         help="Resume previous Nextflow run")
 
     args = parser.parse_args()
+
+    # One root supplies both; see lib/utility.derive_mutations_root.
+
+    args.mutations = derive_mutations_root(args.mutations, args.fasta, label="mutEffects")
+
+    if not args.mutations:
+
+        parser.error("--mutations is required (no <GENE>/mappings/mutations/ under "
+
+                     f"--fasta {args.fasta})")
+
     validate_args(args)
     return args
 

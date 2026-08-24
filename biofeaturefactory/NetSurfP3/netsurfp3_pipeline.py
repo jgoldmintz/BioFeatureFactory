@@ -54,6 +54,7 @@ import sys
 from typing import Optional, Dict, List, Tuple
 # Import utility functions
 from biofeaturefactory.lib.utility import (
+    derive_mutations_root,
     read_fasta,
     mint_pkey,
     token_from_name,
@@ -1149,7 +1150,7 @@ def main():
                              'Optional — when omitted, auto-detected from the WT sequence via detect_alphabet.')
 
     # Processing options
-    parser.add_argument('-m', '--mutation-dir', required=True,
+    parser.add_argument('-m', '--mutation-dir',
                         help='Mutation file or directory. For --input-type=nt: NT mutations '
                              '(A1002T, and non-SNV forms such as ACAA1002A, T28TGGT). '
                              'For --input-type=aa: AA mutations (M334V, KE100K). '
@@ -1200,6 +1201,11 @@ def main():
         print(f"Found {len(fasta_files)} FASTA files to process")
 
     # Discover mutation files
+    # One root supplies both: <root>/<GENE>/mappings/ sits beside
+    # <root>/<GENE>/fastas/, so the input IS the mapping location in directory
+    # mode. Explicit values always win; FILE MODE is unaffected.
+    args.mutation_dir = derive_mutations_root(args.mutation_dir, args.input,
+                                              label="netsurfp3")
     mutation_files = discover_mutation_files(args.mutation_dir) if args.mutation_dir else {}
 
     # Collect all results

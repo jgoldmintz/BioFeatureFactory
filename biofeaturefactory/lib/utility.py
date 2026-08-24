@@ -1631,7 +1631,14 @@ def load_wt_sequences(input_dir: str, wt_header: str = "transcript") -> Dict[str
     if input_path.is_file():
         fasta_files = [input_path] if input_path.suffix.lower() in (".fa", ".fasta", ".fna") else []
     else:
-        fasta_files = sorted([f for f in input_path.iterdir() if f.is_file() and f.suffix.lower() in (".fa", ".fasta", ".fna")])
+        # Per-gene layout first: <root>/<GENE>/fastas/<GENE>.fasta. The flat
+        # iterdir below sees only directories at such a root and reported
+        # "No WT sequences found in ." for a tree that held one per gene.
+        _disc = discover_fasta_files(str(input_path))
+        if _disc:
+            fasta_files = [Path(p) for _, p in sorted(_disc.items())]
+        else:
+            fasta_files = sorted([f for f in input_path.iterdir() if f.is_file() and f.suffix.lower() in (".fa", ".fasta", ".fna")])
     print(f"[WT] Scanning {len(fasta_files)} WT FASTA files")
     for fasta_file in fasta_files:
         data = read_fasta(str(fasta_file))
