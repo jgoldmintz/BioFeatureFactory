@@ -10,8 +10,7 @@ from pathlib import Path
 
 import pytest
 
-sys.path.insert(0, str(Path(__file__).parent.parent.parent / "biofeaturefactory" / "utils"))
-from variant_mapping import (
+from biofeaturefactory.core.variant_mapping import (
     locate_orf_in_transcript,
     validate_mutations_against_orf,
     derive_orf_from_transcript,

@@ -60,6 +60,7 @@ import pandas as pd
 # -------------------------------------------------------------------------
 HERE = os.path.dirname(os.path.abspath(__file__))
 from biofeaturefactory.lib.utility import (
+    discover_mapping_files,
     discover_fasta_files,
     parse_piece_token,
     mint_pkey,
@@ -1629,7 +1630,10 @@ def _load_substrate_sequences(input_path: str) -> Dict[str, str]:
 def main():
     parser = argparse.ArgumentParser(description="Unified MirandA pipeline (WT+MUT) with comparative outputs")
     # IO
-    parser.add_argument("-i", "--input", required=True, help="WT FASTA file, or directory of FASTA files")
+    parser.add_argument("-i", "--input", required=True,
+                        help="variant_mapping OUTPUT ROOT (<root>/<GENE>/fastas/), or a single "
+                             "WT FASTA file. In directory mode the gene is the DIRECTORY name, "
+                             "not the filename; a flat directory of FASTAs also works.")
     parser.add_argument("-o", "--output", required=True, help="output directory of miranda")
     # MirandA
     parser.add_argument("-m", "--miranda_dir", default=None,
@@ -1637,11 +1641,21 @@ def main():
                              "omit to use miranda from PATH (e.g. conda install -c bioconda miranda)")
     parser.add_argument("-d", "--mirna_db", required=True, help="path to mirna database")
     # Mapping
-    parser.add_argument("-M", "--mapping-dir", required=True, help="transcript mapping CSV/TSV file, or directory of CSV/TSV files")
-    parser.add_argument("--intron-premrna-mapping",
-                        help="intron_premRNA_mapping_<GENE>.csv (file or directory). Intronic "
-                             "variants are scanned against BOTH the intron record and the "
-                             "pre_mRNA record.")
+    # --mapping-dir kept as an alias so existing invocations keep working; dest is
+    # pinned so args.mapping_dir is unchanged throughout.
+    parser.add_argument("-M", "--variant-mapping-root", "--mapping-dir",
+                        dest="mapping_dir", required=True,
+                        help="variant_mapping OUTPUT ROOT (<root>/<GENE>/mappings/transcript/), "
+                             "or a single transcript-mapping CSV/TSV. Given the root, "
+                             "--intron-premrna-mapping defaults to it as well, since "
+                             "mappings/intron_premRNA/ is a sibling of mappings/transcript/.")
+    parser.add_argument("-ipm", "--intron-premrna-mapping",
+                        help="FILE MODE ONLY. In directory mode this is derived from "
+                             "--variant-mapping-root, since mappings/intron_premRNA/ is a "
+                             "sibling of mappings/transcript/ under the same <GENE>/. Supply it "
+                             "only to point at an intron_premRNA_mapping_<GENE>.csv outside that "
+                             "layout. Intronic variants are scanned against BOTH the intron "
+                             "record and the pre_mRNA record.")
     parser.add_argument("-si", "--strict-introns", action="store_true",
                         help="Pass miranda -strict (strict 5' seed pairing) for the intron and "
                              "pre_mRNA substrates only. WT and MUT always use the same setting.")
@@ -1680,6 +1694,18 @@ def main():
     # the intron record and the pre-mRNA record, each keyed GENE~<substrate>.
     strict_substrates: set = set()
     substrate_seqs = _load_substrate_sequences(args.input)
+    # Default it to --mapping-dir. variant_mapping writes
+    # <root>/<GENE>/mappings/intron_premRNA/ as a SIBLING of
+    # <root>/<GENE>/mappings/transcript/, so when --mapping-dir is a gene-layout
+    # root the two flags name the same directory and requiring both makes the
+    # caller repeat themselves. discover_mapping_files confirms an
+    # intron_premRNA mapping is actually present before defaulting, so a run
+    # without one behaves exactly as before.
+    if not args.intron_premrna_mapping and args.mapping_dir:
+        if discover_mapping_files(str(args.mapping_dir), "intron_premrna"):
+            args.intron_premrna_mapping = args.mapping_dir
+            print(f"[miranda] --intron-premrna-mapping not given; using "
+                  f"{args.mapping_dir} (per-gene layout detected)")
     if args.intron_premrna_mapping:
         # One file per gene, columns: mutant, orf, intron, pre-mRNA-Transcript.
         # `orf` and `intron` are mutually exclusive per row, so a variant spanning

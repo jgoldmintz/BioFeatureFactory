@@ -10,8 +10,8 @@ from pathlib import Path
 
 import pytest
 
-sys.path.insert(0, str(Path(__file__).parent.parent.parent / "biofeaturefactory" / "utils"))
-from utility import (
+from biofeaturefactory.lib.utility import (
+    mint_pkey,
     process_single_mutation_for_sequence,
     parse_predictions_with_mutation_filtering,
     extract_mutation_from_sequence_name,
@@ -86,17 +86,17 @@ class TestShouldSkipMutation:
 class TestGetMutationDataBioAccurate:
 
     def test_normal_mutation(self):
-        pos, (orig, mut) = get_mutation_data_bioAccurate("Y110F")
+        pos, (orig, mut) = get_mutation_data_bioAccurate("Y110F", is_nt=False)
         assert pos == 110
         assert orig == "Y"
         assert mut == "F"
 
     def test_stop_codon_returns_none(self):
-        pos, _ = get_mutation_data_bioAccurate("Y110Stop")
+        pos, _ = get_mutation_data_bioAccurate("Y110Stop", is_nt=True)
         assert pos is None
 
     def test_position_one(self):
-        pos, (orig, mut) = get_mutation_data_bioAccurate("M1V")
+        pos, (orig, mut) = get_mutation_data_bioAccurate("M1V", is_nt=False)
         assert pos == 1
 
 
@@ -107,25 +107,25 @@ class TestProcessSingleMutationNetphos:
     MAPPING = {"C330T": "Y110F"}
 
     def test_matching_prediction_returned(self):
-        preds = [_netphos_pred("ZFP36-C330T", 110, "F")]
+        preds = [_netphos_pred(mint_pkey("ZFP36", "C330T"), 110, "F")]
         results = process_single_mutation_for_sequence(
-            "ZFP36-C330T", preds, self.MAPPING, tool_type="netphos"
+            mint_pkey("ZFP36", "C330T"), preds, self.MAPPING, tool_type="netphos"
         )
         assert len(results) == 1
-        assert results[0]["pkey"] == "ZFP36-C330T"
+        assert results[0]["pkey"] == mint_pkey("ZFP36", "C330T")
         assert results[0]["Gene"] == "ZFP36"
 
     def test_wrong_position_filtered(self):
-        preds = [_netphos_pred("ZFP36-C330T", 50, "F")]
+        preds = [_netphos_pred(mint_pkey("ZFP36", "C330T"), 50, "F")]
         results = process_single_mutation_for_sequence(
-            "ZFP36-C330T", preds, self.MAPPING, tool_type="netphos"
+            mint_pkey("ZFP36", "C330T"), preds, self.MAPPING, tool_type="netphos"
         )
         assert results == []
 
     def test_wrong_amino_acid_filtered(self):
-        preds = [_netphos_pred("ZFP36-C330T", 110, "S")]
+        preds = [_netphos_pred(mint_pkey("ZFP36", "C330T"), 110, "S")]
         results = process_single_mutation_for_sequence(
-            "ZFP36-C330T", preds, self.MAPPING, tool_type="netphos"
+            mint_pkey("ZFP36", "C330T"), preds, self.MAPPING, tool_type="netphos"
         )
         assert results == []
 
@@ -137,30 +137,30 @@ class TestProcessSingleMutationNetphos:
         assert results == []
 
     def test_mutation_not_in_mapping_returns_empty(self):
-        preds = [_netphos_pred("ZFP36-A100G", 50, "V")]
+        preds = [_netphos_pred(mint_pkey("ZFP36", "A100G"), 50, "V")]
         results = process_single_mutation_for_sequence(
-            "ZFP36-A100G", preds, {"C330T": "Y110F"}, tool_type="netphos"
+            mint_pkey("ZFP36", "A100G"), preds, {"C330T": "Y110F"}, tool_type="netphos"
         )
         assert results == []
 
     def test_is_mutant_false_raises(self):
         with pytest.raises(ValueError, match="should only be used for mutant"):
             process_single_mutation_for_sequence(
-                "ZFP36-C330T", [], self.MAPPING, is_mutant=False
+                mint_pkey("ZFP36", "C330T"), [], self.MAPPING, is_mutant=False
             )
 
     def test_unsupported_tool_type_raises(self):
-        preds = [_netphos_pred("ZFP36-C330T", 110, "F")]
+        preds = [_netphos_pred(mint_pkey("ZFP36", "C330T"), 110, "F")]
         with pytest.raises(ValueError, match="Unsupported tool_type"):
             process_single_mutation_for_sequence(
-                "ZFP36-C330T", preds, self.MAPPING, tool_type="bogus"
+                mint_pkey("ZFP36", "C330T"), preds, self.MAPPING, tool_type="bogus"
             )
 
     def test_failure_map_skips_mutation(self):
-        preds = [_netphos_pred("ZFP36-C330T", 110, "F")]
+        preds = [_netphos_pred(mint_pkey("ZFP36", "C330T"), 110, "F")]
         fm = {"ZFP36": {"C330T"}}
         results = process_single_mutation_for_sequence(
-            "ZFP36-C330T", preds, self.MAPPING, tool_type="netphos", failure_map=fm
+            mint_pkey("ZFP36", "C330T"), preds, self.MAPPING, tool_type="netphos", failure_map=fm
         )
         assert results == []
 
@@ -175,36 +175,36 @@ class TestProcessSingleMutationNetnglyc:
 
     def test_matching_prediction_returned(self):
         # sequon starts with 'S' (target_aa), position matches
-        preds = [_netnglyc_pred("GENE1-A300G", 100, "SSTV")]
+        preds = [_netnglyc_pred(mint_pkey("GENE1", "A300G"), 100, "SSTV")]
         results = process_single_mutation_for_sequence(
-            "GENE1-A300G", preds, self.MAPPING, tool_type="netnglyc"
+            mint_pkey("GENE1", "A300G"), preds, self.MAPPING, tool_type="netnglyc"
         )
         assert len(results) == 1
-        assert results[0]["pkey"] == "GENE1-A300G"
+        assert results[0]["pkey"] == mint_pkey("GENE1", "A300G")
         # Field renaming: position → pos, sequon → Sequon
         assert "pos" in results[0]
         assert "Sequon" in results[0]
         assert "seq_name" not in results[0]
 
     def test_wrong_position_filtered(self):
-        preds = [_netnglyc_pred("GENE1-A300G", 50, "SSTV")]
+        preds = [_netnglyc_pred(mint_pkey("GENE1", "A300G"), 50, "SSTV")]
         results = process_single_mutation_for_sequence(
-            "GENE1-A300G", preds, self.MAPPING, tool_type="netnglyc"
+            mint_pkey("GENE1", "A300G"), preds, self.MAPPING, tool_type="netnglyc"
         )
         assert results == []
 
     def test_wrong_sequon_aa_filtered(self):
         """sequon[0] = 'N' doesn't match target_aa = 'S'."""
-        preds = [_netnglyc_pred("GENE1-A300G", 100, "NSTV")]
+        preds = [_netnglyc_pred(mint_pkey("GENE1", "A300G"), 100, "NSTV")]
         results = process_single_mutation_for_sequence(
-            "GENE1-A300G", preds, self.MAPPING, tool_type="netnglyc"
+            mint_pkey("GENE1", "A300G"), preds, self.MAPPING, tool_type="netnglyc"
         )
         assert results == []
 
     def test_empty_sequon_filtered(self):
-        preds = [_netnglyc_pred("GENE1-A300G", 100, "")]
+        preds = [_netnglyc_pred(mint_pkey("GENE1", "A300G"), 100, "")]
         results = process_single_mutation_for_sequence(
-            "GENE1-A300G", preds, self.MAPPING, tool_type="netnglyc"
+            mint_pkey("GENE1", "A300G"), preds, self.MAPPING, tool_type="netnglyc"
         )
         assert results == []
 
@@ -216,35 +216,35 @@ class TestParsePredictionsMutationFiltering:
     MAPPING = {"C330T": "Y110F"}
 
     def test_basic_mutant_filtering(self):
-        preds = [_netphos_pred("ZFP36-C330T", 110, "F", score=0.95)]
+        preds = [_netphos_pred(mint_pkey("ZFP36", "C330T"), 110, "F", score=0.95)]
         results = parse_predictions_with_mutation_filtering(
             preds, self.MAPPING, is_mutant=True, tool_type="netphos"
         )
         assert len(results) == 1
 
     def test_threshold_filters_low_score(self):
-        preds = [_netphos_pred("ZFP36-C330T", 110, "F", score=0.3)]
+        preds = [_netphos_pred(mint_pkey("ZFP36", "C330T"), 110, "F", score=0.3)]
         results = parse_predictions_with_mutation_filtering(
             preds, self.MAPPING, is_mutant=True, threshold=0.5, tool_type="netphos"
         )
         assert results == []
 
     def test_threshold_passes_high_score(self):
-        preds = [_netphos_pred("ZFP36-C330T", 110, "F", score=0.8)]
+        preds = [_netphos_pred(mint_pkey("ZFP36", "C330T"), 110, "F", score=0.8)]
         results = parse_predictions_with_mutation_filtering(
             preds, self.MAPPING, is_mutant=True, threshold=0.5, tool_type="netphos"
         )
         assert len(results) == 1
 
     def test_yes_only_filters_no_answer(self):
-        preds = [_netphos_pred("ZFP36-C330T", 110, "F", score=0.9, answer=".")]
+        preds = [_netphos_pred(mint_pkey("ZFP36", "C330T"), 110, "F", score=0.9, answer=".")]
         results = parse_predictions_with_mutation_filtering(
             preds, self.MAPPING, is_mutant=True, yes_only=True, tool_type="netphos"
         )
         assert results == []
 
     def test_yes_only_passes_yes_answer(self):
-        preds = [_netphos_pred("ZFP36-C330T", 110, "F", score=0.9, answer="YES")]
+        preds = [_netphos_pred(mint_pkey("ZFP36", "C330T"), 110, "F", score=0.9, answer="YES")]
         results = parse_predictions_with_mutation_filtering(
             preds, self.MAPPING, is_mutant=True, yes_only=True, tool_type="netphos"
         )
@@ -257,7 +257,7 @@ class TestParsePredictionsMutationFiltering:
             )
 
     def test_netnglyc_threshold_filtering(self):
-        preds = [_netnglyc_pred("GENE1-C330T", 110, "FXXX", potential=0.4)]
+        preds = [_netnglyc_pred(mint_pkey("GENE1", "C330T"), 110, "FXXX", potential=0.4)]
         mapping = {"C330T": "Y110F"}
         results = parse_predictions_with_mutation_filtering(
             preds, mapping, is_mutant=True, threshold=0.5, tool_type="netnglyc"
@@ -266,9 +266,9 @@ class TestParsePredictionsMutationFiltering:
 
     def test_multiple_sequences_grouped(self):
         preds = [
-            _netphos_pred("ZFP36-C330T", 110, "F", score=0.9),
-            _netphos_pred("ZFP36-C330T", 50, "S", score=0.9),  # wrong pos
-            _netphos_pred("BRCA1-A100G", 33, "V", score=0.9),
+            _netphos_pred(mint_pkey("ZFP36", "C330T"), 110, "F", score=0.9),
+            _netphos_pred(mint_pkey("ZFP36", "C330T"), 50, "S", score=0.9),  # wrong pos
+            _netphos_pred(mint_pkey("BRCA1", "A100G"), 33, "V", score=0.9),
         ]
         mapping = {"C330T": "Y110F", "A100G": "V33A"}
         results = parse_predictions_with_mutation_filtering(
@@ -278,7 +278,7 @@ class TestParsePredictionsMutationFiltering:
         assert len(results) == 1
 
     def test_failure_map_filters_in_parse(self):
-        preds = [_netphos_pred("ZFP36-C330T", 110, "F", score=0.9)]
+        preds = [_netphos_pred(mint_pkey("ZFP36", "C330T"), 110, "F", score=0.9)]
         fm = {"ZFP36": {"C330T"}}
         results = parse_predictions_with_mutation_filtering(
             preds, self.MAPPING, is_mutant=True, tool_type="netphos", failure_map=fm

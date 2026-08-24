@@ -10,8 +10,7 @@ from pathlib import Path
 
 import pytest
 
-sys.path.insert(0, str(Path(__file__).parent.parent.parent / "biofeaturefactory" / "utils"))
-from utility import compute_sequence_weights, compute_neff
+from biofeaturefactory.lib.utility import compute_sequence_weights, compute_neff
 
 
 

@@ -12,8 +12,7 @@ from pathlib import Path
 
 import pytest
 
-sys.path.insert(0, str(Path(__file__).parent.parent.parent / "biofeaturefactory" / "utils"))
-from utility import (
+from biofeaturefactory.lib.utility import (
     combine_batch_outputs,
     _combine_glycosylation_outputs,
     _combine_phosphorylation_outputs,

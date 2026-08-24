@@ -67,6 +67,7 @@ except ImportError:
     CHAR_TO_CODON = {}
 
 from biofeaturefactory.lib.utility import (
+    derive_mutations_root,
     codon_to_aa,
     discover_fasta_files,
     extract_gene_from_filename,
@@ -1929,7 +1930,7 @@ def main() -> None:
     )
     parser.add_argument("-f", "--fasta", required=True,
                         help="ORF FASTA file (single gene) or directory")
-    parser.add_argument("-m", "--mutations", required=True,
+    parser.add_argument("-m", "--mutations", required=False,
                         help="Mutations CSV file or directory")
     # MSAs are the primary inputs: training is invoked here if params don't exist.
     parser.add_argument("--msa",
@@ -1988,6 +1989,21 @@ def main() -> None:
     parser.add_argument("--quiet", "-q", action="store_true")
 
     args = parser.parse_args()
+
+
+    # Directory mode: <root>/<GENE>/mappings/mutations/ sits beside the input,
+
+    # so the root supplies both. Explicit --mutations always wins; FILE MODE and
+
+    # any layout outside the tree are unaffected.
+
+    args.mutations = derive_mutations_root(args.mutations, args.fasta, "adabmdca")
+
+    if not args.mutations:
+
+        parser.error("--mutations is required (no <GENE>/mappings/mutations/ under "
+
+                     f"--fasta {args.fasta})")
 
     fasta_path = Path(args.fasta)
     output_dir = Path(args.output)

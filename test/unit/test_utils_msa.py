@@ -10,8 +10,7 @@ from pathlib import Path
 
 import pytest
 
-sys.path.insert(0, str(Path(__file__).parent.parent.parent / "biofeaturefactory" / "utils"))
-from utility import parse_stockholm, stockholm_to_a2m, filter_msa_by_gaps
+from biofeaturefactory.lib.utility import parse_stockholm, stockholm_to_a2m, filter_msa_by_gaps
 
 
 

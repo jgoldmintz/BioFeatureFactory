@@ -11,8 +11,7 @@ from pathlib import Path
 
 import pytest
 
-sys.path.insert(0, str(Path(__file__).parent.parent.parent / "biofeaturefactory" / "utils"))
-from utility import compute_cai, compute_tai, extract_codon_with_bicodons, detect_alphabet
+from biofeaturefactory.lib.utility import compute_cai, compute_tai, extract_codon_with_bicodons, detect_alphabet
 
 
 
@@ -95,6 +94,10 @@ class TestComputeTAI:
 
 
 class TestExtractCodonWithBicodons:
+    # F46: extract_codon_with_bicodons applies the ALT base BEFORE slicing, so the
+    # codon it returns is the MUTATED one and the mutated codon inside each bicodon
+    # is likewise ALT. Neighbouring codons stay WT, which is correct. These
+    # expectations predate F46 and asserted the WT codon.
 
     # ATG AAA GAA TGG = M K E W  (12 nt, 4 codons)
     SEQ = "ATGAAAGAATGG"
@@ -102,7 +105,8 @@ class TestExtractCodonWithBicodons:
     def test_middle_codon_has_both_bicodons(self):
         # codon 2 = AAA (positions 4-6), middle codon
         codon, fwd, rev, pos_in_codon, pos, codon_num = extract_codon_with_bicodons("A4G", self.SEQ)
-        assert codon == "AAA"
+        # F46: ALT applied before slicing, so this is the MUTATED codon (AAA -> GAA)
+        assert codon == "GAA"
         assert fwd != ""   # forward bicodon available
         assert rev != ""   # reverse bicodon available
         assert codon_num == 2
@@ -110,7 +114,7 @@ class TestExtractCodonWithBicodons:
     def test_first_codon_has_forward_only(self):
         # codon 1 = ATG (positions 1-3)
         codon, fwd, rev, pos_in_codon, pos, codon_num = extract_codon_with_bicodons("A1T", self.SEQ)
-        assert codon == "ATG"
+        assert codon == "TTG"
         assert fwd != ""   # forward bicodon (ATG + AAA)
         assert rev == ""   # no reverse (no preceding codon)
         assert codon_num == 1
@@ -118,18 +122,18 @@ class TestExtractCodonWithBicodons:
     def test_last_codon_has_reverse_only(self):
         # codon 4 = TGG (positions 10-12)
         codon, fwd, rev, pos_in_codon, pos, codon_num = extract_codon_with_bicodons("T10A", self.SEQ)
-        assert codon == "TGG"
+        assert codon == "AGG"
         assert fwd == ""   # no forward (last codon)
         assert rev != ""   # reverse bicodon (GAA + TGG)
         assert codon_num == 4
 
     def test_forward_bicodon_correct_sequence(self):
         codon, fwd, rev, _, _, _ = extract_codon_with_bicodons("A4G", self.SEQ)
-        assert fwd == "AAAGAA"   # AAA + GAA
+        assert fwd == "GAAGAA"   # AAA + GAA
 
     def test_reverse_bicodon_correct_sequence(self):
         codon, fwd, rev, _, _, _ = extract_codon_with_bicodons("A4G", self.SEQ)
-        assert rev == "ATGAAA"   # ATG + AAA
+        assert rev == "ATGGAA"   # ATG + AAA
 
     def test_pos_in_codon_first_position(self):
         _, _, _, pos_in_codon, _, _ = extract_codon_with_bicodons("A4G", self.SEQ)

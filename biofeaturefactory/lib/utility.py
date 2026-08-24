@@ -1266,6 +1266,97 @@ MSA_LAYOUT = {
 }
 
 
+def discover_mutation_files(mutation_dir):
+    """{gene_name: mutations_csv} for a variant_mapping output root or a flat dir.
+
+    Kept separate from discover_mapping_files because a mutations CSV is NOT a
+    mapping: <GENE>_mutations.csv has a single `mutant` column, and
+    validate_mapping_content rejects single-column files by design. That is why
+    MAP_DIR_FOR_TYPE has no "mutations" entry -- routing this through the mapping
+    discoverer would always return {}.
+
+    Layout: <root>/<GENE>/mappings/mutations/<GENE>_mutations.csv. A single file
+    returns {gene_from_filename: path}; a flat directory falls back to *.csv.
+    """
+    from pathlib import Path
+
+    found = {}
+    if not mutation_dir:
+        return found
+    p = Path(mutation_dir)
+    if not p.exists():
+        return found
+    if p.is_file():
+        return {extract_gene_from_filename(p.stem): str(p)}
+
+    for gd in _gene_dirs(p):
+        d = gd / "mappings" / "mutations"
+        if not d.is_dir():
+            continue
+        hits = sorted(d.glob("*.csv"))
+        if hits:
+            found[gd.name] = str(hits[0])
+    if found:
+        return found
+
+    # Flat directory of per-gene CSVs.
+    for f in sorted(p.glob("*.csv")):
+        gene = extract_gene_from_filename(f.stem)
+        if gene:
+            found.setdefault(gene, str(f))
+    return found
+
+
+def derive_mutations_root(explicit, input_root, label=None):
+    """Mutations counterpart to derive_mapping_root; same explicit-wins contract."""
+    if explicit:
+        return explicit
+    if not input_root:
+        return None
+    if discover_mutation_files(str(input_root)):
+        if label:
+            print(f"[{label}] --mutations not given; using {input_root} "
+                  f"(per-gene layout detected)")
+        return input_root
+    return None
+
+
+def derive_mapping_root(explicit, input_root, map_type, label=None):
+    """Resolve a mapping location, defaulting to the input root in DIRECTORY MODE.
+
+    variant_mapping writes every mapping under <root>/<GENE>/mappings/<type>/,
+    beside <root>/<GENE>/fastas/ and <root>/<GENE>/{MSA,CodonMSA}/. When a caller
+    passes that root as its input, the mapping location is the SAME directory, so
+    requiring a separate flag makes them name it twice -- and almost every pipeline
+    needs a mapping of some kind, so that repetition is paid on nearly every
+    invocation.
+
+    Returns `explicit` untouched when given, so FILE MODE and any mapping outside
+    the layout behave exactly as before. Returns None when nothing can be derived,
+    leaving the caller to raise its own error.
+
+    The confirmation matters: discover_mapping_files must actually find a mapping
+    of `map_type` under the root before it is adopted. Defaulting blindly would
+    turn "you forgot the flag" into "no rows for this gene, no reason given".
+    """
+    if explicit:
+        return explicit
+    if not input_root:
+        return None
+    # Only derive for a type this layout actually defines. discover_mapping_files
+    # falls back to searching EVERY mappings/ subdirectory when map_type is
+    # unrecognised, so without this an unknown type ('rbp', a typo) would adopt the
+    # root on the strength of some unrelated mapping.
+    if map_type.lower() not in MAP_DIR_FOR_TYPE:
+        return None
+    if discover_mapping_files(str(input_root), map_type):
+        if label:
+            print(f"[{label}] --{map_type.replace('_', '-')} mapping not given; "
+                  f"using {input_root} (per-gene layout detected)")
+        return input_root
+    return None
+
+
 def discover_msa_files(msa_dir, kind="protein"):
     """{gene_name: msa_path} for an MSA generator's output root.
 

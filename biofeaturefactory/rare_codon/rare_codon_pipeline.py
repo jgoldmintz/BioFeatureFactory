@@ -43,6 +43,7 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 CG_DIR = SCRIPT_DIR / "cg_cotrans"
 
 from biofeaturefactory.lib.utility import (
+    derive_mutations_root,
     discover_msa_files,
     read_fasta,
     mint_pkey,
@@ -1129,7 +1130,7 @@ Copyright notice:
     # --fasta was removed: its only informational job was to supply the WT ORF,
     # and the MSA already carries it as the wt_gi record. Everything else the flag
     # did (enumerating genes in directory mode) the MSA resolver does too.
-    parser.add_argument('-m', '--mutations', required=True,
+    parser.add_argument('-m', '--mutations', required=False,
                         help='Mutations CSV file or directory of CSV files')
     parser.add_argument('-vl', '--validation-log', help='Validation log for filtering')
 
@@ -1158,6 +1159,21 @@ Copyright notice:
     parser.add_argument('--output', '-o', required=True, help='Output base directory')
 
     args = parser.parse_args()
+
+    # Directory mode: <root>/<GENE>/mappings/mutations/ sits beside the input,
+
+    # so the root supplies both. Explicit --mutations always wins; FILE MODE and
+
+    # any layout outside the tree are unaffected.
+
+    args.mutations = derive_mutations_root(args.mutations, args.msa, "rare_codon")
+
+    if not args.mutations:
+
+        parser.error("--mutations is required (no <GENE>/mappings/mutations/ under "
+
+                     f"--msa {args.msa})")
+
     args.usage = _ensure_codon_usage(args)
 
     msa_path = Path(args.msa)

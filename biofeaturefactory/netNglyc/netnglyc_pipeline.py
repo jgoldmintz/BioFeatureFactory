@@ -39,6 +39,7 @@ from typing import Optional
 
 # Import utility functions
 from biofeaturefactory.lib.utility import (
+    derive_mapping_root,
     read_fasta,
     get_mutation_data_bioAccurate,
     split_fasta_into_batches,
@@ -3215,6 +3216,10 @@ def run_full_pipeline_mode(args, failure_map, parser):
     if not args.input or not args.output:
         parser.error("For full-pipeline mode: both input (FASTA file/directory) and output (TSV file) are required")
 
+    # Directory mode: <root>/<GENE>/mappings/ lives under the same root as the
+    # input FASTAs, so the input supplies the mappings too. Explicit wins.
+    args.mapping_dir = derive_mapping_root(args.mapping_dir, args.input, "transcript",
+                                           label="netnglyc")
     if not args.mapping_dir:
         parser.error("For full-pipeline mode: --mapping-dir is REQUIRED (directory containing mutation mapping CSV files)")
 

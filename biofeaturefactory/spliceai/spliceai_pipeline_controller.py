@@ -30,6 +30,8 @@ import argparse
 import subprocess
 import sys
 from pathlib import Path
+
+from biofeaturefactory.lib.utility import derive_mapping_root
 from typing import List, Optional
 
 HERE = Path(__file__).resolve().parent
@@ -51,9 +53,18 @@ def parse_args() -> argparse.Namespace:
                         help="Use pre-built VCFs (requires --input_vcf_path)")
     parser.add_argument("-rg", "--reference_genome", type=Path, required=True)
     parser.add_argument("-af", "--annotation_file", type=Path, required=True)
-    parser.add_argument("-tmp", "--transcript_mapping_path", type=Path, required=True)
-    parser.add_argument("-cmp", "--chromosome_mapping_path", type=Path, required=True)
-    parser.add_argument("-gmp", "--genomic_mapping_path", type=Path, required=True)
+    # FILE MODE ONLY. In directory mode all three are derived from the
+    # variant_mapping output root -- <root>/<GENE>/mappings/{transcript,chromosome,gDNA}/
+    # are siblings, so naming the root once supplies all of them. Explicit values
+    # always win. See _derive_mapping_paths below.
+    parser.add_argument("-tmp", "--transcript_mapping_path", type=Path,
+                        help="FILE MODE ONLY; derived from the variant_mapping output root "
+                             "given via --mutations_path (or --input_vcf_path).")
+    parser.add_argument("-cmp", "--chromosome_mapping_path", type=Path,
+                        help="FILE MODE ONLY; derived as above.")
+    parser.add_argument("-gmp", "--genomic_mapping_path", type=Path,
+                        help="FILE MODE ONLY; derived as above. Note bin/main.nf no longer "
+                             "requires it -- spliceai-parser.py declares no such argument.")
     parser.add_argument("-od", "--output_dir", type=Path, default=Path("."))
     parser.add_argument("-vod", "--vcf_output_dir", type=Path)
     parser.add_argument("-vl", "--validation_log", type=Path)
@@ -80,6 +91,35 @@ def parse_args() -> argparse.Namespace:
                         help="Resume from a previous run using Nextflow's -resume flag")
 
     args = parser.parse_args()
+
+    # Directory mode: one root supplies all three mappings.
+
+    _root = args.mutations_path or args.input_vcf_path
+
+    for _attr, _mtype in (("transcript_mapping_path", "transcript"),
+
+                          ("chromosome_mapping_path", "chromosome"),
+
+                          ("genomic_mapping_path", "genomic")):
+
+        _cur = getattr(args, _attr)
+
+        _got = derive_mapping_root(_cur, _root, _mtype, label="spliceai")
+
+        if _got is not None:
+
+            setattr(args, _attr, Path(_got))
+
+    # genomic_mapping_path is NOT required: bin/main.nf validated it, resolved it per
+
+    # gene, then dropped it -- spliceai-parser.py declares no --genomic-mapping.
+
+    for _attr in ("transcript_mapping_path", "chromosome_mapping_path"):
+
+        if not getattr(args, _attr):
+
+            parser.error(f"--{_attr} is required (no matching mapping under {_root})")
+
     validate_args(args)
     return args
 

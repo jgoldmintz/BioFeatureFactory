@@ -36,6 +36,7 @@ import platform
 from pathlib import Path
 
 from biofeaturefactory.lib.utility import (
+    derive_mapping_root,
     mint_pkey,
     token_from_name,
     split_fasta_into_batches,
@@ -1537,8 +1538,14 @@ def _pair_predictions_with_mutations(wt_dir, mut_dir, pkey_map=None):
 
 def run_full_pipeline_mode(args, executor_fn, ape_bin):
     """Synthesize FASTAs, run NetPhos, parse, build ensemble."""
+    # Directory mode: <root>/<GENE>/mappings/ sits under the same root as the
+    # input FASTAs, so the positional input supplies the mappings too. Explicit
+    # --mapping-dir always wins; FILE MODE is unaffected.
+    args.mapping_dir = derive_mapping_root(args.mapping_dir, args.input, "transcript",
+                                           label="netphos")
     if not args.mapping_dir:
-        print("ERROR: --mapping-dir is required for full-pipeline mode")
+        print("ERROR: --mapping-dir is required for full-pipeline mode "
+              f"(no <GENE>/mappings/transcript/ under {args.input})")
         return 1
 
     wt_header = getattr(args, 'wt_header', 'ORF')

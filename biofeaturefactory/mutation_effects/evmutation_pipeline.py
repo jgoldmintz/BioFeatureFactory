@@ -51,6 +51,13 @@ from pathlib import Path
 # Codon encoding utilities (bin/codon_encoding.py)
 _BIN_DIR = Path(__file__).resolve().parent / "bin"
 sys.path.insert(0, str(_BIN_DIR))
+# The EVmutation clone lands at <mutation_effects>/EVmutation/ (bootstrap step 3),
+# one level ABOVE bin/, so `from EVmutation.model import CouplingsModel` below
+# needs this directory on the path too. Without it the module raised
+# ModuleNotFoundError on import no matter how it was invoked, which is why
+# pyproject.toml withholds a console entry point for it.
+_PKG_DIR = Path(__file__).resolve().parent
+sys.path.insert(0, str(_PKG_DIR))
 try:
     from codon_encoding import (CHAR_TO_CODON, CODON_ALPHABET, CODON_TO_CHAR,
                                 encode_codon_msa)
@@ -69,6 +76,7 @@ if not hasattr(collections, "Iterable"):
 from EVmutation.model import CouplingsModel
 import EVmutation.tools as ev_tools
 from biofeaturefactory.lib.utility import (
+    derive_mutations_root,
     mint_pkey,
     codon_to_aa,
     discover_fasta_files,
@@ -1427,7 +1435,7 @@ Examples:
 
     parser.add_argument("-f", "--fasta", required=True,
                         help="ORF FASTA file (single gene) or directory (multi-gene)")
-    parser.add_argument("-m", "--mutations", required=True,
+    parser.add_argument("-m", "--mutations", required=False,
                         help="Mutations CSV file or directory of per-gene CSVs")
 
     # Model params (file or directory; optional)
@@ -1474,6 +1482,21 @@ Examples:
                         help="Suppress verbose output")
 
     args = parser.parse_args()
+
+
+    # Directory mode: <root>/<GENE>/mappings/mutations/ sits beside the input,
+
+    # so the root supplies both. Explicit --mutations always wins; FILE MODE and
+
+    # any layout outside the tree are unaffected.
+
+    args.mutations = derive_mutations_root(args.mutations, args.fasta, "evmutation")
+
+    if not args.mutations:
+
+        parser.error("--mutations is required (no <GENE>/mappings/mutations/ under "
+
+                     f"--fasta {args.fasta})")
 
     fasta_path = Path(args.fasta)
     output_dir = Path(args.output)

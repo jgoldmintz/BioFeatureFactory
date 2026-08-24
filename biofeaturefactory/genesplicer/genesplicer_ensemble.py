@@ -1269,8 +1269,14 @@ def _process_gene(fasta_path: Path,
 
 def main():
     parser = argparse.ArgumentParser(description="GeneSplicer WT<->ALT ensemble delta caller")
-    parser.add_argument("-i", "--input", required=True, help="Directory of genomic FASTA files, or a single FASTA file")
-    parser.add_argument("-m", "--mapping-dir", required=True, help="Genomic mutation mapping CSV file, or directory of CSV files")
+    parser.add_argument("-i", "--input", required=True,
+                        help="variant_mapping OUTPUT ROOT (<root>/<GENE>/fastas/), or a single "
+                             "genomic FASTA. In directory mode the gene is the DIRECTORY name, "
+                             "not the filename; a flat directory of FASTAs also works.")
+    parser.add_argument("-m", "--variant-mapping-root", "--mapping-dir",
+                        dest="mapping_dir", required=True,
+                        help="variant_mapping OUTPUT ROOT (<root>/<GENE>/mappings/gDNA/), or a "
+                             "single genomic-mapping CSV.")
     parser.add_argument("-g", "--genesplicer-dir", default=None,
                         help="Directory containing GeneSplicer binary; "
                              "omit to use genesplicer from PATH (e.g. after conda install)")

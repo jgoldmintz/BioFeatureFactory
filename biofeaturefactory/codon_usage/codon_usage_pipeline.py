@@ -22,6 +22,7 @@ import sys
 from pathlib import Path
 
 from biofeaturefactory.lib.utility import (
+    derive_mutations_root,
     discover_fasta_files,
     read_fasta,
     mint_pkey,
@@ -597,6 +598,21 @@ Metrics:
     parser.add_argument('--output', '-o', required=True, help='Output base directory')
 
     args = parser.parse_args()
+
+
+    # Directory mode: <root>/<GENE>/mappings/mutations/ sits beside the input,
+
+    # so the root supplies both. Explicit --mutations always wins; FILE MODE and
+
+    # any layout outside the tree are unaffected.
+
+    args.mutations = derive_mutations_root(args.mutations, args.fasta, "codon_usage")
+
+    if not args.mutations:
+
+        parser.error("--mutations is required (no <GENE>/mappings/mutations/ under "
+
+                     f"--fasta {args.fasta})")
 
     # Validate arguments
     if not Path(args.fasta).is_dir() and not args.mutations:
