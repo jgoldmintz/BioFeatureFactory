@@ -1105,10 +1105,21 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter
     )
 
+    # -i/-o, matching every other non-Nextflow pipeline. The positional forms are
+    # kept as optional trailing args so existing invocations still parse; the flag
+    # wins when both are given.
+    parser.add_argument('-i', '--input', dest='input_flag', metavar='INPUT',
+                        help='DIRECTORY MODE: variant_mapping output root '
+                             '(<root>/<GENE>/fastas/ + <root>/<GENE>/mappings/). '
+                             'Also accepts a single WT FASTA or a flat directory of them '
+                             '(nucleotide or amino acid).')
+    parser.add_argument('-o', '--output', dest='output_flag', metavar='OUTPUT',
+                        help='Output base directory; writes one set per gene at '
+                             '<output>/<GENE>/NetSurfP3/<GENE>.netsurfp3.{summary,residues,local}.tsv')
     parser.add_argument('input', nargs='?',
-                        help='Input: WT FASTA file or directory of FASTA files (nucleotide or amino acid)')
+                        help=argparse.SUPPRESS)
     parser.add_argument('output', nargs='?',
-                        help='Output base directory')
+                        help=argparse.SUPPRESS)
 
     # Input type
     parser.add_argument('-it', '--input-type', choices=['nt', 'aa'], default=None,
@@ -1136,9 +1147,16 @@ def main():
 
     args = parser.parse_args()
 
-    # Validate arguments
-    if not args.input or not args.output:
-        parser.error("input and output arguments are required")
+    # Flag wins over the positional. Both are folded into args.input/args.output so
+    # nothing downstream has to know which form the caller used.
+    args.input = args.input_flag or args.input
+    args.output = args.output_flag or args.output
+
+    if not args.input:
+        parser.error("-i/--input is required (variant_mapping output root, "
+                     "a FASTA file, or a directory of FASTAs)")
+    if not args.output:
+        parser.error("-o/--output is required (output base directory)")
 
     # Implementation
     if args.verbose:
@@ -1393,27 +1411,61 @@ def main():
             if os.path.exists(combined_fasta.name):
                 os.unlink(combined_fasta.name)
 
-    # Write output TSVs
-    input_path = Path(args.input)
-    if input_path.is_file():
-        gene = extract_gene_from_filename(args.input) or input_path.stem
-    else:
-        gene = input_path.stem
-    out_dir = Path(args.output) / gene / "NetSurfP3"
-    out_dir.mkdir(parents=True, exist_ok=True)
-    summary_path  = out_dir / f"{gene}.netsurfp3.summary.tsv"
-    residues_path = out_dir / f"{gene}.netsurfp3.residues.tsv"
-    local_path    = out_dir / f"{gene}.netsurfp3.local.tsv"
+    # Write output TSVs, ONE SET PER GENE, matching every other pipeline:
+    #   <output>/<GENE>/NetSurfP3/<GENE>.netsurfp3.{summary,residues,local}.tsv
+    #
+    # This used to key the whole run on `input_path.stem`, so a directory input
+    # produced one combined set named after the DIRECTORY -- `-i out` wrote
+    # out/NetSurfP3/out.netsurfp3.summary.tsv holding NPM1 and PAM together, under
+    # a gene called "out". Every row already carries a `gene` column (all three
+    # writers emit it), so the split needs no extra bookkeeping: group on that.
+    def _by_gene(rows):
+        grouped = {}
+        for row in rows:
+            grouped.setdefault(row.get("gene") or "unknown", []).append(row)
+        return grouped
 
-    write_summary_tsv(summary_rows, str(summary_path))
-    write_residues_tsv(residues_rows, str(residues_path))
-    write_local_tsv(local_rows, str(local_path))
+    summary_by = _by_gene(summary_rows)
+    residues_by = _by_gene(residues_rows)
+    local_by = _by_gene(local_rows)
+
+    # A gene that produced residue or local rows but no summary row still gets its
+    # directory; dropping it would lose output with no message.
+    genes = sorted(set(summary_by) | set(residues_by) | set(local_by))
+    if not genes:
+        # Nothing scored at all. Name the run after the input so the empty tables
+        # still land somewhere predictable rather than vanishing.
+        input_path = Path(args.input)
+        genes = [extract_gene_from_filename(args.input) or input_path.stem
+                 if input_path.is_file() else input_path.stem]
+
+    written = []
+    for gene in genes:
+        out_dir = Path(args.output) / gene / "NetSurfP3"
+        out_dir.mkdir(parents=True, exist_ok=True)
+        summary_path  = out_dir / f"{gene}.netsurfp3.summary.tsv"
+        residues_path = out_dir / f"{gene}.netsurfp3.residues.tsv"
+        local_path    = out_dir / f"{gene}.netsurfp3.local.tsv"
+
+        write_summary_tsv(summary_by.get(gene, []), str(summary_path))
+        write_residues_tsv(residues_by.get(gene, []), str(residues_path))
+        write_local_tsv(local_by.get(gene, []), str(local_path))
+        written.append((gene, summary_path, residues_path, local_path,
+                        len(summary_by.get(gene, [])),
+                        len(residues_by.get(gene, [])),
+                        len(local_by.get(gene, []))))
+
+    for gene, s_p, r_p, l_p, n_s, n_r, n_l in written:
+        print(f"{gene}: wrote {n_s} summary, {n_r} residue, {n_l} local entries "
+              f"-> {s_p.parent}")
 
     if args.verbose:
-        print(f"\nPipeline complete!")
-        print(f"  Summary: {summary_path}")
-        print(f"  Residues: {residues_path}")
-        print(f"  Local: {local_path}")
+        print(f"\nPipeline complete! {len(written)} gene(s)")
+        for gene, s_p, r_p, l_p, _, _, _ in written:
+            print(f"  {gene}")
+            print(f"    Summary: {s_p}")
+            print(f"    Residues: {r_p}")
+            print(f"    Local: {l_p}")
 
     return 0
 

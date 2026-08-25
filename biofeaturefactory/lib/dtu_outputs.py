@@ -279,8 +279,27 @@ def process_single_mutation_for_sequence(seq_name, predictions, mapping_dict, is
         else:
             raise ValueError(f"Unsupported tool_type: {tool_type}")
 
-        # Check if this prediction matches the mutation position and amino acid
-        if pred_pos == aa_pos and pred_aa == target_aa:
+        # NetNGlyc is a DELTA tool and keeps every mutant site; netphos keeps only
+        # the site AT the mutated residue.
+        #
+        # The shared condition below asks "is there a predicted site exactly at the
+        # mutated position, on the mutant residue". For netphos that is the
+        # question. For netnglyc it is unanswerable by construction: pred_aa is
+        # sequon[0], which is ALWAYS 'N', so `pred_aa == target_aa` can only pass
+        # for a mutation TO asparagine. MEASURED on PAM: D563G (aa_pos 563,
+        # target_aa 'G') and S539W (539, 'W') against predictions at 411 and 762 --
+        # no position match, and 'N' == 'G' / 'N' == 'W' never holds. Every mutant
+        # returned [], surfacing as missing_mut + no_comparable_site, and the
+        # count_gained / count_lost / delta columns could never populate.
+        #
+        # What netnglyc actually needs is ALL mutant sites, so the WT<->MUT
+        # alignment downstream can pair them and compute deltas -- a variant that
+        # weakens a site 200 residues away is precisely what the delta columns are
+        # for. netphos and netMHC keep the original behaviour.
+        keep = (pred_pos == aa_pos and pred_aa == target_aa)
+        if tool_type == 'netnglyc':
+            keep = True
+        if keep:
             # Create pkey for this match. mutation_id is the VERBATIM token by
             # this point (resolved above), so minting reproduces exactly the pkey
             # variant_mapping wrote.

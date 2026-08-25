@@ -186,27 +186,46 @@ class TestProcessSingleMutationNetnglyc:
         assert "Sequon" in results[0]
         assert "seq_name" not in results[0]
 
-    def test_wrong_position_filtered(self):
+    # netnglyc keeps EVERY mutant site. The three tests these replace asserted
+    # the opposite -- and one of them documented the bug in its own docstring
+    # ("sequon[0] = 'N' doesn't match target_aa = 'S'"). pred_aa for netnglyc is
+    # always 'N', so the old position+residue filter could only ever pass for a
+    # mutation TO asparagine; on PAM it dropped both mutants entirely and the
+    # delta columns could never populate. See dtu_outputs.process_single_
+    # mutation_for_sequence.
+
+    def test_site_away_from_mutation_kept(self):
+        """A site 50 residues from the variant still matters: it is what the
+        WT<->MUT delta is computed over."""
         preds = [_netnglyc_pred(mint_pkey("GENE1", "A300G"), 50, "SSTV")]
         results = process_single_mutation_for_sequence(
             mint_pkey("GENE1", "A300G"), preds, self.MAPPING, tool_type="netnglyc"
         )
-        assert results == []
+        assert len(results) == 1
+        assert results[0]["pos"] == 50
 
-    def test_wrong_sequon_aa_filtered(self):
-        """sequon[0] = 'N' doesn't match target_aa = 'S'."""
+    def test_asparagine_sequon_kept(self):
+        """sequon[0] is ALWAYS 'N' for netnglyc; requiring it to equal the mutant
+        residue is unsatisfiable except for mutations to N."""
         preds = [_netnglyc_pred(mint_pkey("GENE1", "A300G"), 100, "NSTV")]
         results = process_single_mutation_for_sequence(
             mint_pkey("GENE1", "A300G"), preds, self.MAPPING, tool_type="netnglyc"
         )
-        assert results == []
+        assert len(results) == 1
+        assert results[0]["Sequon"] == "NSTV"
 
-    def test_empty_sequon_filtered(self):
+    def test_empty_sequon_kept(self):
         preds = [_netnglyc_pred(mint_pkey("GENE1", "A300G"), 100, "")]
         results = process_single_mutation_for_sequence(
             mint_pkey("GENE1", "A300G"), preds, self.MAPPING, tool_type="netnglyc"
         )
-        assert results == []
+        assert len(results) == 1
+
+    def test_netphos_still_filters_by_position_and_residue(self):
+        """The change is netnglyc-only; netphos keeps the original contract."""
+        from biofeaturefactory.lib.dtu_outputs import process_single_mutation_for_sequence as f
+        preds = [{"Gene": mint_pkey("GENE1", "A300G"), "pos": 50, "amino_acid": "S", "score": 0.7}]
+        assert f(mint_pkey("GENE1", "A300G"), preds, self.MAPPING, tool_type="netphos") == []
 
 
 # ── parse_predictions_with_mutation_filtering ────────────────────────────

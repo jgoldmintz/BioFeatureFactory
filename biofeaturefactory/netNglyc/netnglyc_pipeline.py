@@ -95,6 +95,102 @@ def is_linux_host():
     return platform.system().lower() == "linux"
 
 
+def resolve_signalp6_path(user_path=None):
+    """
+    Resolve a usable signalp6 executable.
+
+    Mirrors resolve_native_netnglyc_path so the two DTU tools are located the same
+    way. Before this, SignalP was invoked as the bare name "signalp6" with no flag
+    and no environment variable -- it had to be on PATH or the pipeline silently
+    ran without signal-peptide context, unlike NetNGlyc which errors.
+
+    Search order:
+    1. Explicit --signalp6-bin value
+    2. $SIGNALP6_PATH environment variable
+    3. $SIGNALP6_HOME/signalp6
+    4. signalp6 on PATH
+    5. The sibling conda env bootstrap prescribes: <envs>/{signalp6,signalp6_fast}/bin/signalp6
+    6. Common install locations
+    7. $(conda info --base)/envs/{signalp6,signalp6_fast}/bin/signalp6 -- authoritative, costs a
+       subprocess, so it is tried only after everything above misses
+
+    A DIRECTORY is accepted anywhere a path is: the package unpacks to a root
+    holding the executable, so `-snp .../signalp6_fast/` resolves the same as
+    naming the binary.
+    """
+    candidates = []
+
+    # DTU ships the fast package as a tarball that unpacks to signalp6_fast/, and
+    # bootstrap's checklist names the env `signalp6`, so both spellings occur in
+    # the wild. Every directory probe below tries each. The EXECUTABLE is always
+    # `signalp6` -- that is the console script the package declares.
+    _NAMES = ("signalp6", "signalp6_fast")
+
+    def _add(path):
+        if path:
+            expanded = os.path.expanduser(path)
+            candidates.append(expanded)
+            if os.path.isdir(expanded):
+                candidates.append(os.path.join(expanded, "signalp6"))
+                candidates.append(os.path.join(expanded, "bin", "signalp6"))
+
+    _add(user_path)
+    _add(os.environ.get("SIGNALP6_PATH"))
+
+    signalp_home = os.environ.get("SIGNALP6_HOME")
+    if signalp_home:
+        _add(signalp_home)
+
+    _add(shutil.which("signalp6"))
+
+    # The SIBLING conda env. bootstrap.sh's SignalP notes prescribe exactly this:
+    # SignalP 6.0 pins torch<2 while nsp3 and AlphaFold3 need modern torch, so it
+    # is installed into its own `signalp6` env and CANNOT share the BFF env. That
+    # means shutil.which above never finds it -- the env is not on PATH while bff
+    # is active. Invoking it by absolute path is enough: the console script's
+    # shebang points at its own interpreter, so it brings its own torch and numpy.
+    env_roots = []
+    if os.environ.get("CONDA_PREFIX"):
+        env_roots.append(os.path.dirname(os.environ["CONDA_PREFIX"]))
+    if os.environ.get("CONDA_EXE"):
+        env_roots.append(os.path.join(
+            os.path.dirname(os.path.dirname(os.environ["CONDA_EXE"])), "envs"))
+    for envs_dir in env_roots:
+        for name in _NAMES:
+            _add(os.path.join(envs_dir, name, "bin", "signalp6"))
+
+    home = Path.home()
+    for name in _NAMES:
+        _add(str(home / name / "signalp6"))
+        _add(str(Path("/opt") / name / "signalp6"))
+    _add("/usr/local/bin/signalp6")
+
+    for path in candidates:
+        if path and os.path.isfile(path) and os.access(path, os.X_OK):
+            return os.path.abspath(path)
+
+    # LAST, because it costs a subprocess. `conda info --base` is the authoritative
+    # answer and, unlike CONDA_PREFIX above, it works with no env active at all --
+    # a cron job or a bare `python netnglyc_pipeline.py` still finds the env that
+    # bootstrap.sh's SignalP instructions create. Only reached when every free
+    # candidate has already missed.
+    conda_bin = shutil.which("conda") or shutil.which("mamba")
+    if conda_bin:
+        try:
+            base = subprocess.run([conda_bin, "info", "--base"],
+                                  capture_output=True, text=True, timeout=30)
+            if base.returncode == 0:
+                for name in _NAMES:
+                    fallback = os.path.join(base.stdout.strip(), "envs",
+                                            name, "bin", "signalp6")
+                    if os.path.isfile(fallback) and os.access(fallback, os.X_OK):
+                        return os.path.abspath(fallback)
+        except Exception:
+            pass
+
+    return None
+
+
 def resolve_native_netnglyc_path(user_path=None):
     """
     Resolve a usable native NetNGlyc executable when available.
@@ -109,7 +205,17 @@ def resolve_native_netnglyc_path(user_path=None):
 
     def _add(path):
         if path:
-            candidates.append(os.path.expanduser(path))
+            expanded = os.path.expanduser(path)
+            candidates.append(expanded)
+            # A DIRECTORY is accepted too. The final test is os.path.isfile, so
+            # passing the install root -- `-nnb .../netNglyc-1.0/`, the shape the
+            # DTU tarball unpacks to -- failed that test and then fell through the
+            # whole search to "binary not found", naming an env var rather than the
+            # directory the caller had just supplied. The NETNGLYC_HOME branch below
+            # already appends `netNglyc` to a root; this gives --native-netnglyc-bin
+            # and NETNGLYC_PATH the same treatment.
+            if os.path.isdir(expanded):
+                candidates.append(os.path.join(expanded, "netNglyc"))
 
     _add(user_path)
     _add(os.environ.get("NETNGLYC_PATH"))
@@ -733,7 +839,10 @@ def _process_single_sequence_worker(args):
 class SignalP6Handler:
     """Handle SignalP 6 predictions on the host before NetNGlyc execution"""
 
-    def __init__(self, cache_dir=None, verbose=False, logger=None):
+    def __init__(self, cache_dir=None, verbose=False, logger=None, signalp_bin=None):
+        # Resolved once. Falls back to the bare name so PATH still works when no
+        # flag, env var or common location supplies one -- the previous behaviour.
+        self.signalp_bin = resolve_signalp6_path(signalp_bin) or "signalp6"
         if cache_dir is None:
             cache_dir = os.path.join(os.path.expanduser("~"), ".signalp6_cache")
         self.cache_dir = cache_dir
@@ -748,7 +857,7 @@ class SignalP6Handler:
         """Check if SignalP 6 is available on the host"""
         try:
             result = subprocess.run(
-                ["signalp6", "--version"],
+                [self.signalp_bin, "--version"],
                 capture_output=True,
                 timeout=50,
                 text=True
@@ -815,7 +924,7 @@ class SignalP6Handler:
         try:
             # Run SignalP 6
             cmd = [
-                "signalp6",
+                self.signalp_bin,
                 "--fastafile", fasta_file,
                 "--output_dir", signalp_output_dir,
                 "--organism", "eukarya",
@@ -873,7 +982,14 @@ class SignalP6Handler:
                 self.last_output_dir = signalp_output_dir
                 return results, signalp_output_dir
             else:
-                print(f"SignalP 6 failed: {result.stderr[:200]}")
+                # The TAIL, not the head. stderr[:200] showed the first 200
+                # characters of a Python traceback -- "Traceback (most recent
+                # call last): File ..." -- and cut off before the exception line,
+                # which is the only part that names the cause. Every SignalP
+                # failure looked identical and unactionable.
+                _err = (result.stderr or "").strip()
+                _shown = _err if len(_err) <= 2000 else "...\n" + _err[-2000:]
+                print(f"SignalP 6 failed (exit {result.returncode}):\n{_shown}")
 
         except Exception as e:
             if self.logger:
@@ -899,7 +1015,7 @@ class RobustDockerNetNGlyc:
 
     def __init__(self, use_signalp=True,
                  max_workers=4, cache_dir=None, docker_timeout=600,
-                 verbose=False, native_bin=None, **_ignored):
+                 verbose=False, native_bin=None, signalp_bin=None, **_ignored):
         self.max_workers = max_workers
         self.temp_dir = tempfile.mkdtemp(prefix="netnglyc_")
         self.use_signalp = use_signalp
@@ -910,7 +1026,8 @@ class RobustDockerNetNGlyc:
         # Initialize SignalP handler
         if use_signalp:
             self.signalp_handler = SignalP6Handler(
-                cache_dir=cache_dir, verbose=self.verbose, logger=getattr(self, "error_logger", None)
+                cache_dir=cache_dir, verbose=self.verbose,
+                logger=getattr(self, "error_logger", None), signalp_bin=signalp_bin
             )
         else:
             self.signalp_handler = None
@@ -2295,9 +2412,27 @@ class RobustDockerNetNGlyc:
             if ev["mut_potential"] is not None and ev["wt_potential"] is None
         )
         qc_flags = []
-        if not wt_sites:
+        # ZERO SITES IS A FINDING, NOT AN ABSENCE. These fired on `not wt_sites`
+        # alone, so an allele NetNGlyc scored correctly and found no sequon in was
+        # flagged identically to one the tool never ran on. MEASURED on NPM1: 0
+        # N-X-S/T sequons in the WT and in all 6 frameshift mutants, so every row
+        # is a true negative -- and every row carried missing_wt,missing_mut,
+        # telling any downstream filter to drop or impute it. That converts real
+        # zeros into absent values across 6 of 8 rows in a run.
+        #
+        # wt_scored / mut_scored already separate the two states, and
+        # NOT_SCORED:*_no_netnglyc_output above reports the genuine absence. These
+        # now fire only when the allele produced no output at all -- which is
+        # exactly when the counts are undefined and set to None below.
+        #
+        # NOTE what this stops masking: while Array::Base was missing from the
+        # system perl, netNglyc returned zero sites for EVERY sequence and these
+        # flags were the only visible trace. They are not a substitute for that
+        # check -- bootstrap step 1d installs the module, and a run where every
+        # gene reports 0 sites should be treated as a broken install, not a result.
+        if not wt_sites and not wt_scored:
             qc_flags.append("missing_wt")
-        if not mut_sites:
+        if not mut_sites and not mut_scored:
             qc_flags.append("missing_mut")
         # Three mutually exclusive states, because "compared and identical" and
         # "could not be compared" are opposite findings that both used to surface
@@ -2449,6 +2584,32 @@ class RobustDockerNetNGlyc:
             for gene, path in (mapping_lookup or {}).items()
         }
         signalp_cache = signalp_cache or load_signalp_cache(self.cache_dir)
+
+        # pkey_map is REQUIRED by collect_mutant_sites and was never being built.
+        # Mutant sequences are named {GENE}-{sha}; without the map,
+        # extract_mutation_from_sequence_name returns the DIGEST rather than the
+        # token, normalize_mutation_id upper-cases it, and the mutation_index
+        # membership test below rejects it -- so every mutant prediction was
+        # dropped with no row, no counter and no warning. MEASURED on PAM:
+        #   with    pkey_map -> ('PAM', 'C1616G')        matches the index
+        #   without pkey_map -> ('PAM', 'e982a4857e94')  -> 'E982A4857E94', no match
+        # NetNGlyc scored the mutants correctly the whole time; the run reported
+        # "PAM_aa.fasta: 2 predictions" and then wrote missing_mut on every row.
+        #
+        # variant_mapping writes the inversion table beside the mapping this was
+        # handed, at <GENE>/mappings/pkey/, so it is derivable here without a new
+        # parameter. A layout that has none yields {} and the previous behaviour.
+        pkey_map = {}
+        for _gene, _map_path in (mapping_lookup or {}).items():
+            _maps_dir = Path(_map_path).resolve().parent.parent
+            for _pk in sorted((_maps_dir / "pkey").glob("*.csv")) if (_maps_dir / "pkey").is_dir() else []:
+                try:
+                    pkey_map.update(load_pkey_map(str(_pk)))
+                except Exception:
+                    continue
+        if self.verbose:
+            print(f"  pkey_map: {len(pkey_map)} sequence name(s) resolvable to tokens")
+
         wt_sites_by_gene, wt_signalp, wt_site_rows, wt_scored = self.collect_wt_sites(
             wt_dirs, threshold, mutation_index=mutation_index, signalp_cache=signalp_cache
         )
@@ -2459,7 +2620,8 @@ class RobustDockerNetNGlyc:
             pkey_gene_map,
             mut_scored,
         ) = self.collect_mutant_sites(
-            mut_dirs, threshold, mutation_index, signalp_cache=signalp_cache
+            mut_dirs, threshold, mutation_index, signalp_cache=signalp_cache,
+            pkey_map=pkey_map
         )
         sites_rows = wt_site_rows + mut_site_rows
         expected_pkeys = set(mut_sites_by_pkey.keys())
@@ -3213,6 +3375,11 @@ def clear_all_caches(cache_dir=None):
 
 def run_full_pipeline_mode(args, failure_map, parser):
     """Execute the full NetNGlyc pipeline: synthesize FASTAs, run NetNGlyc, parse outputs."""
+    # Flag wins over the positional; both fold into args.input/args.output so
+    # nothing downstream has to know which form the caller used.
+    args.input = args.input_flag or args.input
+    args.output = args.output_flag or args.output
+
     if not args.input or not args.output:
         parser.error("For full-pipeline mode: both input (FASTA file/directory) and output (TSV file) are required")
 
@@ -3279,6 +3446,7 @@ def run_full_pipeline_mode(args, failure_map, parser):
             docker_timeout=args.batch_timeout,
             verbose=args.verbose,
             native_bin=args.native_netnglyc_bin,
+            signalp_bin=args.signalp6_bin,
         ) as processor:
 
             print("\nRunning NetNGlyc on WT amino acid FASTAs...")
@@ -3342,12 +3510,19 @@ def main():
         description="Licensed NetNGlyc pipeline with SignalP 6 integration and intelligent parallel processing. Requires licensed NetNGlyc 1.0 native binary and SignalP 6.0 installation.",
         formatter_class=argparse.RawDescriptionHelpFormatter
     )
-    parser.add_argument("input", nargs='?', help="Input FASTA file or directory (required for process/full-pipeline modes)")
-    parser.add_argument("output", nargs='?', help="Output base directory (writes {GENE}/NetNglyc/{GENE}.tsv, .events.tsv, .sites.tsv)")
+    # -i/-o, matching every other non-Nextflow pipeline. The positional forms are
+    # kept as hidden optional trailing args so existing invocations still parse;
+    # the flag wins when both are given.
+    parser.add_argument("-i", "--input", dest="input_flag", metavar="INPUT",
+                        help="DIRECTORY MODE: variant_mapping output root "
+                             "(<root>/<GENE>/fastas/ + <root>/<GENE>/mappings/). "
+                             "Also accepts a single WT FASTA or a flat directory of them.")
+    parser.add_argument("-o", "--output", dest="output_flag", metavar="OUTPUT",
+                        help="Output base directory; writes <output>/<GENE>/NetNglyc/<GENE>.tsv, .events.tsv, .sites.tsv")
+    parser.add_argument("input", nargs='?', help=argparse.SUPPRESS)
+    parser.add_argument("output", nargs='?', help=argparse.SUPPRESS)
     parser.add_argument("-w", "--workers", type=int, default=4, help="Number of parallel workers (used with --processing-mode parallel, default: 4)")
     parser.add_argument("-cd", "--cache-dir", help="Custom cache directory for SignalP/NetNGlyc results")
-    parser.add_argument("-t", "--test", action="store_true",
-                        help="Run test with ABCB1 sequence (no other args required)")
     parser.add_argument("-cc", "--clear-cache", action="store_true",
                         help="Clear all cached results and exit (no other args required)")
     parser.add_argument("-md", "--mapping-dir",
@@ -3361,9 +3536,15 @@ def main():
     parser.add_argument("-l", "--log",
                         help="Validation log file or directory to skip failed mutations (mutant modes only)")
 
-    # Native execution options
+    # Native execution options. Both accept EITHER the executable or the install
+    # directory it sits in, and both fall back to their env vars
+    # (NETNGLYC_PATH/NETNGLYC_HOME, SIGNALP6_PATH/SIGNALP6_HOME).
     parser.add_argument("-nnb", "--native-netnglyc-bin",
-                        help="Path to native NetNGlyc binary")
+                        help="Path to the native NetNGlyc binary, or the install "
+                             "directory containing it (e.g. netNglyc-1.0/)")
+    parser.add_argument("-snp", "--signalp6-bin",
+                        help="Path to the signalp6 executable, or the install "
+                             "directory containing it. Defaults to signalp6 on PATH.")
 
     args = parser.parse_args()
     failure_map = load_validation_failures(args.log) if args.log else {}
@@ -3379,61 +3560,6 @@ def main():
         else:
             print("No caches found to clear")
         return 0
-
-    if args.test:
-        print("Running test mode...")
-        test_root = tempfile.mkdtemp(prefix="netnglyc_test_")
-        fasta_dir = Path(test_root) / "wt"
-        mapping_dir = Path(test_root) / "mapping"
-        fasta_dir.mkdir(parents=True, exist_ok=True)
-        mapping_dir.mkdir(parents=True, exist_ok=True)
-
-        test_fasta_path = fasta_dir / "ABCB1_nt.fasta"
-        test_mapping_path = mapping_dir / "ABCB1_mapping.csv"
-        test_output_tsv = Path("test_abcb1_results.tsv")
-        if test_output_tsv.exists():
-            test_output_tsv.unlink()
-
-        test_nt_sequence = (
-            "ATGGATCTGGAAGGTGATCGTAATGGTGGTGCTAAAAAAAAAAATTTTTTTAAACTGAAT"
-        )
-
-        with open(test_fasta_path, 'w') as handle:
-            handle.write(">orf\n")
-            handle.write(test_nt_sequence + "\n")
-
-        with open(test_mapping_path, 'w', newline='') as handle:
-            writer = csv.writer(handle)
-            writer.writerow(["mutant", "aamutant"])
-            writer.writerow(["G10A", ""])
-            writer.writerow(["A22G", "N8D"])
-            # Non-SNV tokens are processed by default -- no flag selects them.
-            writer.writerow(["AAT22A", ""])        # frameshift deletion
-            writer.writerow(["A22AGGG", ""])       # in-frame insertion
-            writer.writerow(["AAAAAA34A", ""])     # frameshift deletion
-            writer.writerow(["GGGG5A", ""])        # REF mismatch -> named row
-
-        test_args = argparse.Namespace(**vars(args))
-        test_args.input = str(fasta_dir)
-        test_args.output = str(test_output_tsv)
-        test_args.mapping_dir = str(mapping_dir)
-        test_args.test = False
-
-        try:
-            # PROPAGATE the status. Discarding it and returning 0 announced "Test
-            # pipeline completed successfully" for a run in which NetNGlyc executed
-            # 0/1 times -- the same unread-tally bug as in run_full_pipeline_mode,
-            # one level up, and the one a CI job or a batch driver would actually
-            # see.
-            rc = run_full_pipeline_mode(test_args, {}, parser)
-            if rc:
-                print(f"\nTest pipeline FAILED (exit {rc}). Parsed TSV: {test_output_tsv}",
-                      file=sys.stderr)
-            else:
-                print(f"\nTest pipeline completed successfully. Parsed TSV: {test_output_tsv}")
-            return rc
-        finally:
-            shutil.rmtree(test_root, ignore_errors=True)
 
     return run_full_pipeline_mode(args, failure_map, parser)
 

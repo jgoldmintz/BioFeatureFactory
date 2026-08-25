@@ -224,24 +224,51 @@ def _orf_to_genomic(pos1, gene_info):
 
 
 def _vcf_row(chrom, pos, ref, alt, fetch_base):
-    """One VCF 4.3 data row for any variant class.
+    """One PARSIMONIOUS VCF 4.3 data row for any variant class.
 
-    A pure insertion or deletion cannot be written as bare REF/ALT: VCF requires a
-    shared anchor base at POS-1 when either allele would otherwise be empty. An SNV
-    or a same-length MNV needs no anchor and is returned unchanged, so the SNV path
-    is byte-identical to before.
+    VCF requires a shared anchor base at POS-1 only when an allele would otherwise
+    be EMPTY. The tokens reaching here are already anchored — parse_variant returns
+    ACAA/A for a 3 nt deletion and G/GTCTG for a 4 nt insertion, and
+    test_keeps_the_vcf_anchor_base pins that form — so the former unconditional
+    `len(ref) != len(alt) -> prepend anchor` added a SECOND one.
 
-    Returns (pos, ref, alt) or None when the anchor base cannot be read.
+    That second anchor is what made both alleles longer than one base, and
+    SpliceAI refuses any record where REF and ALT are both multi-base
+    (spliceai/utils.py:139 emits `ALT|GENE|.|.|.|.|.|.|.|.` before the model runs).
+    Measured on out/NPM1: all six records came back as 48 dots and NPM1.tsv was
+    header-only. Four of the six are pure insertions that score once written
+    minimally; the remaining two are true delins that SpliceAI cannot score at any
+    representation.
+
+    Trimming follows the standard parsimony algorithm (Tan, Abecasis & Kang 2015):
+    drop shared suffix bases, then shared prefix bases, in both cases only while
+    BOTH alleles still have length >= 2. That is what keeps the anchor base on a
+    pure indel instead of collapsing it to an empty allele. An SNV survives both
+    loops untouched, so that path stays byte-identical.
+
+    Returns (pos, ref, alt) or None when an anchor base is needed and cannot be read.
     """
-    if ref and alt and len(ref) == len(alt):
-        return pos, ref, alt
-    anchor_pos = pos - 1
-    if anchor_pos < 1:
-        return None
-    anchor = fetch_base(anchor_pos)
-    if not anchor:
-        return None
-    return anchor_pos, anchor + ref, anchor + alt
+    ref = (ref or '').upper()
+    alt = (alt or '').upper()
+
+    # Anchor ONLY a genuinely empty allele. parse_variant does not currently
+    # produce one, but a bare-insertion token form would, and VCF forbids it.
+    if not ref or not alt:
+        anchor_pos = pos - 1
+        if anchor_pos < 1:
+            return None
+        anchor = fetch_base(anchor_pos)
+        if not anchor:
+            return None
+        pos, ref, alt = anchor_pos, anchor + ref, anchor + alt
+
+    while len(ref) > 1 and len(alt) > 1 and ref[-1] == alt[-1]:
+        ref, alt = ref[:-1], alt[:-1]
+    while len(ref) > 1 and len(alt) > 1 and ref[0] == alt[0]:
+        ref, alt = ref[1:], alt[1:]
+        pos += 1
+
+    return pos, ref, alt
 
 
 def _resolve_mapping_source(chromosome_mapping_input, gene_name, discovered=None):

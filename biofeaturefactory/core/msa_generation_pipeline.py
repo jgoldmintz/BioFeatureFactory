@@ -225,7 +225,7 @@ def main():
 Examples:
   # Single FASTA
   python msa_generation_pipeline.py \\
-    -f /path/to/GENE.fasta \\
+    -i /path/to/out/ \\
     -d /path/to/uniref90.fasta \\
     -j jackhmmer \\
     -o results/
@@ -257,8 +257,18 @@ Quality thresholds:
     )
 
     # Required arguments
-    parser.add_argument('--fasta', '-f', required=True,
-                        help='Query FASTA file or directory of FASTA files')
+    #
+    # -i/-o, matching every other pipeline. The directory handling below already
+    # understood a variant_mapping root; only the flag NAME differed, so the same
+    # invocation that works everywhere else failed here on an unrecognised -i.
+    parser.add_argument('-i', '--input', dest='input_root', metavar='INPUT',
+                        help='DIRECTORY MODE: variant_mapping output root. Runs every '
+                             'gene found under <root>/<GENE>/fastas/. Also accepts a '
+                             'flat directory of FASTAs, or a single FASTA file.')
+    parser.add_argument('--fasta', '-f',
+                        help='FILE MODE: one query FASTA. Equivalent to --input; kept '
+                             'so existing invocations still parse. --input wins when '
+                             'both are given.')
     parser.add_argument('--database', '-d', required=True,
                         help='Sequence database (e.g., UniRef90)')
     parser.add_argument('--jackhmmer-binary', '-j', required=True,
@@ -291,7 +301,13 @@ Quality thresholds:
 
     args = parser.parse_args()
 
+    # Flag wins over the legacy form; everything downstream reads args.fasta and
+    # so does not have to know which one the caller used.
+    args.fasta = args.input_root or args.fasta
+
     # Validate inputs
+    if not args.fasta:
+        parser.error("one of -i/--input or -f/--fasta is required")
     if not os.path.exists(args.fasta):
         parser.error(f"Input not found: {args.fasta}")
     if not os.path.exists(args.database):

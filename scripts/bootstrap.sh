@@ -48,6 +48,8 @@ set -euo pipefail
 # Exclude flags (fine-grained control within any mode):
 #   --exclude-pip-install     Skip pip install.
 #   --exclude-build-tools     Skip apt/yum install of build-essential (gcc, g++, make).
+#   --exclude-tcsh            Skip apt/yum install of tcsh (the DTU tool launchers need it).
+#   --exclude-perl-modules    Skip installing Array::Base (netNglyc's neural-net driver).
 #   --exclude-evmutation      Skip cloning EVmutation and plmc.
 #   --exclude-build-plmc      Skip compiling plmc (clone still happens).
 #   --exclude-adabmdca        Skip cloning + installing adabmDCApy (GPU Boltzmann backend).
@@ -82,6 +84,8 @@ set -euo pipefail
 # --- Defaults: everything on ---
 PIP_INSTALL=1
 INSTALL_BUILD_TOOLS=1
+INSTALL_TCSH=1
+INSTALL_PERL_MODS=1
 CLONE_EVMUTATION=1
 BUILD_PLMC=1
 CLONE_ADABMDCA=1
@@ -246,9 +250,9 @@ PHASE_ENV_FLAGS="PIP_INSTALL INSTALL_MIRANDA INSTALL_SPLICEAI INSTALL_MMSEQS2 IN
 # it creates and populates a dedicated conda env (bff-spliceai, step 6d), which
 # is an environment concern with nothing to clone or build. Leaving it in the git
 # phase meant `git-phase` alone would create that env as a side effect.
-PHASE_GIT_FLAGS="INSTALL_BUILD_TOOLS CLONE_EVMUTATION BUILD_PLMC CLONE_ADABMDCA DOWNLOAD_CG_COTRANS CLONE_NETSURFP3 INSTALL_SIGNALP INSTALL_MIRANDA INSTALL_MMSEQS2 INSTALL_HMMER INSTALL_HTSLIB BUILD_GENESPLICER INSTALL_NEXTFLOW CLONE_AF3 INSTALL_EDITABLE_REPOS"
+PHASE_GIT_FLAGS="INSTALL_BUILD_TOOLS INSTALL_TCSH INSTALL_PERL_MODS CLONE_EVMUTATION BUILD_PLMC CLONE_ADABMDCA DOWNLOAD_CG_COTRANS CLONE_NETSURFP3 INSTALL_SIGNALP INSTALL_MIRANDA INSTALL_MMSEQS2 INSTALL_HMMER INSTALL_HTSLIB BUILD_GENESPLICER INSTALL_NEXTFLOW CLONE_AF3 INSTALL_EDITABLE_REPOS"
 PHASE_DB_FLAGS="INSTALL_HTSLIB DOWNLOAD_UNIREF90 DOWNLOAD_IDMAPPING BUILD_COCOPUTS_CUT RUN_BUILD_DB"
-ALL_PHASE_FLAGS="PIP_INSTALL INSTALL_BUILD_TOOLS CLONE_EVMUTATION BUILD_PLMC CLONE_ADABMDCA DOWNLOAD_CG_COTRANS CLONE_NETSURFP3 INSTALL_SIGNALP INSTALL_MIRANDA INSTALL_SPLICEAI INSTALL_MMSEQS2 INSTALL_HMMER INSTALL_HTSLIB BUILD_GENESPLICER INSTALL_NEXTFLOW CLONE_AF3 INSTALL_EDITABLE_REPOS DOWNLOAD_UNIREF90 DOWNLOAD_IDMAPPING BUILD_COCOPUTS_CUT RUN_BUILD_DB"
+ALL_PHASE_FLAGS="PIP_INSTALL INSTALL_BUILD_TOOLS INSTALL_TCSH INSTALL_PERL_MODS CLONE_EVMUTATION BUILD_PLMC CLONE_ADABMDCA DOWNLOAD_CG_COTRANS CLONE_NETSURFP3 INSTALL_SIGNALP INSTALL_MIRANDA INSTALL_SPLICEAI INSTALL_MMSEQS2 INSTALL_HMMER INSTALL_HTSLIB BUILD_GENESPLICER INSTALL_NEXTFLOW CLONE_AF3 INSTALL_EDITABLE_REPOS DOWNLOAD_UNIREF90 DOWNLOAD_IDMAPPING BUILD_COCOPUTS_CUT RUN_BUILD_DB"
 
 enable_phase_flags() {
   local f
@@ -272,6 +276,8 @@ while [[ $# -gt 0 ]]; do
   case "$1" in
     --exclude-pip-install)   PIP_INSTALL=0 ;;
     --exclude-build-tools)   INSTALL_BUILD_TOOLS=0 ;;
+    --exclude-tcsh)          INSTALL_TCSH=0 ;;
+    --exclude-perl-modules)  INSTALL_PERL_MODS=0 ;;
     --exclude-evmutation)    CLONE_EVMUTATION=0 ;;
     --exclude-build-plmc)    BUILD_PLMC=0 ;;
     --exclude-adabmdca)      CLONE_ADABMDCA=0 ;;
@@ -595,6 +601,73 @@ if [[ "$INSTALL_BUILD_TOOLS" -eq 1 ]]; then
   fi
 fi
 
+# ── Step 1c: tcsh (DTU tool launchers) ──────────────────────────────────
+# MEASURED, netNglyc 1.0c on Ubuntu x86_64: with tcsh only in $CONDA_PREFIX/bin,
+# the outer launcher can be run as `tcsh -f netNglyc`, but Template/test_how --
+# which Template/test execs nine times, once per neural-net parameter set -- dies
+# at `./test_how: cannot execute: required file not found`, exit 127. All nine
+# fail, ./test never checks system()'s return value, test.out is written 0 bytes,
+# and netNglyc reports "No sites predicted in this sequence" for CBG_HUMAN, a
+# protein with six known N-glycosylation sites. A clean exit, an empty mask, and
+# a wrong answer.
+echo "[1c/12] tcsh (netNglyc / netphos / netMHC launchers)..."
+if [[ "$INSTALL_TCSH" -eq 1 ]]; then
+  if [[ -x /bin/tcsh || -x /usr/bin/tcsh ]]; then
+    echo "  OK tcsh at $(command -v /bin/tcsh /usr/bin/tcsh 2>/dev/null | head -n1)"
+  else
+    if command -v tcsh >/dev/null 2>&1; then
+      echo "  NOTE tcsh found at $(command -v tcsh) but NOT at /bin or /usr/bin;"
+      echo "       the DTU launchers' '#! /bin/tcsh -f' will still fail."
+    fi
+    echo "tcsh must be installed via sudo apt because the DTU scripts hardcode '#! /bin/tcsh -f', an absolute path the kernel resolves literally, so a conda-installed tcsh in \$CONDA_PREFIX/bin can never satisfy it."
+    if command -v apt-get >/dev/null 2>&1; then
+      sudo apt install -yq tcsh || record_failure "step 1c: sudo apt install tcsh"
+    else
+      pkg_install tcsh || record_failure "step 1c: install tcsh"
+    fi
+  fi
+fi
+
+# ── Step 1d: Array::Base (netNglyc neural-net driver) ───────────────────
+# netNglyc-1.0/Template/test is the perl program that drives the neural nets, and
+# its line 3 is `use Array::Base +1;` -- the whole file is written for 1-based
+# arrays. Without the module it aborts at BEGIN, the nine per-parameter-set runs
+# never happen, test.out is written 0 bytes, and netNglyc reports "No sites
+# predicted in this sequence" for CBG_HUMAN, a protein with six known sites.
+#
+# Installed into the SYSTEM perl on purpose. A --local-lib install under ~/perl5
+# works only while PERL5LIB is exported, and that is per-shell: MEASURED on one
+# host, two SSH sessions on the same machine running identical code gave 2
+# predictions and 0 predictions for PAM, the only difference being that one shell
+# had PERL5LIB set. cron, systemd and any non-interactive run land in the empty
+# case. Do NOT replace this with a --local-lib install.
+echo "[1d/12] Array::Base (netNglyc Template/test)..."
+if [[ "$INSTALL_PERL_MODS" -eq 1 ]]; then
+  if perl -e 'use Array::Base +1;' >/dev/null 2>&1; then
+    echo "  OK Array::Base already available to the system perl"
+  else
+    echo "Array::Base must be installed into the SYSTEM perl (not a --local-lib under \$HOME) because netNglyc's Template/test does 'use Array::Base +1' at line 3, and a ~/perl5 install is only visible while PERL5LIB is exported -- which makes netNglyc silently return zero sites in any shell that lacks it."
+    if command -v cpanm >/dev/null 2>&1; then
+      sudo cpanm --notest Array::Base || record_failure "step 1d: cpanm Array::Base"
+    elif command -v cpan >/dev/null 2>&1; then
+      # Interactive by design. cpan has no -y, and its first run asks whether to
+      # configure automatically -- answer `yes`. Left as a prompt rather than fed
+      # from `yes ''` so the choice is the operator's; this runs once per host.
+      # `sudo env` rather than `sudo VAR=val` because sudoers may strip inline
+      # assignments.
+      echo "  NOTE cpan will prompt on its first run; answer 'yes' to auto-configure."
+      sudo env PERL_MM_USE_DEFAULT=1 cpan -T Array::Base \
+        || record_failure "step 1d: cpan Array::Base"
+    else
+      echo "  WARN neither cpanm nor cpan found; install manually: sudo cpan Array::Base" >&2
+      record_failure "step 1d: no cpan/cpanm available for Array::Base"
+    fi
+    perl -e 'use Array::Base +1;' >/dev/null 2>&1 \
+      && echo "  OK Array::Base now available to the system perl" \
+      || echo "  WARN Array::Base still not loadable; netNglyc will report 0 sites for every sequence" >&2
+  fi
+fi
+
 # ── Step 2: Pip install ──────────────────────────────────────────────────
 echo "[2/12] Core Python requirements..."
 if [[ "$PIP_INSTALL" -eq 1 ]]; then
@@ -672,28 +745,20 @@ fi
 
 # ── Step 5: SignalP 6.0 ─────────────────────────────────────────────────
 # CHECK ONLY. SignalP 6.0 is a licensed manual install like the other DTU tools
-# (netNglyc, netphos, netMHC) -- see the step 11 checklist. It is deliberately NOT
-# pip-installed here, for three measured reasons:
+# (netNglyc, netphos, netMHC) -- see the step 11 checklist.
 #
-#   1. github.com/fteufel/signalp-6.0 is the TRAINING repo, not the prediction
-#      distribution. Its package is src/signalp6/ (training_utils, no predict.py),
-#      its setup.py declares NO entry_points and NO package_data, so no install of
-#      it can ever create the `signalp6` executable that SignalP6Handler shells out
-#      to, and it ships no model weights. The licensed DTU tarball is a DIFFERENT
-#      package (module `signalp`, entry_points signalp6=signalp:predict,
-#      package_data model_weights/*) and is self-sufficient.
-#   2. That repo's requirements.txt pins scikit-learn==0.23.1 / scipy==1.5.0 /
-#      sklearn==0.0 / torch==1.7.0. `pip install -r` on it FAILS
-#      ("Failed to build 'scikit-learn'"), and because this script runs under
-#      `set -euo pipefail` that aborted the entire bootstrap here at step 5 of 12 --
-#      before miranda, mmseqs2, hmmer, spliceai, genesplicer, nextflow, the AF3
-#      clone, the editable installs and build_db.sh.
-#   3. SignalP 6.0 requires torch<2 (installation_instructions.md: "SignalP 6.0 is
-#      not compatible with PyTorch 2.0+"). nsp3 and AlphaFold3 require modern
-#      torch. The pin is mutually exclusive with the rest of this env, so SignalP
-#      MUST live in its own environment. netnglyc_pipeline.py only ever invokes it
-#      as a subprocess and reads prediction_results.txt, so a separate env is a
-#      supported configuration, not a workaround.
+# It gets its OWN conda env, and that is a requirement rather than a preference:
+# SignalP 6.0 pins torch<2 (installation_instructions.md, "SignalP 6.0 is not
+# compatible with PyTorch 2.0+") while nsp3 and AlphaFold3 need modern torch. The
+# two pins are mutually exclusive, so it cannot share the BFF env.
+# netnglyc_pipeline.py only ever invokes it as a subprocess and reads
+# prediction_results.txt, so a separate env is a supported configuration, not a
+# workaround.
+#
+# Being in a sibling env means it is NOT on PATH while bff is active, which is why
+# the probe below checks the env directly as well. netnglyc_pipeline.py's
+# resolve_signalp6_path does the same and needs no flag when the env is named
+# `signalp6`; -snp/--signalp6-bin overrides it for any other layout.
 echo "[5/12] SignalP 6.0 (netNglyc dependency, licensed manual install)..."
 if [[ "$INSTALL_SIGNALP" -eq 1 ]]; then
   if command -v signalp6 >/dev/null 2>&1; then
@@ -1324,7 +1389,7 @@ if [[ "$PHASE_GIT" -eq 1 ]]; then
 Manual installs required (cannot be auto-downloaded):
   - cg_cotrans/: Download from https://shakhnovich.faculty.chemistry.harvard.edu/software/coarse-grained-co-translational-folding-analysis
     Extract into biofeaturefactory/rare_codon/cg_cotrans/
-  - netNglyc/: NetNGlyc 1.0 (DTU academic license)
+  - netNglyc/: NetNGlyc 1.0 (DTU academic license), requires tcsh
     Patch NetNGlyc tcsh SIGNALP path to:
       biofeaturefactory/netNglyc/bin/signalp6_adapter
   - SignalP 6.0 (DTU academic license) -- REQUIRED by netNglyc
@@ -1334,14 +1399,18 @@ Manual installs required (cannot be auto-downloaded):
     it as a subprocess and reads prediction_results.txt, so a separate env is fine.
       conda create -n signalp6 python=3.10 && conda activate signalp6
       pip install signalp-6-package/
-      pip install "numpy<2"                       # required for 6.0h
       SIGNALP_DIR=$(python3 -c "import signalp, os; print(os.path.dirname(signalp.__file__))")
       cp -r signalp-6-package/models/* $SIGNALP_DIR/model_weights/
-    Then put that env's `signalp6` on PATH for netNglyc runs.
-    NOTE: github.com/fteufel/signalp-6.0 is the TRAINING repo -- it declares no
-    console_scripts and ships no weights, so it cannot satisfy this dependency.
+    The env may be named `signalp6` or `signalp6_fast` -- the DTU tarball unpacks
+    to signalp6_fast/, and both are recognised. The EXECUTABLE is `signalp6`
+    either way; that is the console script the package declares.
+    Nothing further is needed: netnglyc_pipeline.py resolves
+      $(conda info --base)/envs/{signalp6,signalp6_fast}/bin/signalp6
+    automatically, so the env does NOT have to be on PATH. For any other layout
+    pass -snp/--signalp6-bin (the executable or the directory holding it), or set
+    SIGNALP6_PATH / SIGNALP6_HOME (either accepts a directory).
   - netphos/: NetPhos 3.1 + APE (DTU academic license), requires tcsh
-  - netMHC/: NetMHCpan 4.1 / NetMHC 4.0 (DTU academic license)
+  - netMHC/: NetMHCpan 4.1 / NetMHC 4.0 (DTU academic license), requires tcsh
     NetMHC 4.0 data files: https://services.healthtech.dtu.dk/services/NetMHC-4.0/data.tar.gz
     Extract into the netMHC-4.0 installation directory.
   - alphafold3/: NVIDIA GPU stack + Docker + AF3 model weights

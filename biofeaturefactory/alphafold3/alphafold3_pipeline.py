@@ -1007,17 +1007,17 @@ def main():
 
     # Gene inputs (file or directory, auto-detected)
     parser.add_argument('-f', '--fasta',
-                        help='Transcript FASTA file or directory of FASTA files')
+                        help='DIRECTORY MODE: variant_mapping output root. Supplies --mutations, --chromosome-mapping, --premrna-mapping and --vcf from <root>/<GENE>/. Also accepts a single transcript FASTA or a flat directory of them.')
     parser.add_argument('-mu', '--mutations',
-                        help='Mutations CSV file or directory (optional when --chromosome-mapping provided)')
+                        help='FILE MODE ONLY: mutations CSV. Derived from --fasta in directory mode. Optional when --chromosome-mapping provides them.')
 
     # VCF-based coordinate resolution (replaces --chrom/--tx-start/--strand)
     parser.add_argument('-v', '--vcf',
-                        help='Per-gene VCF file or directory from vcf_converter.py (provides chromosome)')
+                        help='FILE MODE ONLY: per-gene VCF from vcf_converter.py (provides chromosome). Derived from --fasta in directory mode when <root>/<GENE>/vcf/ exists.')
     parser.add_argument('-cm', '--chromosome-mapping',
-                        help='Chromosome mapping CSV file or directory (provides mutations and chromosomal positions)')
+                        help='FILE MODE ONLY: chromosome mapping CSV. Derived from --fasta in directory mode.')
     parser.add_argument('-pm', '--premrna-mapping',
-                        help='pre-mRNA mapping CSV file or directory (premrna_mapping_<GENE>.csv). Required to score intronic (gd.) variants: they have no ORF or transcript coordinate and are windowed on the pre_mRNA record.')
+                        help='FILE MODE ONLY: pre-mRNA mapping CSV. Derived from --fasta in directory mode. Required to score intronic (gd.) variants: they have no ORF or transcript coordinate and are windowed on the pre_mRNA record.')
 
     # Legacy genomic coordinates (still supported)
     parser.add_argument('-ch', '--chrom', help='Chromosome (alternative to --vcf)')
@@ -1070,6 +1070,18 @@ def main():
     args.chromosome_mapping = derive_mapping_root(
 
         args.chromosome_mapping, args.fasta, "chromosome", label="af3")
+
+    # --vcf too. spliceai / vcf_converter publish <root>/<GENE>/vcf/<GENE>.vcf, so
+    # the same root answers for it. Named EXPLICITLY per gene rather than globbed:
+    # <GENE>/vcf/ also holds <GENE>.vcf.gz and <GENE>.spliceai.vcf, and a bare
+    # *.vcf would re-ingest the ANNOTATED output as if it were an input -- the
+    # trap that gave spliceai/bin/main.nf a gene called "NPM1.spliceai".
+    if not args.vcf and args.fasta and Path(args.fasta).is_dir():
+        _root = Path(args.fasta)
+        if any((d / "vcf" / f"{d.name}.vcf").is_file()
+               for d in _root.iterdir() if d.is_dir()):
+            args.vcf = str(_root)
+            print(f"[af3] --vcf not given; using {args.fasta} (per-gene layout detected)")
 
     args.premrna_mapping = derive_mapping_root(
 

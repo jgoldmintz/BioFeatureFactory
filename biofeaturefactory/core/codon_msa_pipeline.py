@@ -48,6 +48,7 @@ from biofeaturefactory.lib.utility import (
     codon_to_aa,
     extract_gene_from_filename,
     compute_neff,
+    discover_fasta_files,
 )
 
 
@@ -1066,6 +1067,58 @@ def generate_codon_msa_from_focus(
     return codon_msa, manifest_rows
 
 
+
+def resolve_focus_fastas(input_root, fasta, parser):
+    """Return [(gene, focus_nt_fasta), ...] for either invocation mode.
+
+    Directory mode reads <root>/<GENE>/fastas/ FIRST, because that is the layout
+    variant_mapping writes and it names the gene by its DIRECTORY. A bare rglob
+    over the root would also work here today, but it names the gene from the
+    FILENAME, which is how a sibling pipeline turned NPM1.spliceai.vcf into a
+    gene called "NPM1.spliceai". Selecting by directory cannot make that mistake.
+
+    discover_fasta_files is the fallback for a flat directory of ORF FASTAs. It
+    prefers a stem containing '_aa' when two files map to one gene, which is the
+    wrong preference for this tool — it needs the NUCLEOTIDE ORF — so the layout
+    path above is what a variant_mapping root uses.
+
+    File mode returns the single pair, gene named the same way
+    generate_codon_msa_from_focus names it internally.
+    """
+    if not input_root:
+        path = Path(fasta)
+        if not path.is_file():
+            parser.error(f"--fasta is not a file: {fasta}")
+        return [(extract_gene_from_filename(path.stem) or path.stem, str(path))]
+
+    root = Path(input_root)
+    if root.is_file():
+        return [(extract_gene_from_filename(root.stem) or root.stem, str(root))]
+    if not root.is_dir():
+        parser.error(f"--input is neither a file nor a directory: {input_root}")
+
+    found = []
+    for gene_dir in sorted(p for p in root.iterdir() if p.is_dir()):
+        fasta_dir = gene_dir / "fastas"
+        if not fasta_dir.is_dir():
+            continue
+        for pattern in ("*.fasta", "*.fa", "*.fas", "*.fna"):
+            hits = sorted(fasta_dir.glob(pattern))
+            if hits:
+                found.append((gene_dir.name, str(hits[0])))
+                break
+    if found:
+        print(f"[codon-msa] {input_root}: per-gene layout detected, "
+              f"{len(found)} gene(s)")
+        return found
+
+    flat = discover_fasta_files(str(root))
+    if not flat:
+        parser.error(f"no FASTA files found under {input_root}")
+    print(f"[codon-msa] {input_root}: flat directory, {len(flat)} gene(s)")
+    return sorted(flat.items())
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="BioFeatureFactory: Codon-Aware MSA Generator",
@@ -1084,8 +1137,18 @@ Example:
 """
     )
 
-    parser.add_argument('-f', '--fasta', required=True,
-                        help='FASTA with focus ORF nt sequence (variant_mapping output)')
+    # -i/-o, matching every other pipeline. One root supplies every gene:
+    # <root>/<GENE>/fastas/<GENE>.fasta is where variant_mapping writes the ORF
+    # nt FASTA this tool needs, and the output already lands per gene at
+    # <output>/<GENE>/CodonMSA/. --fasta stays as the single-gene form.
+    parser.add_argument('-i', '--input', dest='input_root', metavar='INPUT',
+                        help='DIRECTORY MODE: variant_mapping output root. Runs every '
+                             'gene found under <root>/<GENE>/fastas/. Also accepts a '
+                             'flat directory of ORF FASTAs.')
+
+    parser.add_argument('-f', '--fasta',
+                        help='FILE MODE ONLY: one FASTA with the focus ORF nt sequence. '
+                             'Derived from --input in directory mode.')
 
     parser.add_argument('-d', '--db-root', required=True,
                         help='Bio_DBs root directory produced by scripts/build_db.sh '
@@ -1118,23 +1181,49 @@ Example:
 
     if args.min_seqid < 0 or args.min_seqid > 1:
         parser.error("--min-seqid must be between 0 and 1")
+    if not args.input_root and not args.fasta:
+        parser.error("one of -i/--input (directory mode) or -f/--fasta (file mode) is required")
 
-    generate_codon_msa_from_focus(
-        focus_nt_fasta=args.fasta,
-        db_root=args.db_root,
-        output_dir=args.output,
-        min_seqid=args.search_min_seqid,
-        min_qcov=args.search_min_qcov,
-        min_backtranslation_seqid=args.min_seqid,
-        max_hits=args.max_hits,
-        mmseqs_binary=args.mmseqs_binary,
-        aligner=args.aligner,
-        threads=args.threads,
-        target_db_base=args.target_db_base,
-        mmseqs_tmp_dir=args.mmseqs_tmp_dir,
-        verbose=args.verbose,
-    )
+    focus_fastas = resolve_focus_fastas(args.input_root, args.fasta, parser)
+
+    failures = []
+    for gene, fasta_path in focus_fastas:
+        if len(focus_fastas) > 1:
+            print(f"\n=== {gene} ===")
+        try:
+            generate_codon_msa_from_focus(
+                focus_nt_fasta=fasta_path,
+                db_root=args.db_root,
+                output_dir=args.output,
+                min_seqid=args.search_min_seqid,
+                min_qcov=args.search_min_qcov,
+                min_backtranslation_seqid=args.min_seqid,
+                max_hits=args.max_hits,
+                mmseqs_binary=args.mmseqs_binary,
+                aligner=args.aligner,
+                threads=args.threads,
+                target_db_base=args.target_db_base,
+                mmseqs_tmp_dir=args.mmseqs_tmp_dir,
+                verbose=args.verbose,
+            )
+        except Exception as exc:
+            # One gene's failure must not abandon the rest of the root. The
+            # reason is named per gene and repeated at the end, because a loop
+            # that dies on gene 2 of 40 and prints one traceback is
+            # indistinguishable from a loop that never had genes 3-40.
+            print(f"Error: {gene} failed: {type(exc).__name__}: {exc}", file=sys.stderr)
+            failures.append((gene, f"{type(exc).__name__}: {exc}"))
+
+    if failures:
+        print(f"\n[SUMMARY] {len(focus_fastas) - len(failures)}/{len(focus_fastas)} genes ok, "
+              f"{len(failures)} failed:", file=sys.stderr)
+        for gene, why in failures:
+            print(f"  {gene}: {why}", file=sys.stderr)
+        return 1
+    if len(focus_fastas) > 1:
+        print(f"\n[SUMMARY] {len(focus_fastas)}/{len(focus_fastas)} genes ok")
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

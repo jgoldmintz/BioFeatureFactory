@@ -17,6 +17,7 @@
 
 import argparse
 import csv
+import math
 import os
 import sys
 from pathlib import Path
@@ -132,7 +133,24 @@ def _row_from_codons(gene, ntposnt, codon_number, position_in_codon,
         return round(mut_val - wt_val, 6)
 
     def _cp(table, key):
-        return codonpairdata[table].get(key) if key else None
+        """Codon-pair table lookup, with an UNDEFINED value reported as absent.
+
+        get_codon_counts stores float('nan') for a bicodon it cannot score: CPS is
+        ln(observed/expected) and an unobserved pair makes that ln(0), which raises
+        and is caught into nan. write_tsv then stringifies nan to the literal text
+        "nan", which reads as a computation that crashed rather than a pair the
+        reference never saw.
+
+        Returning None puts an EMPTY cell there instead, and the caller names the
+        reason in qc_flags. _delta already propagates None, so a delta built on an
+        undefined side is blank rather than nan too.
+        """
+        if not key:
+            return None
+        value = codonpairdata[table].get(key)
+        if isinstance(value, float) and math.isnan(value):
+            return None
+        return value
 
     rscu_wt = codondata['RSCU'].get(wt_codon) if wt_codon else None
     rscu_mut = codondata['RSCU'].get(mut_codon) if mut_codon else None
@@ -154,6 +172,24 @@ def _row_from_codons(gene, ntposnt, codon_number, position_in_codon,
     else:
         bicodon_context = 'insufficient_sequence'
         qc_flags = (qc_flags + ';NO_BICODON') if qc_flags else 'NO_BICODON'
+
+    # A bicodon that EXISTS in the sequence but is absent from the reference the
+    # tables were built from scores nothing, and an empty cell alone does not say
+    # which side went undefined. Named here per side.
+    #
+    # This flag fires constantly at present, and that is the finding rather than a
+    # nuisance: codon_usage_pipeline calls get_codon_counts(sequence) on the SINGLE
+    # gene under analysis, so the codon-pair reference IS the test sequence. NPM1's
+    # 295-codon ORF populates 250 of 4225 bicodons (5.9%) and leaves CPS undefined
+    # for 3472 of them (82.2%). The values that do appear rest on counts of 1.
+    # Fixing the flag does not fix that; a genome-wide bicodon table does.
+    undefined = [label for label, key in (
+        ('3prime_wt', wt_bi3), ('3prime_mut', mut_bi3),
+        ('5prime_wt', wt_bi5), ('5prime_mut', mut_bi5),
+    ) if key and _cp('CPS', key) is None]
+    if undefined:
+        flag = 'BICODON_NOT_IN_REFERENCE:' + ','.join(undefined)
+        qc_flags = (qc_flags + ';' + flag) if qc_flags else flag
 
     return {
         # {GENE}-{sha}: trim_muts strips only '*' and whitespace, so ntposnt is the

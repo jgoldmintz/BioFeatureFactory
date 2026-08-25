@@ -107,8 +107,46 @@ def resolve_native_ape_path(user_path=None):
 
     for path in candidates:
         if path and os.path.isfile(path) and os.access(path, os.X_OK):
-            return os.path.abspath(path)
+            resolved = os.path.abspath(path)
+            warn_missing_ape_nn_binary(resolved)
+            return resolved
     return None
+
+
+def warn_missing_ape_nn_binary(ape_bin):
+    """Warn when APE's neural-net executable is missing for this architecture.
+
+    APE dispatches every kinase to bin/nnhowplayer6_${uname -s}.${uname -m}. The
+    licensed package ships i386 (with i486/i586/i686 symlinks) and ia64 -- and
+    NOTHING for x86_64, which is what `uname -m` reports on any modern host. APE
+    then prints "cannot find ..." twenty times, one per kinase, PRODUCES NO
+    PREDICTIONS, AND EXITS 0. Every downstream row comes back missing_mut with no
+    indication why.
+
+    This check lives here rather than in bootstrap because bootstrap does not
+    download the DTU suite -- it is a licensed manual install -- so the pipeline
+    that resolves the binary is the only place that can see the problem.
+
+    The i386 build is statically linked and runs correctly on x86_64; the fix is
+    one symlink, which this names exactly.
+    """
+    try:
+        bin_dir = Path(ape_bin).parent / "bin"
+        if not bin_dir.is_dir():
+            return
+        system, machine = platform.system(), platform.machine()
+        wanted = bin_dir / f"nnhowplayer6_{system}.{machine}"
+        if wanted.exists():
+            return
+        have = sorted(f.name for f in bin_dir.glob(f"nnhowplayer6_{system}.*"))
+        if not have:
+            return
+        print(f"WARNING: APE needs {wanted.name} but this install has: {', '.join(have)}")
+        print(f"         Every kinase will fail and APE will still exit 0 "
+              f"(no predictions, rows flagged missing_mut).")
+        print(f"         Fix with:  ln -s {have[0]} {wanted}")
+    except Exception:
+        return
 
 
 # ---------------------------------------------------------------------------
@@ -175,6 +213,34 @@ def _run_native_netphos(fasta_file, output_file, timeout=300, ape_bin=None):
         if result.returncode == 0:
             with open(output_file, 'w') as f:
                 f.write(result.stdout)
+
+            # Exit 0 is NOT evidence that APE predicted anything. Its per-kinase
+            # neural nets are separate child processes, and when one dies APE
+            # keeps going and still exits 0. MEASURED on this install: a 6-sequence
+            # mutant FASTA produced 20 "Segmentation fault (core dumped)" lines --
+            # one per kinase -- an EMPTY output file, and returncode 0. The caller
+            # then reported "NetPhos completed", cached the empty result, and the
+            # seq_count <= 10 fallback to batch processing never fired because
+            # nothing had reported a failure. NPM1 lost all 6 mutants AND its WT
+            # row; PAM crashed partway and kept one mutant of two.
+            #
+            # A non-empty input that yields no parsable prediction is a failure.
+            # Saying so is what lets the existing batch fallback do its job.
+            # PARTIAL output is a failure too, not just empty output. APE dies
+            # per-sequence: MEASURED on PAM, a 2-sequence mutant FASTA emitted a
+            # full prediction set for the first sequence, crashed on the second,
+            # and exited 0 -- so a "did we get ANY predictions" test passed it and
+            # half the gene was silently dropped (1968 events instead of 3936).
+            # The check is therefore COVERAGE: every submitted sequence must appear
+            # in the output, or the run is retried one sequence at a time.
+            n_in = count_fasta_sequences(fasta_file)
+            covered = {p.get("seq_name") for p in parse_netphos_file(output_file)}
+            covered.discard(None)
+            if n_in > 0 and len(covered) < n_in:
+                stderr_tail = (result.stderr or "").strip().splitlines()
+                hint = f" | stderr: {stderr_tail[-1]}" if stderr_tail else ""
+                return False, (f"APE exited 0 but covered {len(covered)}/{n_in} "
+                               f"submitted sequence(s){hint}")
             return True, result.stdout
         else:
             error_msg = f"APE failed with return code {result.returncode}\n"
@@ -482,12 +548,18 @@ def run_netphos_with_fasta(fasta_file, output_file, batch_size=None, timeout=300
             return True
         else:
             print(f"Single run failed: {error}")
+            # batch_size 1, not 10. The single run just failed on this input, and
+            # MEASURED on the native APE install the failure is multi-sequence:
+            # 1 sequence predicts, 2 / 3 / 6 all segfault every kinase and emit
+            # nothing. Retrying at 10 re-submits the same crashing shape and the
+            # whole batch is recorded as dropped. One sequence per invocation is
+            # the only configuration observed to work here.
             print("Falling back to batch processing for small sequence set...")
-            ok, complete = process_netphos_batched(fasta_file, output_file, batch_size=10, timeout=timeout,
+            ok, complete = process_netphos_batched(fasta_file, output_file, batch_size=1, timeout=timeout,
                                                    executor_fn=executor_fn, ape_bin=ape_bin)
             if ok and complete and use_cache:
                 save_to_cache(fasta_file, output_file, "netphos",
-                              {"processing_mode": "batch_fallback", "batch_size": 10, "sequence_count": seq_count})
+                              {"processing_mode": "batch_fallback", "batch_size": 1, "sequence_count": seq_count})
             return ok
 
     elif seq_count <= 100:
@@ -1672,10 +1744,17 @@ def main():
         description='NetPhos pipeline: synthesize FASTAs, run NetPhos, build ensemble comparison tables',
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
-    parser.add_argument('input', nargs='?',
-                        help='Input: WT FASTA file/directory')
-    parser.add_argument('output', nargs='?',
-                        help='Output base directory (writes {GENE}/NetPhos/{GENE}.tsv, .events.tsv, .sites.tsv)')
+    # -i/-o, matching every other non-Nextflow pipeline. The positional forms are
+    # kept as hidden optional trailing args so existing invocations still parse;
+    # the flag wins when both are given.
+    parser.add_argument('-i', '--input', dest='input_flag', metavar='INPUT',
+                        help='DIRECTORY MODE: variant_mapping output root '
+                             '(<root>/<GENE>/fastas/ + <root>/<GENE>/mappings/). '
+                             'Also accepts a single WT FASTA or a flat directory of them.')
+    parser.add_argument('-o', '--output', dest='output_flag', metavar='OUTPUT',
+                        help='Output base directory; writes <output>/<GENE>/NetPhos/<GENE>.tsv, .events.tsv, .sites.tsv')
+    parser.add_argument('input', nargs='?', help=argparse.SUPPRESS)
+    parser.add_argument('output', nargs='?', help=argparse.SUPPRESS)
     parser.add_argument('-t', '--threshold', type=float, default=0.5,
                         help='Phosphorylation score threshold (default: 0.5)')
     parser.add_argument('-yo', '--yes-only', action='store_true',
@@ -1716,6 +1795,11 @@ def main():
         return 0
 
     # Validate required arguments
+    # Flag wins over the positional; both fold into args.input/args.output so
+    # nothing downstream has to know which form the caller used.
+    args.input = args.input_flag or args.input
+    args.output = args.output_flag or args.output
+
     if not args.input or not args.output:
         parser.error("input and output arguments are required (unless using --clear-cache)")
 

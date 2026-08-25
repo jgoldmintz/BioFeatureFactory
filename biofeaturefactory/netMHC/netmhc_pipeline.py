@@ -860,6 +860,54 @@ def first_line(text, default='unknown'):
     return default
 
 
+# netMHC-4.0's default peptide length. Not passed on the command line — the
+# invocation deliberately stays as it was — so this is only used to state the
+# expected window count in a diagnostic message.
+NETMHC_PEPTIDE_LENGTH = 9
+
+# How much of the tool's own output to echo when it produced nothing parseable.
+NETMHC_OUTPUT_ECHO_LINES = 40
+
+
+def netmhc_output_problem(predictions, sequence, peptide_length=NETMHC_PEPTIDE_LENGTH):
+    """Name why a netMHC run yielded no rows, or '' when it yielded some.
+
+    netMHC scores EVERY window of the submitted sequence and prints a row for
+    each one: a non-binder is a row with a blank BindLevel, not an absent row.
+    A protein of length L therefore has exactly L - l + 1 rows per allele, and
+    ZERO rows is never a measurement — it means the tool refused the input, or
+    the tool's output layout and parse_netmhc_output disagree.
+
+    Both of those were previously reported as "0 predictions" on stdout and then
+    counted as a successful mutation, so a run in which netMHC produced nothing
+    at all ended with "mutations 8/8 ok". A run that measured nothing is named
+    as a failure here instead.
+    """
+    if predictions:
+        return ''
+    if len(sequence) < peptide_length:
+        return f'SEQUENCE_SHORTER_THAN_PEPTIDE:{len(sequence)}<{peptide_length}'
+    expected = len(sequence) - peptide_length + 1
+    return f'NETMHC_NO_PARSEABLE_ROWS:expected_{expected}_windows_per_allele'
+
+
+def echo_netmhc_output(label, raw_output, limit=NETMHC_OUTPUT_ECHO_LINES):
+    """Print the tool's own output when nothing could be parsed from it.
+
+    The per-gene workdir is deleted in main's `finally`, so the .out file is gone
+    by the time the user sees "0 predictions" — there was no way to tell a tool
+    refusal from a parser mismatch without re-running netMHC by hand. The text is
+    already in memory: the executor returns it and both call sites discarded it.
+    """
+    lines = str(raw_output or '').splitlines()
+    print(f"  [netmhc] {label}: no parseable rows; "
+          f"tool wrote {len(lines)} lines:", file=sys.stderr)
+    for line in lines[:limit]:
+        print(f"  | {line}", file=sys.stderr)
+    if len(lines) > limit:
+        print(f"  | ... {len(lines) - limit} more lines", file=sys.stderr)
+
+
 def iter_mutation_tokens(mapping_file):
     """Yield every mutation token in a mapping file, in order, deduplicated.
 
@@ -1011,10 +1059,17 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter
     )
 
-    parser.add_argument('input', nargs='?',
-                       help='Input: WT FASTA file/directory')
-    parser.add_argument('output', nargs='?',
-                       help='Output base directory')
+    # -i/-o, matching every other non-Nextflow pipeline. The positional forms are
+    # kept as hidden optional trailing args so existing invocations still parse;
+    # the flag wins when both are given.
+    parser.add_argument('-i', '--input', dest='input_flag', metavar='INPUT',
+                        help='DIRECTORY MODE: variant_mapping output root '
+                             '(<root>/<GENE>/fastas/ + <root>/<GENE>/mappings/). '
+                             'Also accepts a single WT FASTA or a flat directory of them.')
+    parser.add_argument('-o', '--output', dest='output_flag', metavar='OUTPUT',
+                        help='Output base directory; writes <output>/<GENE>/NetMHC/')
+    parser.add_argument('input', nargs='?', help=argparse.SUPPRESS)
+    parser.add_argument('output', nargs='?', help=argparse.SUPPRESS)
 
     # MHC-specific options
     parser.add_argument('-a', '--alleles', nargs='+',
@@ -1050,6 +1105,11 @@ def main():
     args = parser.parse_args()
 
     # Validate arguments
+    # Flag wins over the positional; both fold into args.input/args.output so
+    # nothing downstream has to know which form the caller used.
+    args.input = args.input_flag or args.input
+    args.output = args.output_flag or args.output
+
     if not args.input or not args.output:
         parser.error("input and output arguments are required")
 
@@ -1216,7 +1276,7 @@ def main():
             # sequence into all k-mer windows itself, so no input batching is
             # needed (audit F8 — the former split-by-record batching was a no-op).
             wt_output = os.path.join(gene_workdir, f"{gene_name}_wt.out")
-            success, _, error = executor(wt_fasta, wt_output, args.timeout, args.alleles)
+            success, wt_raw, error = executor(wt_fasta, wt_output, args.timeout, args.alleles)
             if not success:
                 # Was a bare `continue`, which skipped the output writes entirely
                 # and left the gene with no files at all.
@@ -1227,6 +1287,16 @@ def main():
                 wt_predictions = parse_netmhc_output(wt_output)
                 if args.verbose:
                     print(f"  WT: {len(wt_predictions)} predictions")
+                # netMHC reported an exit the executor accepted, but nothing came
+                # back through the parser. That is a failure of the gene, not a WT
+                # with no epitopes — see netmhc_output_problem. Without this the
+                # mutants were all compared against an EMPTY WT register map and
+                # every one of them returned a full set of rows saying nothing
+                # changed.
+                wt_problem = netmhc_output_problem(wt_predictions, wt_aa_seq)
+                if wt_problem:
+                    echo_netmhc_output(f"{gene_name} WT", wt_raw)
+                    gene_failure = f"WT_{wt_problem}"
 
             # The register join is an arithmetic projection of netMHC's `pos`
             # column, so its 0/1 base is verified against the WT protein once per
@@ -1262,13 +1332,21 @@ def main():
                     mut_fasta = os.path.join(gene_workdir, f"{stem}.fasta")
                     write_fasta(Path(mut_fasta), {mut_header: mut_aa_seq})
                     mut_output = os.path.join(gene_workdir, f"{stem}.out")
-                    success, _, error = executor(mut_fasta, mut_output, args.timeout, args.alleles)
+                    success, mut_raw, error = executor(mut_fasta, mut_output, args.timeout, args.alleles)
                     if not success:
                         print(f"Warning: NetMHC failed for {gene_name} {mutation}: {error}")
                         return None, mutation, f"MUT_NETMHC_FAILED:{first_line(error)}"
                     mut_predictions = parse_netmhc_output(mut_output)
                     if args.verbose:
                         print(f"  {mutation}: {len(mut_predictions)} predictions")
+                    mut_problem = netmhc_output_problem(mut_predictions, mut_aa_seq)
+                    if mut_problem:
+                        # Same reasoning as the WT branch: zero rows out of a run
+                        # netMHC did not report as failed is a defect, and the row
+                        # it used to produce was an all-empty comparison counted
+                        # as a successful mutation.
+                        echo_netmhc_output(f"{gene_name} {mutation}", mut_raw)
+                        return None, mutation, f"MUT_{mut_problem}"
                     site_rows = [
                         {'Gene': gene_name, 'pkey': mint_pkey(gene_name, mutation),
                          'sequence_type': 'mut', **pred}
