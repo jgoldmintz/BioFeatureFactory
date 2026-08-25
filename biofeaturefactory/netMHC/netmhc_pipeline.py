@@ -50,6 +50,7 @@ from concurrent.futures import ThreadPoolExecutor
 # the typing aliases were imported but never referenced anywhere in this module.
 from biofeaturefactory.lib.utility import (
     derive_mutations_root,
+    discover_mutation_files,
     mint_pkey,
     token_from_name,
     write_fasta,
@@ -1078,15 +1079,24 @@ def main():
     if args.verbose:
         print(f"Loaded {len(wt_sequences)} WT sequences")
 
-    # Discover mutation files
+    # Discover mutation files.
+    #
+    # Per-gene layout first. The glob below is non-recursive, so at a
+    # variant_mapping root it saw only <GENE>/ directories and left
+    # mutation_files empty -- every gene then had no tokens to request while
+    # <GENE>/mappings/mutations/<GENE>_mutations.csv sat three levels down.
+    # discover_mutation_files selects by directory rather than by filename, which
+    # is what keeps the six other CSV types in that tree out.
     mutation_files = {}
     if args.mutations:
         mut_path = Path(args.mutations)
         if mut_path.is_file():
             mutation_files[extract_gene_from_filename(mut_path.name)] = str(mut_path)
         elif mut_path.is_dir():
-            for csv_file in mut_path.glob("*.csv"):
-                mutation_files[extract_gene_from_filename(csv_file.name)] = str(csv_file)
+            mutation_files = discover_mutation_files(str(mut_path))
+            if not mutation_files:
+                for csv_file in mut_path.glob("*.csv"):
+                    mutation_files[extract_gene_from_filename(csv_file.name)] = str(csv_file)
 
     # Run-level accounting. Every gene and every token lands in exactly one bucket,
     # so "processed + skipped" reconciles against the input instead of the run

@@ -24,6 +24,7 @@ from pathlib import Path
 from biofeaturefactory.lib.utility import (
     derive_mutations_root,
     discover_fasta_files,
+    discover_mutation_files,
     read_fasta,
     mint_pkey,
     trim_muts,
@@ -509,6 +510,14 @@ def process_directory(fasta_dir, mutations_dir=None, validation_log=None, output
 
     print(f"Found {len(fasta_files)} FASTA file(s) to process")
 
+    # Per-gene layout, indexed ONCE for the whole run rather than re-walked per
+    # gene. The flat glob below is non-recursive, so at a variant_mapping root it
+    # saw only <GENE>/ directories and reported "No mutations file found for
+    # <GENE>" while <GENE>/mappings/mutations/<GENE>_mutations.csv sat three
+    # levels down. discover_mutation_files selects by directory rather than by
+    # filename, which is what keeps the six other CSV types in that tree out.
+    mutation_index = discover_mutation_files(str(mutations_dir)) if mutations_dir else {}
+
     for fasta_file in sorted(fasta_files):
         print(f"Processing {fasta_file}...")
 
@@ -518,13 +527,15 @@ def process_directory(fasta_dir, mutations_dir=None, validation_log=None, output
 
         if mutations_dir:
             gene_up = gene.upper()
+            mutations_file = mutation_index.get(gene) or mutation_index.get(gene_up)
             # F50: exact stem match over a SORTED glob. The old substring test
             # (`gene.upper() in stem.upper()`) over an unsorted glob with a
             # first-match break bound a prefix gene (F9) to a superset gene's
             # file (F9A), nondeterministically across machines — unlike the
             # sorted() fasta list above. Accepts `<GENE>.csv` and the
             # `<GENE>_mutations.csv` convention used in Bio_DBs/mappings/mutations.
-            for csv_file in sorted(Path(mutations_dir).glob('*.csv')):
+            for csv_file in ([] if mutations_file
+                             else sorted(Path(mutations_dir).glob('*.csv'))):
                 # Use the shared extractor rather than hardcoded stems: it resolves
                 # 59/59 production files AND the other layouts this repo uses
                 # (combined_<gene>.csv per main.nf:108-112, muts_<gene>.csv, <gene>.csv),

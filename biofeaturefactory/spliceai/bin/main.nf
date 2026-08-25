@@ -94,7 +94,7 @@ params.spliceai_env               = 'bff-spliceai'
   //     Error main.nf:168:48: `resolveMap` is not defined
   // mutation_effects/bin/main.nf uses the same top-level-def pattern for
   // resolveMutationCsv / resolveMsaFile.
-  def resolveMap(String pathParam, String geneId, boolean allowMissing) {
+  def resolveMap(String pathParam, String geneId, boolean allowMissing, String mapSubdir) {
           if (!pathParam) return [null, false]
 
           File base = new File(pathParam)
@@ -105,6 +105,23 @@ params.spliceai_env               = 'bff-spliceai'
 
           if (!base.isDirectory())
               return [ base.getAbsolutePath(), true ]
+
+          // Per-gene layout FIRST: core/variant_mapping.py writes
+          // <root>/<GENE>/mappings/<type>/, and the controller derives that root
+          // rather than a flat directory. The listFiles() passes below only look
+          // one level down, so a gene tree matched nothing and every gene threw
+          // "mapping not resolved" with the file three levels beneath the root.
+          // Selecting by SUBDIRECTORY also keeps the six other mapping types out;
+          // the `contains` pass below would match any of them on the gene name.
+          if (mapSubdir) {
+              File geneMaps = new File(base, "${geneId}/mappings/${mapSubdir}")
+              if (geneMaps.isDirectory()) {
+                  def hits = ((geneMaps.listFiles() ?: []) as List)
+                      .findAll { it.isFile() && it.name.toLowerCase().endsWith(".csv") }
+                      .sort { it.name.toLowerCase() }
+                  if (hits) return [ hits[0].getAbsolutePath(), true ]
+              }
+          }
 
           def geneLower = geneId.toLowerCase()
           def files = (base.listFiles() ?: []) as List
@@ -167,8 +184,23 @@ params.spliceai_env               = 'bff-spliceai'
       else if (params.skip_vcf_generation || params.input_vcf_dir) {
           if (!params.input_vcf_dir)
               error "Must specify --input_vcf_dir when using --skip_vcf_generation without --input_vcf_file"
+          // Same gene-tree handling as the mutations channel below, and for the
+          // same reason: this pipeline's OWN publishDir writes
+          // ${output_dir}/${gene_id}/vcf/${gene_id}.vcf, so re-feeding a previous
+          // run through --input_vcf_path is precisely the case a flat
+          // "<root>/*.vcf" glob cannot see -- it built an EMPTY channel and the
+          // run finished having done nothing.
+          def vcfBase = new File(params.input_vcf_dir as String)
+          def vcfGlob = "${params.input_vcf_dir}/*.vcf"
+          if (vcfBase.isDirectory()) {
+              def vcfTree = ((vcfBase.listFiles() ?: []) as List).any {
+                  it.isDirectory() && new File(it, "vcf").isDirectory()
+              }
+              if (vcfTree) vcfGlob = "${params.input_vcf_dir}/*/vcf/*.vcf"
+          }
+
           vcf_source = Channel
-              .fromPath("${params.input_vcf_dir}/*.vcf")
+              .fromPath(vcfGlob)
               .map { v -> tuple(v.baseName.replaceAll(/\.vcf$/, ''), v) }
       }
       else {
@@ -178,13 +210,26 @@ params.spliceai_env               = 'bff-spliceai'
           if (!mutBase.exists())
               error "ERROR: --mutations_path ${params.mutations_path} not found"
 
+          // The flat glob only ever matched <root>/*.csv. variant_mapping writes
+          // <root>/<GENE>/mappings/mutations/<GENE>_mutations.csv, so a run pointed
+          // at an output root built an EMPTY channel and finished reporting nothing
+          // to do. Both layouts are handled; the gene-tree form is preferred when
+          // any <root>/<X>/mappings/mutations/ exists.
+          def mutGlob = "${params.mutations_path}/*.csv"
+          if (mutBase.isDirectory()) {
+              def geneTree = ((mutBase.listFiles() ?: []) as List).any {
+                  it.isDirectory() && new File(it, "mappings/mutations").isDirectory()
+              }
+              if (geneTree) mutGlob = "${params.mutations_path}/*/mappings/mutations/*.csv"
+          }
+
           def mutation_files_ch
           if (mutBase.isDirectory()) {
               mutation_files_ch = Channel
-                  .fromPath("${params.mutations_path}/*.csv")
+                  .fromPath(mutGlob)
                   .map { csv ->
                       def gene = csv.baseName.replaceAll(/_mutations$/, '')
-                      def (c_map_path, c_ok) = resolveMap(params.chromosome_mapping_path, gene, false)
+                      def (c_map_path, c_ok) = resolveMap(params.chromosome_mapping_path, gene, false, 'chromosome')
                       if (!c_ok)
                           throw new RuntimeException("ERROR: chromosome mapping not resolved for ${gene}")
                       tuple(gene, csv, c_map_path)
@@ -194,7 +239,7 @@ params.spliceai_env               = 'bff-spliceai'
                   .fromPath(params.mutations_path)
                   .map { csv ->
                       def gene = csv.baseName.replaceAll(/_mutations$/, '')
-                      def (c_map_path, c_ok) = resolveMap(params.chromosome_mapping_path, gene, false)
+                      def (c_map_path, c_ok) = resolveMap(params.chromosome_mapping_path, gene, false, 'chromosome')
                       if (!c_ok)
                           throw new RuntimeException("ERROR: chromosome mapping not resolved for ${gene}")
                       tuple(gene, csv, c_map_path)
@@ -213,11 +258,11 @@ params.spliceai_env               = 'bff-spliceai'
     )
 
       def parser_in = run_spliceai.out.map { gene_id, spliceai_vcf ->
-          def (t_map, t_ok) = resolveMap(params.transcript_mapping_path, gene_id, false)
+          def (t_map, t_ok) = resolveMap(params.transcript_mapping_path, gene_id, false, 'transcript')
           if (!t_ok)
               throw new RuntimeException("ERROR: transcript mapping not resolved for ${gene_id}")
 
-          def (c_map, c_ok) = resolveMap(params.chromosome_mapping_path, gene_id, false)
+          def (c_map, c_ok) = resolveMap(params.chromosome_mapping_path, gene_id, false, 'chromosome')
           if (!c_ok)
               throw new RuntimeException("ERROR: chromosome mapping not resolved for ${gene_id}")
 

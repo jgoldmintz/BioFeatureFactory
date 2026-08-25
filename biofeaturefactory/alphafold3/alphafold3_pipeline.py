@@ -53,6 +53,9 @@ from biofeaturefactory.alphafold3.bin.binding_metrics import (
 from biofeaturefactory.lib.utility import (
     derive_mutations_root,
     derive_mapping_root,
+    discover_fasta_files,
+    discover_mapping_files,
+    discover_mutation_files,
     mint_pkey,
     read_fasta, trim_muts, get_mutation_data_bioAccurate,
     extract_gene_from_filename, subseq, load_mapping,
@@ -1106,12 +1109,28 @@ def main():
     chrom_map_input = Path(args.chromosome_mapping) if args.chromosome_mapping else None
     premrna_map_input = Path(args.premrna_mapping) if args.premrna_mapping else None
 
+    # Per-gene indexes, built ONCE. Every glob these replace was non-recursive,
+    # so at a variant_mapping root each saw only <GENE>/ directories and matched
+    # nothing -- the pipeline then ran with no mapping and no mutations while both
+    # sat three levels down. discover_mapping_files / discover_mutation_files
+    # select by directory rather than by filename, which also keeps the six other
+    # CSV types under <GENE>/mappings/ from being matched by a bare '*<GENE>*.csv'.
+    premrna_index = (discover_mapping_files(str(premrna_map_input), "intron_premrna")
+                     if premrna_map_input and premrna_map_input.is_dir() else {})
+    chrom_map_index = (discover_mapping_files(str(chrom_map_input), "chromosome")
+                       if chrom_map_input and chrom_map_input.is_dir() else {})
+    mutations_index = (discover_mutation_files(str(mutations_input))
+                       if mutations_input and mutations_input.is_dir() else {})
+
     def _load_premrna_map(gene):
         """pre-mRNA mapping for one gene, or None when not supplied."""
         if premrna_map_input is None:
             return None
         if premrna_map_input.is_file():
             return load_mapping(str(premrna_map_input), mapType="pre_mRNA")
+        hit = premrna_index.get(gene) if gene else None
+        if hit:
+            return load_mapping(hit, mapType="pre_mRNA")
         cands = list(premrna_map_input.glob(f'*{gene}*.csv')) if gene else []
         return load_mapping(str(cands[0]), mapType="pre_mRNA") if cands else None
 
@@ -1133,15 +1152,23 @@ def main():
 
     if fasta_input.is_dir():
         # --- Directory mode ---
-        for fasta_file in sorted(fasta_input.glob('*.fasta')):
+        # Per-gene layout first (<root>/<GENE>/fastas/). The flat glob below only
+        # ever matched '*.fasta' directly under the root, so a variant_mapping
+        # output root yielded zero genes and the run ended silently.
+        _disc = discover_fasta_files(str(fasta_input))
+        fasta_iter = ([Path(p) for _, p in sorted(_disc.items())] if _disc
+                      else sorted(fasta_input.glob('*.fasta')))
+        for fasta_file in fasta_iter:
             gene_name = extract_gene_from_filename(str(fasta_file))
 
             # Find matching mutations file
             mut_path = None
             if mutations_input and mutations_input.is_dir():
-                candidates = list(mutations_input.glob(f'*{gene_name}*.csv'))
-                if candidates:
-                    mut_path = str(candidates[0])
+                mut_path = mutations_index.get(gene_name)
+                if not mut_path:
+                    candidates = list(mutations_input.glob(f'*{gene_name}*.csv'))
+                    if candidates:
+                        mut_path = str(candidates[0])
 
             # Resolve chromosome from VCF
             chrom = args.chrom
@@ -1160,9 +1187,12 @@ def main():
                 if chrom_map_input.is_file():
                     chrom_mapping = load_mapping(str(chrom_map_input), mapType="chromosome")
                 elif chrom_map_input.is_dir():
-                    map_candidates = list(chrom_map_input.glob(f'*{gene_name}*.csv'))
-                    if map_candidates:
-                        chrom_mapping = load_mapping(str(map_candidates[0]), mapType="chromosome")
+                    hit = chrom_map_index.get(gene_name)
+                    if not hit:
+                        map_candidates = list(chrom_map_input.glob(f'*{gene_name}*.csv'))
+                        hit = str(map_candidates[0]) if map_candidates else None
+                    if hit:
+                        chrom_mapping = load_mapping(hit, mapType="chromosome")
 
             if not mut_path and not chrom_mapping:
                 print(f"No mutations source for {gene_name}", file=sys.stderr)
@@ -1192,9 +1222,12 @@ def main():
                 chrom_mapping = load_mapping(str(chrom_map_input), mapType="chromosome")
             elif chrom_map_input.is_dir():
                 gene_name = extract_gene_from_filename(str(fasta_input))
-                map_candidates = list(chrom_map_input.glob(f'*{gene_name}*.csv'))
-                if map_candidates:
-                    chrom_mapping = load_mapping(str(map_candidates[0]), mapType="chromosome")
+                hit = chrom_map_index.get(gene_name)
+                if not hit:
+                    map_candidates = list(chrom_map_input.glob(f'*{gene_name}*.csv'))
+                    hit = str(map_candidates[0]) if map_candidates else None
+                if hit:
+                    chrom_mapping = load_mapping(hit, mapType="chromosome")
 
         mut_path = str(mutations_input) if mutations_input else None
         gene_name = extract_gene_from_filename(str(fasta_input))

@@ -55,6 +55,11 @@ from typing import Optional, Dict, List, Tuple
 # Import utility functions
 from biofeaturefactory.lib.utility import (
     derive_mutations_root,
+    # The local copy this replaces did a flat glob("*.csv") and shadowed the
+    # import, so a derived per-gene root resolved to {} and every gene was
+    # reported "No mutation file for <GENE>, skipping" -- 0 rows written while
+    # the derive line above claimed the layout had been detected.
+    discover_mutation_files,
     read_fasta,
     mint_pkey,
     token_from_name,
@@ -218,45 +223,6 @@ def extract_residue_predictions(predictions_batch, seq_idx, pos_idx, residue):
         'q8': q8_class,
         'q3': q3_class,
     }
-
-
-def discover_mutation_files(mutation_path_str):
-    """
-    Discover mutation files for each gene.
-
-    Handles both:
-    - Single mutation file: extracts gene name, returns {gene: file}
-    - Directory: scans for *.csv files matching patterns
-
-    Looks for files matching:
-    - <GENE>_mutations.csv
-    - combined_<GENE>.csv
-    - <GENE>.csv
-
-    Args:
-        mutation_path_str: Path to mutation file or directory
-
-    Returns:
-        dict: {gene_name: file_path}
-    """
-    if not mutation_path_str or not Path(mutation_path_str).exists():
-        return {}
-
-    mutation_path = Path(mutation_path_str)
-    mutation_files = {}
-
-    # Handle single file
-    if mutation_path.is_file():
-        gene_name = extract_gene_from_filename(mutation_path.name)
-        mutation_files[gene_name] = str(mutation_path)
-        return mutation_files
-
-    # Handle directory
-    for csv_file in mutation_path.glob("*.csv"):
-        gene_name = extract_gene_from_filename(csv_file.name)
-        mutation_files[gene_name] = str(csv_file)
-
-    return mutation_files
 
 
 def run_nsp3_prediction(fasta_file, model_path, config_path, batch_size=100, verbose=False, max_seq_length=1500):

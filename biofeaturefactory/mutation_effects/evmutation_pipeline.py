@@ -80,6 +80,8 @@ from biofeaturefactory.lib.utility import (
     mint_pkey,
     codon_to_aa,
     discover_fasta_files,
+    discover_mutation_files,
+    find_gene_file,
     extract_gene_from_filename,
     format_aa_token,
     load_validation_failures,
@@ -1109,20 +1111,16 @@ def _find_file_for_gene(gene, path_arg, glob_patterns):
     Resolve a per-gene file from a direct path or directory.
 
     Direct file: returned as-is.
-    Directory: returns the first file matching any glob pattern whose filename
-               extracts to the given gene name.
+    Directory: the per-gene layout (<root>/<GENE>/...) first, then the flat scan
+    this used to do alone. The flat glob is non-recursive, so at a
+    variant_mapping / MSA-generator root it saw only <GENE>/ directories and
+    returned None -- reported by every caller as "no file found for <GENE>" while
+    the artifact sat two or three levels down.
+
+    Shared implementation in lib/utility.find_gene_file; adabmDCA and the
+    mutEffects controller resolve the same artifacts and must agree.
     """
-    if not path_arg:
-        return None
-    p = Path(path_arg)
-    if p.is_file():
-        return str(p)
-    if p.is_dir():
-        for pattern in glob_patterns:
-            for f in sorted(p.glob(pattern)):
-                if extract_gene_from_filename(f.name).upper() == gene.upper():
-                    return str(f)
-    return None
+    return find_gene_file(path_arg, gene, glob_patterns)
 
 
 def _resolve_model_params(gene, path_arg, suffix):
@@ -1520,11 +1518,19 @@ Examples:
         }
         failures = []
 
+        mutation_index = discover_mutation_files(str(args.mutations)) if args.mutations else {}
+
         for gene, fasta_file in sorted(fasta_map.items()):
             metrics["total"] += 1
             print(f"\n== {gene} ==")
             try:
-                mutations_file = _find_file_for_gene(gene, args.mutations, ["*.csv"])
+                # discover_mutation_files, NOT _find_file_for_gene with "*.csv":
+                # a gene tree holds seven CSV types under <GENE>/mappings/ that
+                # all extract to the same gene name, so a filename match there is
+                # decided by sort order. This selects by directory. The flat
+                # fallback keeps FILE MODE and a plain directory working.
+                mutations_file = (mutation_index.get(gene)
+                                  or _find_file_for_gene(gene, args.mutations, ["*.csv"]))
                 if not mutations_file:
                     print("  No mutations file found -> skipping")
                     metrics["fail"] += 1

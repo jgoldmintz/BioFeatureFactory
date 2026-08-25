@@ -1307,6 +1307,54 @@ def discover_mutation_files(mutation_dir):
     return found
 
 
+def find_gene_file(path_arg, gene, patterns):
+    """Resolve ONE per-gene file from a file path or a directory, either layout.
+
+    Handles both the per-gene tree variant_mapping and the MSA generators write
+    (<root>/<GENE>/{fastas,mappings,MSA,CodonMSA}/) and the flat directory of
+    per-gene files that predates it. A plain glob at a gene-tree root sees only
+    directories and returns None, which every caller reports as "no file for
+    <GENE>" -- the file being two or three levels down, not absent.
+
+    `patterns` must be specific enough to identify the artifact on its own, e.g.
+    '*.a2m', '*.codon.msa.fasta', '*.model_params'. Do NOT pass '*.csv' against a
+    gene tree: <GENE>/mappings/ holds seven CSV types that all extract to the same
+    gene name, so the match would be decided by sort order. Use
+    discover_mutation_files (mutations) or discover_mapping_files (mappings)
+    instead -- both select by directory rather than by filename.
+    """
+    from pathlib import Path
+
+    if not path_arg or not gene:
+        return None
+    p = Path(path_arg)
+    if p.is_file():
+        return str(p)
+    if not p.is_dir():
+        return None
+    up = gene.upper()
+
+    # Per-gene layout first.
+    gene_dir = next((c for c in sorted(p.iterdir())
+                     if c.is_dir() and c.name.upper() == up), None)
+    if gene_dir is not None:
+        for pattern in patterns:
+            hits = sorted(f for f in gene_dir.rglob(pattern) if f.is_file())
+            exact = [f for f in hits
+                     if (extract_gene_from_filename(f.name) or "").upper() == up]
+            if exact:
+                return str(exact[0])
+            if hits:
+                return str(hits[0])
+
+    # Flat directory: the original behaviour, unchanged.
+    for pattern in patterns:
+        for f in sorted(p.glob(pattern)):
+            if (extract_gene_from_filename(f.name) or "").upper() == up:
+                return str(f)
+    return None
+
+
 def derive_mutations_root(explicit, input_root, label=None):
     """Mutations counterpart to derive_mapping_root; same explicit-wins contract."""
     if explicit:
