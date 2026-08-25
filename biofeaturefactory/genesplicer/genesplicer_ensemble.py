@@ -54,6 +54,7 @@ import concurrent.futures
 from biofeaturefactory.lib.utility import (
     derive_mapping_root,
     discover_fasta_files,
+    discover_mapping_files,
     read_fasta,
     parse_variant,
     splice_seq,
@@ -214,17 +215,36 @@ def _confidence_to_weight(conf: str) -> float:
 # mapping loader
 # ---------------------------------------------------------------------------
 
-def load_mapping_dir(mapping_dir: str):
+def load_mapping_dir(mapping_dir: str, map_type: str = "genomic"):
     """
     Load all mapping files in mapping_dir into a dict: {gene_name: DataFrame}
-    Accepts a single CSV file or a directory of CSV files.
+    Accepts a single CSV file, a flat directory of CSV files, or a
+    variant_mapping output root (<root>/<GENE>/mappings/<type>/).
     Expected columns include at least: 'mutant' and 'genomic'.
+
+    map_type selects WHICH mapping to load out of a per-gene tree. A blind
+    rglob over such a root walks every type -- chromosome, gDNA, transcript, aa,
+    intron_premRNA, pkey and the mutations copy -- and, because it assigns
+    maps[gene] per file, keeps whichever the walk yields LAST. Measured on a
+    two-gene root: both genes resolved to mappings/pkey/, whose columns are
+    (pkey, mutant), so _process_gene dropped every row with
+    "mapping_missing_mutant_or_genomic_column" while the gDNA file sitting two
+    directories away held the genomic column it wanted.
     """
     mapping_path = Path(mapping_dir)
     if not mapping_path.exists():
         raise FileNotFoundError(f"Mapping path not found: {mapping_path}")
     maps = {}
-    files = [mapping_path] if mapping_path.is_file() else mapping_path.rglob("*.csv")
+    # Layout-aware pass first; returns {} for a flat directory, which falls
+    # through to the original scan unchanged.
+    discovered = (discover_mapping_files(str(mapping_path), map_type)
+                  if mapping_path.is_dir() else {})
+    if discovered:
+        files = [Path(p) for _, p in sorted(discovered.items())]
+    elif mapping_path.is_file():
+        files = [mapping_path]
+    else:
+        files = mapping_path.rglob("*.csv")
     for f in files:
         if not f.is_file() or f.suffix not in (".tsv", ".csv", ".txt"):
             continue
