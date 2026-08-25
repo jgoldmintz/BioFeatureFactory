@@ -1124,7 +1124,7 @@ def main():
     # Input type
     parser.add_argument('-it', '--input-type', choices=['nt', 'aa'], default=None,
                         help='Input sequence type: "nt" for nucleotide (will translate), "aa" for amino acid. '
-                             'Optional — when omitted, auto-detected from the WT sequence via detect_alphabet.')
+                             'Optional -- when omitted, auto-detected from the WT sequence via detect_alphabet.')
 
     # Processing options
     parser.add_argument('-m', '--mutation-dir',

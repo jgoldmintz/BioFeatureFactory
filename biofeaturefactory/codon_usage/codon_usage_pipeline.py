@@ -47,7 +47,7 @@ from biofeaturefactory.lib.utility import (
 
 
 # write_tsv is called with this list and extrasaction='ignore', so a row key absent
-# here is dropped silently — add the column here whenever the row dict gains one.
+# here is dropped silently -- add the column here whenever the row dict gains one.
 FIELDNAMES = [
     'pkey',
     'Gene',
@@ -405,11 +405,12 @@ def process_mutation(gene, ntposnt, sequence, codondata, codonpairdata, cai_gene
     # it returns is the mutant; the wild-type triplet is the same slice of the unmutated
     # ORF. Safe because that function's REF guard already proved wt_sequence[pos] == REF.
     # Both alleles are looked up in the SAME codondata/codonpairdata, which are built once
-    # from the WT ORF — a point mutation must not shift the gene's reference usage table.
-    # wt_sequence is None when the caller only has an already-mutated sequence
-    # (process_mutant_fasta): the WT is unrecoverable there, so the wt/delta columns are
-    # left empty rather than filled with the mutant's own values, which would read as a
-    # delta of 0.0 for every row.
+    # from the WT ORF -- a point mutation must not shift the gene's reference usage table.
+    # The `if wt_sequence` guard below is now unreachable in normal operation: the
+    # only caller that passed None was the removed --mutant mode, which handed in an
+    # already-mutated sequence. It is kept because the alternative on a None is to
+    # fill wt/delta from the mutant's own values, which would read as a measured
+    # delta of 0.0 for every row rather than an absent comparison.
     wt_codon = wt_bi3 = wt_bi5 = None
     if wt_sequence:
         start = (codon_number - 1) * 3
@@ -567,7 +568,7 @@ def process_directory(fasta_dir, mutations_dir=None, validation_log=None, output
             # F50: exact stem match over a SORTED glob. The old substring test
             # (`gene.upper() in stem.upper()`) over an unsorted glob with a
             # first-match break bound a prefix gene (F9) to a superset gene's
-            # file (F9A), nondeterministically across machines — unlike the
+            # file (F9A), nondeterministically across machines -- unlike the
             # sorted() fasta list above. Accepts `<GENE>.csv` and the
             # `<GENE>_mutations.csv` convention used in Bio_DBs/mappings/mutations.
             for csv_file in ([] if mutations_file
@@ -702,7 +703,7 @@ Metrics:
                           if r.get('bicodon_3prime_wt') and r.get('bicodon_5prime_wt'))
 
         # F51: in directory mode `results` spans EVERY gene (results.extend per file),
-        # so results[0] is just whichever gene sorted first — printing its CAI/tAI as
+        # so results[0] is just whichever gene sorted first -- printing its CAI/tAI as
         # "Gene CAI/tAI" mislabels one gene's value as global. Report per gene instead.
         # (The per-gene TSVs were always correct; only this stdout line was wrong.)
         per_gene = {}

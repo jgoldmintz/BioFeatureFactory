@@ -24,7 +24,7 @@ class TestComputeCAI:
     W = {"ATG": 1.0, "AAA": 0.5, "GAA": 0.8}
 
     def test_geometric_mean_of_weights(self):
-        # ATG (1.0) + AAA (0.5) → exp((ln1.0 + ln0.5) / 2) = sqrt(0.5)
+        # ATG (1.0) + AAA (0.5) -> exp((ln1.0 + ln0.5) / 2) = sqrt(0.5)
         result = compute_cai("ATGAAA", w_values=self.W)
         expected = math.exp((math.log(1.0) + math.log(0.5)) / 2)
         assert result == pytest.approx(expected, rel=1e-6)
@@ -34,12 +34,12 @@ class TestComputeCAI:
         assert result == pytest.approx(0.8, rel=1e-6)
 
     def test_stop_codon_skipped(self):
-        # TAA is stop — should be skipped, only ATG counted
+        # TAA is stop -- should be skipped, only ATG counted
         result = compute_cai("ATGTAA", w_values={"ATG": 0.8})
         assert result == pytest.approx(0.8, rel=1e-6)
 
     def test_unknown_codon_skipped(self):
-        # NNN has no weight entry — skipped, only ATG counted
+        # NNN has no weight entry -- skipped, only ATG counted
         result = compute_cai("ATGNNN", w_values={"ATG": 0.6})
         assert result == pytest.approx(0.6, rel=1e-6)
 
@@ -165,15 +165,15 @@ class TestDetectAlphabet:
         assert detect_alphabet("MKEFWYLP") == "protein"
 
     def test_mostly_nucleotide_is_nucleotide(self):
-        # 11/12 = 91.7% nucleotide chars → nucleotide
+        # 11/12 = 91.7% nucleotide chars -> nucleotide
         assert detect_alphabet("ACGTACGTACGM") == "nucleotide"
 
     def test_below_threshold_is_protein(self):
-        # ACGT + MKEFW: 4 nt / 9 total = 44% → protein
+        # ACGT + MKEFW: 4 nt / 9 total = 44% -> protein
         assert detect_alphabet("ACGTMKEFW") == "protein"
 
     def test_gaps_excluded_from_ratio(self):
-        # Gaps stripped before ratio computed; ACGT only → nucleotide
+        # Gaps stripped before ratio computed; ACGT only -> nucleotide
         assert detect_alphabet("A-C-G-T") == "nucleotide"
 
     def test_empty_raises(self):

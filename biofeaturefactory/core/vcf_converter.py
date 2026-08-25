@@ -16,9 +16,17 @@
 # along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
 """
-A robust script to convert gene-specific SNP files to standard VCF files.
-Updated to support RefSeq chromosome naming for SpliceAI compatibility,
-with exon-aware mapping and optional sequence verification.
+Convert gene-specific mutation files to standard VCF.
+
+Handles every variant class the nt grammar accepts -- SNV, MNV, insertion,
+deletion and delins -- and writes each in minimal left-normalized form: shared
+suffix then shared prefix are trimmed while both alleles remain longer than one
+base, and an anchor base is prepended only when an allele would otherwise be
+empty. SpliceAI refuses to score a record whose REF and ALT are BOTH longer than
+one base, so emitting a redundant anchor silently costs every indel call.
+
+Supports RefSeq chromosome naming for SpliceAI compatibility, coordinate mappings
+from core/variant_mapping.py, and optional sequence verification.
 """
 
 import argparse
@@ -227,9 +235,9 @@ def _vcf_row(chrom, pos, ref, alt, fetch_base):
     """One PARSIMONIOUS VCF 4.3 data row for any variant class.
 
     VCF requires a shared anchor base at POS-1 only when an allele would otherwise
-    be EMPTY. The tokens reaching here are already anchored — parse_variant returns
+    be EMPTY. The tokens reaching here are already anchored -- parse_variant returns
     ACAA/A for a 3 nt deletion and G/GTCTG for a 4 nt insertion, and
-    test_keeps_the_vcf_anchor_base pins that form — so the former unconditional
+    test_keeps_the_vcf_anchor_base pins that form -- so the former unconditional
     `len(ref) != len(alt) -> prepend anchor` added a SECOND one.
 
     That second anchor is what made both alleles longer than one base, and
@@ -553,12 +561,13 @@ def process_single_file(
         # BFF producer (<outdir>/<GENE>/{CodonMSA,RareCodon,EVmutation,adabmDCA}/...)
         # rather than dumping every gene's VCF into one flat directory.
         #
-        # NOTE for the SpliceAI workflow: spliceai/bin/main.nf:135 discovers inputs
-        # with `Channel.fromPath("${params.input_vcf_dir}/*.vcf")` -- a FLAT glob, so
-        # --input_vcf_dir must now be pointed at <outdir>/<GENE>/vcf, not <outdir>.
-        # main.nf:254 also publishes SpliceAI OUTPUT to "${gene_id}/VCF" (capital),
-        # which is a DIFFERENT directory from this one on a case-sensitive
-        # filesystem -- i.e. on the Linux target, though not on this macOS dev box.
+        # main.nf reads this layout directly: it looks for <GENE>/vcf/<GENE>.vcf
+        # under --input_vcf_dir and falls back to a flat "<root>/*.vcf" glob only
+        # when that finds nothing, so <outdir> itself is what to pass. It names the
+        # file explicitly rather than globbing "*/vcf/*.vcf" because this directory
+        # is shared with compress_and_index (<GENE>.vcf.gz) and run_spliceai
+        # (<GENE>.spliceai.vcf) -- a wildcard re-ingests the pipeline's own
+        # annotated output as a third input named "<GENE>.spliceai".
         out_dir_gene = Path(outdir) / gene_name / "vcf"
         out_dir_gene.mkdir(parents=True, exist_ok=True)
         out_vcf = out_dir_gene / f"{gene_name}.vcf"

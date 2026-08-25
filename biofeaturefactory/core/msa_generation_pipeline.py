@@ -18,10 +18,11 @@
 """
 BioFeatureFactory: MSA Generation Pipeline
 
-Generates high-quality protein multiple sequence alignments suitable for
-EVmutation/PLMC analysis using jackhmmer iterative search against UniRef90.
+Generates protein multiple sequence alignments for the Potts-model backends
+(EVmutation/plmc and adabmDCA) using jackhmmer iterative search against UniRef90.
 
-Output format: A2M (compatible with PLMC and EVmutation)
+Output: {GENE}/MSA/{GENE}.msa.a2m plus a .stats.json. A2M is what both plmc and
+adabmDCA read.
 """
 
 import argparse
@@ -357,7 +358,7 @@ Quality thresholds:
         stats = generate_msa(query_fasta=str(fasta_file), **common_kwargs)
 
         print("\n" + "="*50)
-        print(f"MSA Generation Complete — {stats['query_id']}")
+        print(f"MSA Generation Complete -- {stats['query_id']}")
         print("="*50)
         print(f"Query length: {stats['query_length']}")
         print(f"Sequences (raw): {stats['n_sequences_raw']}")

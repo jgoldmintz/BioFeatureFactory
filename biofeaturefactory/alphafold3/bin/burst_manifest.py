@@ -53,7 +53,7 @@ class ManifestRow:
     """A single AF3 invocation in the burst manifest.
 
     Each row corresponds to one (gene, mutation, RBP, allele, window) AF3 job.
-    Two rows per (gene, mutation, RBP) at single-window — one WT, one MUT.
+    Two rows per (gene, mutation, RBP) at single-window -- one WT, one MUT.
     """
     array_idx: int
     input_hash: str
@@ -94,7 +94,7 @@ def write_manifest(rows: List[ManifestRow], path: Path) -> None:
 
     Writes to ``path.with_suffix(path.suffix + ".tmp")`` first, fsyncs, then
     renames. An ingest reader running concurrently sees either the previous
-    manifest or the new one — never a partial file.
+    manifest or the new one -- never a partial file.
     """
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -166,7 +166,7 @@ def is_cache_complete(cache_dir: Path) -> bool:
 def count_pending(manifest_path: Path, cache_root: Path = None) -> int:
     """Count manifest rows whose cache_dir is not yet complete.
 
-    ``cache_root`` is unused — the manifest already records absolute cache_dir
+    ``cache_root`` is unused -- the manifest already records absolute cache_dir
     paths, so the lookup is direct. Kept as a parameter for API forward-compat
     in case the manifest format moves to relative paths.
     """

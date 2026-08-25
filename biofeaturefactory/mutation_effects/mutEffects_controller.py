@@ -19,14 +19,14 @@
 Controller for the mutation-effects Nextflow pipeline (bin/main.nf).
 
 Drives two parallel DCA backends over each gene:
-  EVmutation/plmc  — pseudolikelihood Potts inference (CPU, external plmc binary)
-  adabmDCA         — Boltzmann / pseudolikelihood Potts inference, run in-process
+  EVmutation/plmc  -- pseudolikelihood Potts inference (CPU, external plmc binary)
+  adabmDCA         -- Boltzmann / pseudolikelihood Potts inference, run in-process
                      via the adabmDCApy Python API (GPU); see adabmdca_pipeline.py
 
 Each backend scores a protein side (missense/stop) and a codon side
 (synonymous). The full chain per gene:
-  1. Protein MSA (jackhmmer -> UniRef90)  — skipped if pre-built
-  2. Codon MSA (mmseqs2 -> MAFFT)         — skipped if pre-built
+  1. Protein MSA (jackhmmer -> UniRef90)  -- skipped if pre-built
+  2. Codon MSA (mmseqs2 -> MAFFT)         -- skipped if pre-built
   3. Scoring: EVmutation (plmc) and/or adabmDCA, each protein + codon
 
 Before launching Nextflow, inventories existing artifacts per gene
@@ -176,7 +176,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("-cmp", "--codon-model-params", type=Path,
                         help="Codon model params file or directory")
 
-    # Backend selection — both run in parallel by default.
+    # Backend selection -- both run in parallel by default.
     # --evmutation-only and --adabmdca-only are mutually exclusive.
     backend_group = parser.add_mutually_exclusive_group()
     backend_group.add_argument("-eo", "--evmutation-only", action="store_true",
@@ -185,9 +185,9 @@ def parse_args() -> argparse.Namespace:
                                help="Run only the adabmDCA backend; skip EVmutation/plmc.")
 
     # --skip-codon: optional argument selects which backend(s) to skip codon-side for.
-    #   --skip-codon                  → both backends skip codon-side
-    #   --skip-codon evmutation       → only EVmutation skips codon-side
-    #   --skip-codon adabmdca         → only adabmDCA skips codon-side
+    #   --skip-codon                  -> both backends skip codon-side
+    #   --skip-codon evmutation       -> only EVmutation skips codon-side
+    #   --skip-codon adabmdca         -> only adabmDCA skips codon-side
     parser.add_argument("-sc", "--skip-codon", nargs="?", const="both", default=None,
                         choices=["both", "evmutation", "adabmdca"],
                         help="Skip codon-side scoring. No arg = both backends; "
@@ -203,7 +203,7 @@ def parse_args() -> argparse.Namespace:
                              "(default: <output>/adabmdca_codon_params/{GENE}.codon_adabm_params)")
 
     # adabmDCA tunables (consulted only when the adabmDCA backend runs).
-    # NOTE: there is no --adabmdca-binary flag — the `adabmDCA` console script
+    # NOTE: there is no --adabmdca-binary flag -- the `adabmDCA` console script
     # is installed by `pip install adabmDCA` (the Python/torch implementation,
     # not a compiled binary) and is expected on PATH.
     parser.add_argument("-am", "--adabmdca-model", default="bmDCA",
@@ -260,7 +260,7 @@ def validate_args(args: argparse.Namespace) -> None:
     args.run_evmutation = not args.adabmdca_only
     args.run_adabmdca = not args.evmutation_only
 
-    # --skip-codon → per-backend booleans.
+    # --skip-codon -> per-backend booleans.
     args.skip_codon_evmutation = args.skip_codon in ("both", "evmutation")
     args.skip_codon_adabmdca = args.skip_codon in ("both", "adabmdca")
 
@@ -361,14 +361,14 @@ def build_nextflow_cmd(args: argparse.Namespace, manifest_path: str) -> List[str
     if args.codon_model_params:
         add_param("codon_model_params", normalize(args.codon_model_params))
 
-    # Backend skip flags — only emit "true" when the user wants the skip on.
+    # Backend skip flags -- only emit "true" when the user wants the skip on.
     # Never emit "false" (Groovy's `if ("false")` is truthy and would invert the gate).
     if not args.run_evmutation:
         add_param("skip_evmutation", "true")
     if not args.run_adabmdca:
         add_param("skip_adabmdca", "true")
 
-    # Codon-side skip flags — same string-truthy convention.
+    # Codon-side skip flags -- same string-truthy convention.
     if args.skip_codon_evmutation:
         add_param("skip_codon_evmutation", "true")
     if args.skip_codon_adabmdca:
@@ -379,7 +379,7 @@ def build_nextflow_cmd(args: argparse.Namespace, manifest_path: str) -> List[str
     if args.adabmdca_codon_params:
         add_param("adabmdca_codon_params", normalize(args.adabmdca_codon_params))
 
-    # adabmDCA tunables — only forward when the adabmDCA backend runs
+    # adabmDCA tunables -- only forward when the adabmDCA backend runs
     if args.run_adabmdca:
         add_param("adabmdca_model",   args.adabmdca_model)
         if args.adabmdca_nepochs is not None:
@@ -438,7 +438,7 @@ def validate_backend_tools(args: argparse.Namespace, manifest: Dict[str, List[st
             f"ERROR: adabmDCA training needs {side_str}, but these Python package(s)\n"
             f"       are not importable in the active interpreter: {', '.join(missing)}.\n"
             f"       adabmdca_pipeline.py trains in-process via the adabmDCApy API, so the\n"
-            f"       package must import here — a console script on PATH is neither\n"
+            f"       package must import here -- a console script on PATH is neither\n"
             f"       sufficient nor required. Install into THIS interpreter:\n"
             f"         pip install adabmDCA torch\n"
             f"       Then verify: python -c 'import adabmDCA, torch'"

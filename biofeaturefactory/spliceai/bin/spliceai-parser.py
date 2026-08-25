@@ -753,13 +753,13 @@ def parse_spliceai_vcf(
         #
         # Scoped to the MAPPING drop reasons. dropped_non_snv also carries
         # record-level reasons now ('no SpliceAI INFO at all'), and those say
-        # nothing about the mapping file — blaming it for them would send the
+        # nothing about the mapping file -- blaming it for them would send the
         # reader to the wrong file.
         mapping_non_snv = sum(dropped_non_snv.get(r, 0) for r in
                               ('no_chromosome_match', 'skip_listed', 'no_orf_id'))
         if predictions and mapping_non_snv and not any('NON_SNV' in p['qc_flags'] for p in predictions):
             print(f"[WARN] {vcf_file}: every non-SNV record was dropped "
-                  f"({mapping_non_snv} of them) while SNV records resolved — the mapping "
+                  f"({mapping_non_snv} of them) while SNV records resolved -- the mapping "
                   f"file carries no indel entries.", file=sys.stderr)
         if block_stats.get('malformed_blocks'):
             print(f"[WARN] {vcf_file}: {block_stats['malformed_blocks']} SpliceAI INFO blocks refused "
@@ -771,10 +771,10 @@ def parse_spliceai_vcf(
         if unannotated:
             print(f"[WARN] {vcf_file}: {unannotated} of {processed_count} records carry no SpliceAI "
                   f"INFO field at all ({dropped_non_snv.get('no_spliceai_annotation', 0)} of them "
-                  f"non-SNV) — SpliceAI scored no transcript for them", file=sys.stderr)
+                  f"non-SNV) -- SpliceAI scored no transcript for them", file=sys.stderr)
         if processed_count and not predictions and dropped_unmapped:
             print(f"[ERROR] {vcf_file}: {processed_count} variants processed but ZERO rows written and "
-                  f"{dropped_unmapped} unmapped — the mapping file almost certainly does not match this VCF.",
+                  f"{dropped_unmapped} unmapped -- the mapping file almost certainly does not match this VCF.",
                   file=sys.stderr)
 
         if match_modes.get('left_aligned'):

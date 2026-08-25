@@ -23,8 +23,8 @@ conversion, gap filtering and sequence-weight statistics. Consumers: EVmutation
 and msa_generation_pipeline.
 
 Split out of utility.py, which had grown to 92 symbols. utility.py re-exports
-every name here lazily, so existing `from ...utility import X` callers are
-unaffected.
+every name here with a plain eager import, so existing
+`from ...utility import X` callers are unaffected.
 """
 
 import csv
@@ -66,7 +66,7 @@ def prepare_protein_query(query_fasta):
     if alphabet == 'protein':
         return query_fasta, None
 
-    print(f"Nucleotide query detected for '{record.id}' — translating to protein.")
+    print(f"Nucleotide query detected for '{record.id}' -- translating to protein.")
     aa_seq = record.seq.translate(to_stop=True)
     if not aa_seq:
         raise ValueError(f"Translation of '{record.id}' produced an empty protein sequence.")

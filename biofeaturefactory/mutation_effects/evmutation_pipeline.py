@@ -31,6 +31,13 @@ Model params:
 Outputs (per gene):
   <output>/<GENE>/EVmutation/<GENE>.protein.tsv   missense, stop, unclassified
   <output>/<GENE>/EVmutation/<GENE>.codon.tsv     synonymous mutations
+  --skip-codon routes synonymous + stop to the protein TSV instead.
+
+mutation_class also covers the non-SNV tokens the nt grammar accepts:
+INFRAME_INS, INFRAME_DEL, INFRAME_DELINS, FRAMESHIFT. A Potts model has a fixed
+number of sites, so a token that changes length is NAMED in qc_flags
+(INSERTION_NOT_REPRESENTABLE_FIXED_L, DELETION_NO_GAP_SYMBOL_IN_MODEL,
+FRAMESHIFT_NOT_REPRESENTABLE_FIXED_L) rather than scored.
 
 Protein table: epistatic and independent scores are primary when
   N_eff >> 6,500 (q=20).

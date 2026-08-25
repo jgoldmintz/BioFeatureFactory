@@ -19,8 +19,11 @@ AlphaFold3 execution wrapper.
 
 Generates AF3 input JSON files and executes predictions in:
 - local: Direct subprocess execution (requires GPU)
-- batch: Generate SLURM submission scripts
-- cloud: Generate GCP Batch configuration
+
+ExecutionMode.BATCH and ExecutionMode.CLOUD raise. Their script generators were
+removed because both emitted artifacts that were never ingested. SLURM is handled
+by biofeaturefactory.alphafold3.burst (manifest-driven array + L1 cache); cloud
+burst (AWS Batch / GCP Batch) is out of scope.
 """
 
 import json
@@ -464,7 +467,7 @@ class AF3Runner:
                 job.status = "failed"
                 stderr = result.stderr.strip()
                 with self._failure_lock:
-                    # Docker infrastructure errors — stop immediately
+                    # Docker infrastructure errors -- stop immediately
                     if any(msg in stderr.lower() for msg in [
                         "permission denied", "daemon", "pull access denied",
                         "unable to find image", "connect:"

@@ -15,7 +15,7 @@
 // You should have received a copy of the GNU Affero General Public License
 // along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
-// BioFeatureFactory — EVmutation full pipeline (MSA generation + plmc + scoring)
+// BioFeatureFactory -- EVmutation full pipeline (MSA generation + plmc + scoring)
 // DAG: ORF FASTA -> [protein MSA || codon MSA] -> EVmutation scoring
 nextflow.enable.dsl = 2
 
@@ -47,7 +47,7 @@ params.codon_model_params = null
 
 params.manifest           = null    // JSON manifest from controller
 
-// Backend gating — defaults match the controller (both backends run).
+// Backend gating -- defaults match the controller (both backends run).
 // Skip flags are emitted as the string "true" by the controller only when
 // disabling; never as "false" (Groovy's `if ("false")` is truthy).
 params.skip_evmutation          = false   // when true: EVmutation/plmc processes skipped
@@ -57,7 +57,7 @@ params.skip_codon_adabmdca      = false   // when true: codon-side adabmDCA skip
 
 // adabmDCA backend tunables (consulted when adabmDCA runs).
 // The `adabmDCA` CLI is the Python/torch console script installed by
-// `pip install adabmDCA` — it is expected on PATH and is not configurable here.
+// `pip install adabmDCA` -- it is expected on PATH and is not configurable here.
 params.adabmdca_protein_params     = null          // pre-built protein params: file or directory
 params.adabmdca_codon_params       = null          // pre-built codon params:   file or directory
 // Alphabet selection is owned by adabmdca_pipeline.py: protein side uses the
@@ -357,7 +357,7 @@ workflow {
             .of(tuple(fasta_base.name.replaceAll(/\.(fasta|fa|fas)$/, '').replaceAll(/_(nt|aa)$/, ''), file(params.fasta)))
     }
 
-    // Step 1: Protein MSA — split genes by manifest: pre-built vs needs generation
+    // Step 1: Protein MSA -- split genes by manifest: pre-built vs needs generation
     def has_protein_msa = (manifest.msa ?: []) as Set
     def fasta_need_protein = fasta_ch.filter { gene_id, f -> !(gene_id in has_protein_msa) }
     def fasta_have_protein = fasta_ch.filter { gene_id, f -> gene_id in has_protein_msa }
@@ -370,7 +370,7 @@ workflow {
     }
     def protein_msa_ch = generated_protein.mix(prebuilt_protein)
 
-    // Step 2: Codon MSA — same split
+    // Step 2: Codon MSA -- same split
     def has_codon_msa = (manifest.codon_msa ?: []) as Set
     def fasta_need_codon = fasta_ch.filter { gene_id, f -> !(gene_id in has_codon_msa) }
     def fasta_have_codon = fasta_ch.filter { gene_id, f -> gene_id in has_codon_msa }
@@ -383,9 +383,9 @@ workflow {
     }
     def codon_msa_ch = generated_codon.mix(prebuilt_codon)
 
-    // Step 3-4: EVmutation backend — gated on !skip_evmutation.
+    // Step 3-4: EVmutation backend -- gated on !skip_evmutation.
     if (!params.skip_evmutation) {
-        // Step 3: Protein EVmutation — runs as soon as protein MSA is ready
+        // Step 3: Protein EVmutation -- runs as soon as protein MSA is ready
         def has_protein_tsv = (manifest.EVmutation ?: []) as Set
         def protein_ev_input = fasta_ch
             .filter { gene_id, f -> !(gene_id in has_protein_tsv) }
@@ -444,7 +444,7 @@ workflow {
         }
     }
 
-    // Step 5: adabmDCA backend — mirrors EVmutation's two-process structure.
+    // Step 5: adabmDCA backend -- mirrors EVmutation's two-process structure.
     // Each process calls adabmdca_pipeline.py end-to-end (train + score);
     // Nextflow only stages files and gates by manifest, the way EVmutation does.
     if (!params.skip_adabmdca) {
@@ -522,7 +522,7 @@ process generate_protein_msa {
         --threads ${params.threads} \\
         --iterations ${params.jackhmmer_iterations}
 
-    # Pipeline writes to {GENE}/MSA/ — flatten
+    # Pipeline writes to {GENE}/MSA/ -- flatten
     if [ -d "${gene_id}/MSA" ]; then
         mv ${gene_id}/MSA/${gene_id}.msa.a2m . 2>/dev/null || true
         mv ${gene_id}/MSA/${gene_id}.msa.stats.json . 2>/dev/null || true
@@ -551,7 +551,7 @@ process generate_codon_msa {
         --aligner ${params.aligner} \\
         --threads ${params.threads}
 
-    # Pipeline writes to {GENE}/CodonMSA/ — flatten
+    # Pipeline writes to {GENE}/CodonMSA/ -- flatten
     if [ -d "${gene_id}/CodonMSA" ]; then
         mv ${gene_id}/CodonMSA/${gene_id}.codon.msa.fasta . 2>/dev/null || true
         mv ${gene_id}/CodonMSA/${gene_id}.codon.msa.manifest.tsv . 2>/dev/null || true

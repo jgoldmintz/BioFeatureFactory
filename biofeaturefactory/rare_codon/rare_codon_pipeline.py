@@ -23,8 +23,14 @@ Detects regions enriched/depleted in rare codons using sliding window analysis.
 
 Requires:
   - cg_cotrans library: https://shakhnovich.faculty.chemistry.harvard.edu/software/coarse-grained-co-translational-folding-analysis
-  - Codon-aware MSA (FASTA)
-  - Pre-computed codon usage file (.p.gz from calc_codon_usage.py)
+  - Codon-aware MSA (FASTA), from core/codon_msa_pipeline.py
+
+Optional, but the null model depends on it:
+  - --reference-codon-usage: genome-wide codon usage TSV, built by
+    scripts/build_db.sh at Bio_DBs/cocoputs/human_GRCh38_codon_usage.tsv.
+    Without it "rare" is derived from the single gene under analysis, which makes
+    the reference distribution and the test sequence the same data.
+  - --usage: codon usage .p.gz; auto-built when absent.
 
 Output format: TSV with BFF-standard pkey column
 """
@@ -398,7 +404,7 @@ def run_rare_codon_analysis(gene, msa_path, usage_path, wt_gi, window_size=15,
         # (a protein MSA does exactly this). Previously surfaced as an opaque
         # ZeroDivisionError at the `gi_len / wt_len` length filter below.
         raise ValueError(
-            f"{gene}: WT '{wt_gi}' has 0 valid codons after sanitization — "
+            f"{gene}: WT '{wt_gi}' has 0 valid codons after sanitization -- "
             f"{msa_path} does not look like a codon-aware nucleotide MSA "
             f"(a protein MSA produces this)."
         )

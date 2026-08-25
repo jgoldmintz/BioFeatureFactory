@@ -29,7 +29,7 @@ cycle (utility -> msa -> utility) that only a lazy PEP 562 __getattr__ could
 paper over. Hoisting the shared primitives one layer down removes the cycle
 outright, so every import in the package is now plain and eager:
 
-    core  ->  {msa, codon_metrics, dtu_outputs, annotation}  ->  utility
+    {utility, core}  ->  {msa, codon_metrics, dtu_outputs, annotation}  ->  primitives
 
 Nothing here may import from its siblings or from utility.
 """
@@ -127,7 +127,7 @@ def get_mutation_data_bioAccurate(ntposnt, is_nt):
     is_nt is REQUIRED (no default): pass True for a nucleotide mutation token
     (e.g. G123A) or False for an amino-acid token (e.g. R213W). When True, a token
     whose ref/alt are not nucleotides (ACGTU) returns (None, None) instead of
-    silently coercing an off-alphabet character into a position/ref/alt — this
+    silently coercing an off-alphabet character into a position/ref/alt -- this
     closes the input-level validation gap (F45). Callers MUST state intent
     explicitly; a missing argument is a TypeError by design (fail-loud, no silent
     wrong default). alphafold3 opts out (is_nt=False) pending its own custom guard.
@@ -459,7 +459,7 @@ def detect_alphabet(sequence):
                     indistinguishable from protein by composition and is reported
                     as 'protein'. A hard limit of composition-only detection.
     - 'nucleotide': >=90% of non-gap characters are ACGT + U (RNA) + N (masked
-                    base). IUPAC ambiguity codes are excluded — they collide with
+                    base). IUPAC ambiguity codes are excluded -- they collide with
                     amino-acid letters and do not appear in BFF's ORF/CDS inputs.
     - 'protein'   : otherwise.
     """

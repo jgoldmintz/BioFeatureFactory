@@ -1088,7 +1088,7 @@ def cmd_preflight(args) -> int:
         tbi = postar.with_suffix(postar.suffix + ".tbi")
         if str(postar).endswith(".gz") and not tbi.exists():
             report("postar_db", True,
-                   f"{postar} ({size_mb:.0f} MB) — note: no .tbi index found, "
+                   f"{postar} ({size_mb:.0f} MB) -- note: no .tbi index found, "
                    "tabix queries will fall back to slower in-memory mode")
         else:
             report("postar_db", True, f"{postar} ({size_mb:.0f} MB)")

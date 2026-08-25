@@ -22,12 +22,14 @@ Generates codon-aware multiple sequence alignments from protein alignments
 and corresponding nucleotide sequences.
 
 Workflow:
-  1. Load protein MSA (from MUSCLE/MAFFT/etc.)
-  2. Load corresponding nucleotide sequences for each sequence ID
-  3. Back-translate protein alignment to codons
-  4. Output codon MSA preserving alignment structure
+  1. Read the focus ORF nucleotide sequence
+  2. mmseqs2 search against the RefSeq protein DB under --db-root
+  3. Align the hits with --aligner (default mafft)
+  4. Back-translate the protein alignment to codons against each hit's CDS
+  5. Write the codon MSA preserving alignment structure
 
-Output format: FASTA with codon sequences (gaps as '---')
+Output: {GENE}/CodonMSA/{GENE}.codon.msa.fasta, codons with gaps as '---',
+        plus a .manifest.tsv naming the sequences that were kept.
 """
 
 import argparse
@@ -1079,7 +1081,7 @@ def resolve_focus_fastas(input_root, fasta, parser):
 
     discover_fasta_files is the fallback for a flat directory of ORF FASTAs. It
     prefers a stem containing '_aa' when two files map to one gene, which is the
-    wrong preference for this tool — it needs the NUCLEOTIDE ORF — so the layout
+    wrong preference for this tool -- it needs the NUCLEOTIDE ORF -- so the layout
     path above is what a variant_mapping root uses.
 
     File mode returns the single pair, gene named the same way

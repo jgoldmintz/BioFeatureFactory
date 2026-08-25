@@ -81,7 +81,7 @@ class BindingEventClass(Enum):
     WEAKENED = "weakened"       # Both have binding, MUT weaker
     UNCHANGED = "unchanged"     # No significant change
     NO_BINDING = "no_binding"   # Neither WT nor MUT has binding
-    INCOMPLETE = "incomplete"   # WT or MUT prediction missing — no comparison possible
+    INCOMPLETE = "incomplete"   # WT or MUT prediction missing -- no comparison possible
 
 
 @dataclass
@@ -172,7 +172,7 @@ def classify_binding_event(
     Returns:
         Event classification
     """
-    # Handle missing data — one or both sides failed, no valid comparison
+    # Handle missing data -- one or both sides failed, no valid comparison
     if wt_metrics is None or mut_metrics is None:
         return BindingEventClass.INCOMPLETE
 
@@ -296,7 +296,7 @@ def aggregate_mutation_summary(
     for d in delta_list:
         event_counts[d.event_class] += 1
 
-    # Find top event (exclude incomplete — no valid comparison happened)
+    # Find top event (exclude incomplete -- no valid comparison happened)
     significant_events = [
         d for d in delta_list
         if d.event_class not in [BindingEventClass.UNCHANGED, BindingEventClass.NO_BINDING, BindingEventClass.INCOMPLETE]
@@ -312,7 +312,7 @@ def aggregate_mutation_summary(
         top_class = "none"
         top_delta = 0.0
 
-    # Max absolute delta (exclude incomplete — one-sided deltas are not real comparisons)
+    # Max absolute delta (exclude incomplete -- one-sided deltas are not real comparisons)
     complete_deltas = [d for d in delta_list if d.event_class != BindingEventClass.INCOMPLETE]
     max_abs_delta = max(
         (abs(d.delta_chain_pair_pae_min) for d in complete_deltas),

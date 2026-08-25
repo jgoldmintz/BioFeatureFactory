@@ -19,7 +19,7 @@ from biofeaturefactory.lib.utility import (
 )
 
 
-# ── Fixtures ─────────────────────────────────────────────────────────────
+# -- Fixtures -------------------------------------------------------------
 
 SAMPLE_NETNGLYC_BATCH = """\
 >batch1-netnglyc\t3 amino acids
@@ -76,7 +76,7 @@ def _write_batch(tmp_dir, name, content):
     return str(p)
 
 
-# ── combine_batch_outputs dispatcher ─────────────────────────────────────
+# -- combine_batch_outputs dispatcher -------------------------------------
 
 class TestCombineBatchOutputsDispatcher:
 
@@ -104,7 +104,7 @@ class TestCombineBatchOutputsDispatcher:
         assert os.path.exists(out)
 
 
-# ── _combine_glycosylation_outputs ───────────────────────────────────────
+# -- _combine_glycosylation_outputs ---------------------------------------
 
 class TestCombineGlycosylationOutputs:
 
@@ -176,7 +176,7 @@ class TestCombineGlycosylationOutputs:
         assert result is True
 
 
-# ── _combine_phosphorylation_outputs ─────────────────────────────────────
+# -- _combine_phosphorylation_outputs -------------------------------------
 
 class TestCombinePhosphorylationOutputs:
 
@@ -231,7 +231,7 @@ class TestCombinePhosphorylationOutputs:
         assert result is True
 
     def test_header_fallback_no_seq_count(self, tmp_dir):
-        """Batch without standard header line → fallback count."""
+        """Batch without standard header line -> fallback count."""
         content = "# GENE1-X     Sequence   50  S  MQLSYFL  0.950  PKC       YES\n"
         f = _write_batch(tmp_dir, "b1.out", content)
         out = str(tmp_dir / "combined-netphos.out")

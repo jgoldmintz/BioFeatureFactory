@@ -30,7 +30,7 @@ class TestComputeSequenceWeights:
         assert weights["seq2"] == pytest.approx(0.5)
 
     def test_completely_different_sequences_each_full_weight(self):
-        # AAAA vs CCCC: 0% identity → not neighbors
+        # AAAA vs CCCC: 0% identity -> not neighbors
         msa = {"seq1": "AAAA", "seq2": "CCCC"}
         weights = compute_sequence_weights(msa, identity_threshold=0.8)
         assert weights["seq1"] == pytest.approx(1.0)
@@ -51,8 +51,8 @@ class TestComputeSequenceWeights:
         assert set(weights.keys()) == {"s1", "s2", "s3"}
 
     def test_gap_positions_excluded_from_identity(self):
-        # Both sequences have gaps at the same positions — gaps excluded
-        # s1: A-GT, s2: A-GT → aligned non-gap positions: A,G,T (3 matches / 3) = 100%
+        # Both sequences have gaps at the same positions -- gaps excluded
+        # s1: A-GT, s2: A-GT -> aligned non-gap positions: A,G,T (3 matches / 3) = 100%
         msa = {"s1": "A-GT", "s2": "A-GT"}
         weights = compute_sequence_weights(msa, identity_threshold=0.8)
         assert weights["s1"] == pytest.approx(0.5)
@@ -69,7 +69,7 @@ class TestComputeNeff:
         assert compute_neff({"seq1": "ACGT"}) == pytest.approx(1.0)
 
     def test_two_identical_sequences_neff_is_one(self):
-        # Each has weight 0.5 → neff = 1.0
+        # Each has weight 0.5 -> neff = 1.0
         msa = {"s1": "ACGT", "s2": "ACGT"}
         assert compute_neff(msa) == pytest.approx(1.0)
 

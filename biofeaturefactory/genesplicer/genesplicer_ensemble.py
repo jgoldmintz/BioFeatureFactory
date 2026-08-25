@@ -85,7 +85,7 @@ def _resolve_model_dir(model_dir_arg: str | None, genesplicer_dir: str | None) -
     Precedence:
       1. explicit --model-dir;
       2. source-build layout: {genesplicer_dir}/../human (binary in .../sources);
-      3. PATH/conda layout: probed relative to the resolved `genesplicer` binary —
+      3. PATH/conda layout: probed relative to the resolved `genesplicer` binary --
          {bindir}/human (conda share layout, model beside the binary) or
          {bindir}/../human (source layout).
     Exits with a clear message if none contains config_file, rather than letting
@@ -403,7 +403,7 @@ def _build_sites_for_allele(pkey: str,
             "in_radius": in_radius,
         })
 
-    # rank within allele×type by score (F33). The old sort/reset/set_index chain
+    # rank within allelextype by score (F33). The old sort/reset/set_index chain
     # reattached score-ordered rank values onto position-ordered index labels, so
     # rank tracked row position, not score. pd.Series.rank does it directly;
     # method="first" breaks ties by order to keep ranks distinct 1..n.
@@ -451,8 +451,8 @@ def _cluster_sites(sites_df: pd.DataFrame, cluster_radius: int, max_cluster_span
     WT site the edit anchor happens to sit next to.
 
     max_cluster_span is accepted but INERT (0 = unbounded), and must stay that way
-    until a non-fabricating bound exists. Single linkage is unbounded — 101 sites
-    3 bp apart at radius 3 weld into one 300 bp cluster — but a left-anchored fixed
+    until a non-fabricating bound exists. Single linkage is unbounded -- 101 sites
+    3 bp apart at radius 3 weld into one 300 bp cluster -- but a left-anchored fixed
     window is not the fix: it cuts at an absolute boundary rather than at a gap, so
     a genuine 1 bp WT/MUT register pair straddling the boundary is split into
     separate clusters. The orphaned WT site then pairs with a bystander present in
@@ -1513,7 +1513,7 @@ def main():
 
     # F34: the former global events_df/sites_df/summary_df built here (concat +
     # reconcile + priority + is_high_impact + per-pkey summarize across all genes)
-    # were never written — only the per-gene recomputation below ships — so that
+    # were never written -- only the per-gene recomputation below ships -- so that
     # entire pass is removed. What the per-gene loop still needs is kept: the two
     # column contracts and the two scorer closures (lifted out of the old
     # `if not events_df.empty` block so they are always defined, even when a run

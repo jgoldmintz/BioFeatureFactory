@@ -21,7 +21,7 @@ Maps each of the 64 DNA codons to a unique printable ASCII character,
 enabling plmc to process codon-level MSAs with a 65-character alphabet
 (gap + 64 codons).
 
-Canonical lexicographic ordering (ACGT): AAA→A, AAC→B, ..., TTT→@
+Canonical lexicographic ordering (ACGT): AAA->A, AAC->B, ..., TTT->@
 """
 
 import itertools

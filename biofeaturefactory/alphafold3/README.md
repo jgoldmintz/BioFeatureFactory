@@ -1,474 +1,234 @@
 # AlphaFold3 RNA-RBP Interaction Pipeline
 
-## Overview
+For each variant, finds RBPs with POSTAR3/ENCODE eCLIP peaks near the site, runs AlphaFold3 on the WT and MUT RNA-protein complexes, and reports per-RBP binding deltas.
 
-The AlphaFold3 pipeline performs **structure-based comparative analysis** of RNA-binding protein (RBP) interactions across wild-type (WT) and mutant transcripts.
-For each mutation, the pipeline queries POSTAR3/ENCODE eCLIP binding data to identify RBPs with overlapping peaks, then runs AF3 to predict RNA-protein complex structures for both alleles.
-This enables quantitative assessment of how mutations perturb RBP binding.
+## Requirements
 
-AlphaFold3 (Abramson *et al.*, 2024) provides the structural prediction engine; the Python layer structures inputs, extracts binding metrics, and computes $\Delta$-based features suitable for biological interpretation and downstream modeling.
+| Component | Notes |
+|-----------|-------|
+| AlphaFold3 Docker image | Built locally; see setup below |
+| NVIDIA GPU | With CUDA drivers and the [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html) |
+| Docker | Required for local mode |
+| Python >= 3.9 | With `pysam` for tabix queries. Uses `biofeaturefactory/lib/`. |
+| POSTAR3 database | Tabix-indexed BED, passed with `-pd` |
+| RBP sequences or MSAs | `-rs` FASTA, or `-md` A3M directory (preferred) |
 
----
+### AlphaFold3 setup
 
-## Capabilities
-
-- **Unified WT $\leftrightarrow$ MUT execution** -- WT predictions cached and reused across mutations in the same gene.
-- **RBP discovery** -- Automatic query of POSTAR3/ENCODE eCLIP binding sites within configurable window (±50 bp).
-- **Multi-mode execution** -- Local GPU/Docker via `alphafold3_pipeline.py`, SLURM burst via `burst.py` (separate submit + ingest driver, manifest-driven SLURM array, cache-based result resume).
-- **$\Delta$-based comparison** -- Per-RBP delta metrics quantify mutation-driven perturbation.
-- **Event classification** -- Gained, lost, strengthened, weakened binding states.
-- **Distance-weighted impact modeling** -- Effects scaled by proximity to SNV using inverse distance weighting (Shepard, 1968).
-- **Ensemble aggregation** -- Parses all AF3 seed/sample outputs (mean ± std across samples) for robust confidence estimates.
-- **Interface sites table** -- Per-residue pLDDT and contact data at the RNA-protein interface, with per-residue contact frequency from ensemble.
-- **Multi-window mode** -- Optional placement of the mutation at multiple fractional offsets within the RNA window, aggregating across windows to reduce positional bias.
-- **Validation-aware filtering** -- Exclusion of failed variants via `--validation-log`.
-
----
-
-## Dependencies
-
-- **AlphaFold3 Docker image** (local mode) or batch/cloud infrastructure
-- **NVIDIA GPU** with CUDA drivers and [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html)
-- **Docker**
-- **Python $\geq$ 3.8**
-- **pysam** (for tabix queries)
-- **biofeaturefactory.utils.utility** helper functions
-
----
-
-## AlphaFold3 Setup
-
-Follow the official [AlphaFold3 installation guide](https://github.com/google-deepmind/alphafold3/blob/main/docs/installation.md) through the **"Obtaining Model Parameters"** step. Stop before **"Obtaining Genetic Databases"** -- this pipeline does not use AlphaFold3's genetic database pipeline. Instead, RBP binding site data is provided by the POSTAR3 database (`--postar-db`) and protein sequences/MSAs are supplied directly (`--msa-dir` or `--rbp-sequences`).
-
-After completing the installation guide steps (NVIDIA drivers, Docker, Container Toolkit, model weights), build the Docker image:
+Follow the [AF3 installation guide](https://github.com/google-deepmind/alphafold3/blob/main/docs/installation.md)
+through **Obtaining Model Parameters**. Stop before **Obtaining Genetic Databases** -- this pipeline
+does not use AF3's genetic database pipeline; RBP binding sites come from POSTAR3 (`-pd`) and
+protein sequences or MSAs are supplied directly (`-md` / `-rs`).
 
 ```bash
 cd alphafold3
 docker build -t alphafold3 -f docker/Dockerfile .
 ```
 
-Pass the model weights directory to this pipeline via `--model-dir`. At runtime, the pipeline mounts it into the container at `/root/models`.
+Pass the weights directory with `-mdi/--model-dir`; it is mounted into the container at `/root/models`.
 
----
-
-## Inputs
-
-### Required Arguments
-
-| Argument | Description |
-|----------|-------------|
-| `--postar-db` | Path to tabix-indexed POSTAR3 BED file |
-| `--rbp-mapping` | Gene-UniProt mapping TSV |
-| `--fasta` | Transcript FASTA file or directory of FASTA files |
-| `--output` / `-o` | Output directory |
-
-One of:
-- `--rbp-sequences` -- Protein sequences FASTA
-- `--msa-dir` -- Directory with A3M MSA files (preferred)
-
-One of:
-- `--mutations` -- Mutations CSV file or directory
-- `--chromosome-mapping` -- Chromosome mapping CSV (provides mutations and chromosomal positions)
-
-### Optional Arguments
-
-| Argument | Default | Description |
-|----------|---------|-------------|
-| `--execution-mode` | `local` | Execution mode: `local` only (for SLURM use `python -m biofeaturefactory.alphafold3.burst submit`) |
-| `--af3-binary` | `alphafold3` | Path to AF3 executable |
-| `--docker-image` | `alphafold3` | Docker image name for AF3 |
-| `--model-dir` | -- | Path to AF3 model weights directory (required for local mode) |
-| `--window-size` | `101` | RNA window size around mutation (nt, odd number) |
-| `--rbp-window` | `50` | Window for RBP site lookup (±bp) |
-| `--validation-log` | -- | Path to validation log for filtering failed mutations |
-| `--vcf` | -- | Per-gene VCF file or directory (provides chromosome) |
-| `--chromosome-mapping` | -- | Chromosome mapping CSV file or directory |
-| `--chrom` | -- | Chromosome (alternative to `--vcf`) |
-| `--tx-start` | -- | Transcript start position (alternative to `--chromosome-mapping`) |
-| `--strand` | `+` | Strand (`+`/`-`) |
-| `--multi-window` | off | Run multiple windows per mutation (multiplies AF3 runs) |
-| `--multi-window-offsets` | `0.3,0.5,0.7` | Mutation position as fraction of window |
-| `--max-gpus` | auto-detect | Max GPUs for parallel AF3 execution |
-
----
-
-## Outputs
-
-### Output Structure
-
-Output is written per gene to:
-
-```
-{output}/
-  {GENE}/
-    AlphaFold3/
-      {GENE}.tsv          -- per-mutation summary
-      {GENE}.events.tsv   -- per-RBP binding comparison
-      {GENE}.sites.tsv    -- per-residue interface data
-```
-
-### 1. Summary Table (`{GENE}.tsv`)
-
-Each row represents a single mutation with aggregated RBP binding analysis.
-
-| Column | Description | Units |
-|--------|-------------|-------|
-| **pkey** | Unique variant identifier in the format `GENE-mutation`. | -- |
-| **Gene** | Gene symbol. | string |
-| **n_rbps_tested** | Number of RBPs evaluated for this mutation. | count |
-| **n_rbps_binding_wt** | RBPs with confident binding in WT structure. | count |
-| **n_rbps_binding_mut** | RBPs with confident binding in MUT structure. | count |
-| **global_count_gained** | Number of RBPs with newly gained binding ($S_{\text{wt}} < \tau$, $S_{\text{mut}} \geq \tau$). | count |
-| **global_count_lost** | Number of RBPs with lost binding ($S_{\text{wt}} \geq \tau$, $S_{\text{mut}} < \tau$). | count |
-| **global_count_strengthened** | RBPs with strengthened binding (both bind, MUT has lower PAE). | count |
-| **global_count_weakened** | RBPs with weakened binding (both bind, MUT has higher PAE). | count |
-| **global_max_abs_delta_pae** | Maximum $\lvert\Delta_{\text{PAE}}\rvert$ across all RBPs. | Å |
-| **top_event_rbp** | RBP with highest priority score. | string |
-| **top_event_class** | Event classification: `gained`, `lost`, `strengthened`, `weakened`, `none`. | enum |
-| **top_event_delta_pae** | $\Delta_{\text{PAE}}$ for top-ranked RBP. | Å |
-| **qc_flags** | Semicolon-separated quality flags. | -- |
-
----
-
-### 2. Events Table (`{GENE}.events.tsv`)
-
-Each row represents a single RBP binding comparison for one mutation.
-
-| Column | Description | Units |
-|--------|-------------|-------|
-| **pkey** | Variant key (`GENE-mutation`). | -- |
-| **rbp_name** | RBP gene symbol (e.g., HNRNPA1, SRSF1). | string |
-| **wt_chain_pair_pae_min** | Minimum PAE between RNA-protein chains (WT). | Å |
-| **mut_chain_pair_pae_min** | Minimum PAE between RNA-protein chains (MUT). | Å |
-| **delta_chain_pair_pae_min** | $\Delta_{PAE} = PAE_{mut} - PAE_{wt}$ | Å |
-| **wt_interface_contacts** | Number of cross-chain contacts $< 8 Å$ (WT). | count |
-| **mut_interface_contacts** | Number of cross-chain contacts $< 8 Å$ (MUT). | count |
-| **delta_interface_contacts** | Change in interface contacts. | count |
-| **cls** | Event classification: `gained`, `lost`, `strengthened`, `weakened`, `unchanged`, `no_binding`. | enum |
-| **priority** | Ranking score: $\lvert\Delta_{\text{PAE}}\rvert \cdot \frac{1}{1+d/k}$ | numeric |
-| **n_samples_wt** | Number of AF3 samples parsed for WT (ensemble mode). | count |
-| **n_samples_mut** | Number of AF3 samples parsed for MUT (ensemble mode). | count |
-| **std_pae_wt** | Standard deviation of chain-pair PAE across WT samples. | Å |
-| **std_pae_mut** | Standard deviation of chain-pair PAE across MUT samples. | Å |
-| **n_windows** | Number of windows used (multi-window mode only). | count |
-
----
-
-### 3. Sites Table (`{GENE}.sites.tsv`)
-
-Each row represents a single interface residue (RNA or protein) within the AF3 prediction.
-
-| Column | Description | Units |
-|--------|-------------|-------|
-| **pkey** | Variant key (`GENE-mutation`). | -- |
-| **rbp_name** | RBP identifier. | string |
-| **allele** | Allele label (`WT` or `MUT`). | string |
-| **chain** | Chain identifier (e.g., `A` for RNA, `B` for protein). | string |
-| **res_id** | Residue sequence number. | int |
-| **res_name** | Residue name (3-letter code). | string |
-| **plddt** | Per-residue pLDDT confidence score. | 0-100 |
-| **is_contact** | Binary flag: 1 if residue contacts the other chain ($< 8 Å$). | 0/1 |
-| **min_contact_distance** | Minimum distance to nearest atom in the other chain. | Å |
-| **contact_frequency** | Fraction of ensemble samples where this residue is a contact (ensemble mode). | 0-1 |
-
----
-
-## Key Quantitative Features
-
-### $\Delta$ chain_pair_pae_min (Primary Binding Proxy)
-
-$$\Delta_{PAE} = PAE_{mut} - PAE_{wt}$$
-
-**What is PAE?** Predicted Aligned Error (PAE) is an AlphaFold confidence metric that estimates the positional error (in Angstroms) between two residues after optimal superposition. For inter-chain predictions, PAE quantifies how confidently AF3 predicts the relative positioning of the RNA and protein chains.
-
-**Interpretation:**
-- **Low PAE (< $10 Å$)**: High confidence that the two chains interact in the predicted orientation
-- **High PAE (> $20 Å$)**: Low confidence; chains may not interact or their relative position is uncertain
-
-**Delta interpretation:**
-- **Positive $\Delta$** $\rightarrow$ Weaker binding in mutant (PAE increased, meaning higher uncertainty)
-- **Negative $\Delta$** $\rightarrow$ Stronger binding in mutant (PAE decreased, meaning lower uncertainty)
-- **$\Delta \approx 0$** $\rightarrow$ No significant change in predicted binding confidence
-
----
-
-### Priority Score (Distance-Weighted Perturbation)
-
-$$P = |\Delta_{PAE}| \times \frac{1}{1 + d/k}$$
-
-**Variables:**
-- $|\Delta_{PAE}|$ = absolute magnitude of PAE change (Å)
-- $d$ = genomic distance (bp) between the SNV position and the RBP binding site center
-- $k$ = decay constant (default: 50 bp)
-
-**Rationale:** Mutations closer to an RBP binding site are more likely to directly affect binding. The hyperbolic decay term $\frac{1}{1 + d/k}$ down-weights distal effects:
-
-| Distance (d) | Decay Factor | Interpretation |
-|--------------|--------------|----------------|
-| 0 bp | 1.0 | Full weight (mutation at binding site) |
-| 50 bp | 0.5 | Half weight |
-| 100 bp | 0.33 | One-third weight |
-| 200 bp | 0.2 | One-fifth weight |
-
-This prioritizes RBPs whose binding sites overlap or are proximal to the mutation.
-
----
-
-### Interface Contacts
-
-$$N_{contacts} = \sum_{i \in RNA} \sum_{j \in protein} \mathbf{1}[d_{ij} < 8 \text{ Å}]$$
-
-**Variables:**
-- $i$ = index over RNA heavy atoms
-- $j$ = index over protein heavy atoms
-- $d_{ij}$ = Euclidean distance between atoms $i$ and $j$
-- $\mathbf{1}[\cdot]$ = indicator function (returns 1 if condition is true, 0 otherwise)
-
-**Interpretation:** Counts atom pairs where an RNA atom is within $8 Å$ of a protein atom. Higher contact counts suggest more extensive binding interfaces. The $8 Å$ threshold captures van der Waals contacts, hydrogen bonds, and electrostatic interactions.
-
----
-
-### Confident Binding Classification
-
-A binding event is classified as **confident** when ALL of the following conditions are met:
-
-1. **Sufficient contacts**: $N_{contacts} \geq 3$
-   - At least 3 RNA-protein atom pairs within $8 Å$
-
-2. **Low inter-chain uncertainty**: $PAE_{min} \leq 10 Å$
-   - The minimum PAE between any RNA-protein residue pair is below $10 Å$
-
-3. **Adequate local structure quality**: $pLDDT_{RNA} \geq 50$ OR $pLDDT_{protein} \geq 50$
-   - At least one chain at the interface has confident per-residue structure (pLDDT scale: 0-100, where >70 is high confidence)
-
-**Combined criterion:**
-
-$$\text{confident} = (N_{contacts} \geq 3) \land (PAE_{min} \leq 10) \land (pLDDT_{RNA} \geq 50 \lor pLDDT_{protein} \geq 50)$$
-
-This three-part filter excludes predictions where AF3 has low confidence in either the individual chain structures or their relative arrangement.
-
----
-
-## Event Classification
-
-| Class | Condition |
-|-------|-----------|
-| **gained** | WT has no confident binding, MUT has confident binding |
-| **lost** | WT has confident binding, MUT has none |
-| **strengthened** | Both bind confidently, $\Delta_{\text{PAE}} < -2.0$ |
-| **weakened** | Both bind confidently, $\Delta_{\text{PAE}} > +2.0$ |
-| **unchanged** | Both bind confidently, $\lvert\Delta_{\text{PAE}}\rvert \leq 2.0$ |
-| **no_binding** | Neither WT nor MUT has confident binding |
-| **incomplete** | WT or MUT prediction missing -- no comparison possible |
-
----
-
-## Example Commands
-
-### Local Execution (GPU Required)
+## Usage
 
 ```bash
+# Directory mode: variant_mapping output root supplies mutations, mappings, and VCFs
 python alphafold3_pipeline.py \
-    --fasta transcripts/SMN2.fasta \
-    --chromosome-mapping mappings/SMN2_chromosome_mapping.csv \
-    --postar-db RBP_db/human-POSTAR3.sorted.bed.gz \
-    --rbp-mapping human_uniprot_genes.tsv \
-    --rbp-sequences rbp_sequences.fasta \
-    --model-dir /path/to/af3_weights \
-    --output af3_results/ \
-    --execution-mode local
-```
+    -f out/ -o af3_results/ \
+    -pd RBP_db/human-POSTAR3.sorted.bed.gz \
+    -rm human_uniprot_genes.tsv \
+    -md msa_files/ -mdi /path/to/af3_weights
 
-### With Multi-Window Mode
-
-```bash
+# File mode, single gene
 python alphafold3_pipeline.py \
-    --fasta transcripts/SMN2.fasta \
-    --chromosome-mapping mappings/SMN2_chromosome_mapping.csv \
-    --postar-db RBP_db/human-POSTAR3.sorted.bed.gz \
-    --rbp-mapping human_uniprot_genes.tsv \
-    --msa-dir msa_files/ \
-    --model-dir /path/to/af3_weights \
-    --output af3_results/ \
-    --multi-window \
-    --multi-window-offsets 0.3,0.5,0.7
+    -f transcripts/SMN2.fasta \
+    -cm mappings/SMN2_chromosome_mapping.csv \
+    -pd RBP_db/human-POSTAR3.sorted.bed.gz \
+    -rm human_uniprot_genes.tsv -rs rbp_sequences.fasta \
+    -mdi /path/to/af3_weights -o af3_results/
 ```
 
-### Directory Mode (Multiple Genes)
+In directory mode `-f` is the `variant_mapping` output root and supplies `-mu`, `-cm`, `-pm`, and
+`-v` from `<root>/<GENE>/`.
 
-```bash
-python alphafold3_pipeline.py \
-    --fasta transcripts/ \
-    --chromosome-mapping mappings/ \
-    --vcf vcf_files/ \
-    --postar-db RBP_db/human-POSTAR3.sorted.bed.gz \
-    --rbp-mapping human_uniprot_genes.tsv \
-    --msa-dir msa_files/ \
-    --model-dir /path/to/af3_weights \
-    --output af3_results/
+## Arguments
+
+| Flag | Required | Default | Description |
+|------|----------|---------|-------------|
+| `-pd, --postar-db` | Yes | -- | Tabix-indexed POSTAR3 BED |
+| `-rm, --rbp-mapping` | Yes | -- | Gene-UniProt mapping TSV |
+| `-o, --output` | Yes | -- | Output base directory |
+| `-f, --fasta` | No | -- | variant_mapping output root, single transcript FASTA, or flat directory |
+| `-rs, --rbp-sequences` | * | -- | Protein sequences FASTA |
+| `-md, --msa-dir` | * | -- | Directory of A3M MSA files (preferred over `-rs`) |
+| `-mu, --mutations` | No | derived | File mode only; mutations CSV |
+| `-cm, --chromosome-mapping` | No | derived | File mode only; chromosome mapping CSV |
+| `-pm, --premrna-mapping` | No | derived | File mode only. Required to score intronic (`gd.`) variants, which have no ORF or transcript coordinate and are windowed on the pre-mRNA record |
+| `-v, --vcf` | No | derived | File mode only; per-gene VCF from `vcf_converter.py` (provides the chromosome) |
+| `-ch, --chrom` | No | -- | Chromosome; alternative to `-v` |
+| `-ts, --tx-start` | No | -- | Transcript start position; alternative to `-cm` |
+| `-s, --strand` | No | `+` | `+` or `-` |
+| `-em, --execution-mode` | No | `local` | Only `local` is supported here; use `burst.py` for SLURM |
+| `-ab, --af3-binary` | No | `alphafold3` | Path to the AF3 executable |
+| `-di, --docker-image` | No | `alphafold3` | Docker image name |
+| `-mdi, --model-dir` | No | -- | AF3 model weights directory (required in local mode) |
+| `-ws, --window-size` | No | `101` | RNA window size in nt (odd) |
+| `-rw, --rbp-window` | No | `50` | Window for RBP site lookup (+/- bp) |
+| `-mw, --multi-window` | No | off | Run multiple windows per mutation |
+| `-mwo, --multi-window-offsets` | No | `0.3,0.5,0.7` | Mutation position as a fraction of the window |
+| `-mg, --max-gpus` | No | auto | Max GPUs for parallel AF3 execution |
+| `-vl, --validation-log` | No | -- | Validation log for filtering mutations |
+
+\* One of `-rs` or `-md` is required. Mutations come from `-mu` or `-cm`.
+
+## Output
+
+```
+{output}/{GENE}/AlphaFold3/
+    {GENE}.tsv          -- per-mutation summary
+    {GENE}.events.tsv   -- per-RBP binding comparison
+    {GENE}.sites.tsv    -- per-residue interface data
 ```
 
-### Batch Execution (SLURM burst)
+### `{GENE}.tsv`
 
-SLURM execution is handled by a dedicated two-phase driver, `burst.py` (separate from `alphafold3_pipeline.py` which is local/Docker only). Submit phase generates input JSONs, dedupes by `AF3Input.get_hash()`, writes a manifest, renders a SLURM array script (faithful to AF3's documented Docker invocation), and `sbatch`'s it. The orchestrator exits while the cluster runs. Ingest phase walks the L1 cache, computes deltas, writes the per-gene 3-tier TSVs.
+| Column | Description |
+|--------|-------------|
+| `pkey`, `Gene` | Identifiers |
+| `n_rbps_tested` | RBPs evaluated for this mutation |
+| `n_rbps_binding_wt`, `n_rbps_binding_mut` | RBPs with confident binding per allele |
+| `global_count_gained`, `global_count_lost` | RBPs whose binding appeared / disappeared |
+| `global_count_strengthened`, `global_count_weakened` | Both bind; MUT PAE lower / higher |
+| `global_max_abs_delta_pae` | Largest absolute PAE change (angstrom) |
+| `top_event_rbp` | RBP with the highest priority score |
+| `top_event_class` | gained / lost / strengthened / weakened / none |
+| `top_event_delta_pae` | PAE change for that RBP (angstrom) |
+| `qc_flags` | See below |
+
+### `{GENE}.events.tsv`
+
+| Column | Description |
+|--------|-------------|
+| `pkey` | `GENE-mutation` |
+| `rbp_name` | RBP gene symbol |
+| `wt_chain_pair_pae_min`, `mut_chain_pair_pae_min` | Minimum inter-chain PAE per allele (angstrom) |
+| `delta_chain_pair_pae_min` | MUT - WT (angstrom) |
+| `wt_interface_contacts`, `mut_interface_contacts` | Cross-chain atom pairs within 8 angstrom |
+| `delta_interface_contacts` | MUT - WT |
+| `cls` | gained / lost / strengthened / weakened / unchanged / no_binding / incomplete |
+| `priority` | Ranking score: absolute delta PAE, hyperbolically decayed by distance to the variant |
+| `n_samples_wt`, `n_samples_mut` | AF3 samples parsed per allele (ensemble mode) |
+| `std_pae_wt`, `std_pae_mut` | SD of chain-pair PAE across samples (angstrom) |
+| `n_windows` | Windows used (multi-window mode only) |
+
+### `{GENE}.sites.tsv`
+
+| Column | Description |
+|--------|-------------|
+| `pkey` | `GENE-mutation` |
+| `rbp_name` | RBP identifier |
+| `allele` | WT or MUT |
+| `chain` | Chain identifier (RNA / protein) |
+| `res_id`, `res_name` | Residue number and 3-letter name |
+| `plddt` | Per-residue pLDDT (0-100) |
+| `is_contact` | 1 if within 8 angstrom of the other chain |
+| `min_contact_distance` | Nearest atom in the other chain (angstrom) |
+| `contact_frequency` | Fraction of ensemble samples where this residue is a contact (0-1) |
+
+### Sign conventions
+
+| Metric | Positive | Negative |
+|--------|----------|----------|
+| `delta_chain_pair_pae_min` | Weaker binding in MUT | Stronger binding in MUT |
+| `delta_interface_contacts` | More contacts in MUT | Fewer contacts in MUT |
+
+## Classification thresholds
+
+Not CLI arguments. The first five are fields of `ThresholdConfig` in
+`bin/binding_metrics.py`; `contact_threshold` is a parameter of the contact
+extraction in `bin/af3_parser.py`.
+
+| Parameter | Default | Purpose |
+|-----------|---------|---------|
+| `min_contacts` | 3 | Minimum interface contacts for confident binding |
+| `max_pae_binding` | 10.0 | Maximum inter-chain PAE for confident binding (angstrom) |
+| `min_plddt_interface` | 50.0 | Minimum pLDDT at the interface |
+| `delta_pae_significant` | 2.0 | Threshold for strengthened / weakened (angstrom) |
+| `delta_contacts_significant` | 2 | Contact-count threshold for classification |
+| `contact_threshold` | 8.0 | Distance defining an interface contact (angstrom) |
+
+Binding counts as **confident** when all three hold: at least `min_contacts` contacts,
+inter-chain PAE at or below `max_pae_binding`, and at least one chain at the interface with
+pLDDT at or above `min_plddt_interface`.
+
+## QC flags
+
+| Flag | Condition |
+|------|-----------|
+| `PASS` | All RBPs produced complete results |
+| `PARTIAL` | Some RBPs succeeded, some failed |
+| `ALL_FAILED` | Every RBP prediction failed |
+| `no_rbps_tested` | No RBPs were evaluated |
+| `no_rbps_in_region` | No RBP peaks within the query window |
+| `FAILED:{error}` | An individual RBP prediction raised an exception |
+
+## Ensemble and multi-window aggregation
+
+AF3 emits several samples per seed. The pipeline parses every `seed-N_sample-N/` subdirectory and
+reports the mean and population SD of chain-pair PAE, interface contacts, and pLDDT, plus per-residue
+contact frequency. With a single sample it falls back to single-model behaviour and leaves the
+`n_samples_*` / `std_pae_*` columns empty.
+
+`-mw/--multi-window` places the mutation at each offset in `-mwo` instead of centering it, which
+reduces sensitivity to window boundaries. Each offset produces a distinct WT/MUT pair (deduplicated
+near transcript ends), AF3 runs per window with jobs suffixed `_w0`, `_w1`, ..., and metrics are
+aggregated across windows. Cost is `3 offsets x 2 alleles x N RBPs` AF3 jobs per mutation, so it is
+off by default.
+
+## SLURM execution
+
+`burst.py` is a separate two-phase driver; `alphafold3_pipeline.py` is local/Docker only.
+Submit generates input JSONs, dedupes by `AF3Input.get_hash()`, writes a manifest, renders a SLURM
+array script, and `sbatch`es it, then exits. Ingest walks the cache, computes deltas, and writes the
+per-gene TSVs.
 
 ```bash
-# Phase 1: submit
 python -m biofeaturefactory.alphafold3.burst submit \
-    --fasta transcripts/ \
-    --chromosome-mapping mappings/ \
-    --vcf vcf_files/ \
+    --fasta transcripts/ --chromosome-mapping mappings/ --vcf vcf_files/ \
     --postar-db RBP_db/human-POSTAR3.sorted.bed.gz \
-    --rbp-mapping rbp_uniprot_ids.txt \
-    --msa-dir msa_files/ \
-    --output af3_results/ \
-    --model-dir /path/to/af3_weights \
+    --rbp-mapping rbp_uniprot_ids.txt --msa-dir msa_files/ \
+    --output af3_results/ --model-dir /path/to/af3_weights \
     --slurm-partition gpu --slurm-time 01:00:00 --slurm-mem 64G \
     --array-throttle 256
 
-# After SLURM completes (sacct -j $JOB_ID shows COMPLETED/FAILED for all tasks):
-# Phase 2: ingest
+# once sacct shows all tasks COMPLETED/FAILED
 python -m biofeaturefactory.alphafold3.burst ingest \
-    --output af3_results/ \
-    --fasta transcripts/ \
-    --chromosome-mapping mappings/ \
-    --vcf vcf_files/ \
+    --output af3_results/ --fasta transcripts/ \
+    --chromosome-mapping mappings/ --vcf vcf_files/ \
     --postar-db RBP_db/human-POSTAR3.sorted.bed.gz \
-    --rbp-mapping rbp_uniprot_ids.txt \
-    --msa-dir msa_files/
+    --rbp-mapping rbp_uniprot_ids.txt --msa-dir msa_files/
 ```
 
-`--execution-mode batch` and `--execution-mode cloud` on `alphafold3_pipeline.py` were removed; the prior stub generated broken artifacts and never ingested results. Use the burst driver for SLURM. Cloud bursts (AWS/GCP Batch) are out of scope.
-
----
-
-## Ensemble Aggregation
-
-AF3 produces multiple samples per seed (typically 4 samples per seed). The pipeline parses all `seed-N_sample-N/` subdirectories from each AF3 run and aggregates metrics across samples.
-
-**Aggregated fields:**
-- **Mean** of chain-pair PAE, interface contacts, pLDDT (RNA and protein)
-- **Standard deviation** (population stdev) of each metric across samples
-- **Contact frequency** -- per-residue fraction of samples where that residue appears as an interface contact (reported in the sites table)
-
-When only a single sample is available (e.g., top-ranked model only), the pipeline falls back to single-model behavior with no standard deviation fields.
-
-The ensemble columns in `events.tsv` (`n_samples_wt`, `n_samples_mut`, `std_pae_wt`, `std_pae_mut`) are empty when running in single-model mode.
-
----
-
-## Multi-Window Mode
-
-By default, the mutation is centered in the RNA window. The `--multi-window` flag generates multiple windows where the mutation is placed at different fractional offsets within the window (default: 0.3, 0.5, 0.7). This reduces positional bias -- AF3 predictions can be sensitive to where the mutation falls relative to window boundaries.
-
-**Behavior:**
-- Each offset produces a distinct WT/MUT window pair
-- Duplicate windows (possible near transcript ends) are deduplicated
-- AF3 is run separately for each window (jobs suffixed `_w0`, `_w1`, etc.)
-- Metrics are aggregated across windows (mean ± std), reported identically to ensemble aggregation
-- The `n_windows` column in `events.tsv` records how many windows were used
-
-**Compute cost:** With 3 offsets and N RBPs, multi-window mode runs 6xN AF3 jobs per mutation (3 windows x 2 alleles x N RBPs). The flag is off by default.
-
----
-
-## Interpretation
-
-- **Localized perturbations** (large $|\Delta_{\text{PAE}}|$ at high priority) $\rightarrow$ direct disruption of RBP binding interface.
-- **Multiple gained/lost events** $\rightarrow$ mutation affects RBP binding landscape broadly.
-- **Low global $\Delta$** with unchanged classifications $\rightarrow$ negligible regulatory change.
-- **High $\Delta$ with lost classification** $\rightarrow$ potential functional impact on post-transcriptional regulation.
-
----
-
-## Thresholds and Parameters
-
-| Parameter | Default | Description |
-|-----------|---------|-------------|
-| `min_contacts` | 3 | Minimum interface contacts for confident binding |
-| `max_pae_binding` | 10.0 | Maximum PAE for confident binding (Å) |
-| `min_plddt_interface` | 50.0 | Minimum pLDDT at interface |
-| `delta_pae_significant` | 2.0 | $\Delta$ threshold for strengthened/weakened classification (Å) |
-| `delta_contacts_significant` | 2 | Contact change threshold for classification |
-| `contact_threshold` | 8.0 | Distance threshold for interface contacts (Å) |
-
----
-
-## QC Flags
-
-| Flag | Condition | Suggested Action |
-|------|-----------|------------------|
-| `PASS` | All RBPs produced complete results | Safe for analysis |
-| `PARTIAL` | Some RBPs succeeded, some failed | Interpret with caution |
-| `ALL_FAILED` | All RBP predictions failed | Exclude variant or debug AF3 |
-| `no_rbps_tested` | No RBPs were evaluated (empty result) | Check upstream RBP lookup |
-| `no_rbps_in_region` | No RBP peaks found within query window | Exclude variant |
-| `FAILED:{error}` | Individual RBP prediction raised an exception | See stderr for details |
-
----
-
-## Sign Conventions
-
-| Metric | Sign | Biological Interpretation |
-|--------|------|---------------------------|
-| `delta_chain_pair_pae_min` | **Positive** | Weaker binding (higher uncertainty) |
-|  | **Negative** | Stronger binding (lower uncertainty) |
-| `delta_interface_contacts` | **Positive** | More contacts in MUT |
-|  | **Negative** | Fewer contacts in MUT |
-
----
+`--execution-mode batch` and `cloud` were removed from `alphafold3_pipeline.py`; the stub generated
+broken artifacts and never ingested results.
 
 ## Caching
 
-- **WT predictions**: Cached by `{gene}-{rbp}` hash, reused across mutations.
-- **RBP sequences**: Loaded once from local files at startup.
-- **Cache location**: `{output_dir}/cache/`
+WT predictions are cached by `{gene}-{rbp}` hash and reused across that gene's mutations. RBP
+sequences are loaded once at startup. Cache location: `{output}/cache/`.
 
----
-
-## File Structure
-
-```
-alphafold3/
-|-- alphafold3_pipeline.py      # Main entry point
-|-- README.md
-`-- bin/
-    |-- af3_runner.py           # AF3 execution (local/batch/cloud)
-    |-- af3_parser.py           # Parse mmCIF + JSON outputs
-    |-- rbp_database.py         # POSTAR3 tabix query interface
-    |-- rbp_sequence_mapper.py  # RBP name -> UniProt -> sequence
-    `-- binding_metrics.py      # Delta computation and classification
-```
-
-## Module Reference
+## Module reference
 
 | File | Purpose |
 |------|---------|
-| `alphafold3_pipeline.py` | Main entry point |
-| `bin/af3_runner.py` | AF3 execution (local/batch/cloud) |
-| `bin/af3_parser.py` | Parse mmCIF + JSON outputs |
+| `alphafold3_pipeline.py` | Local entry point |
+| `burst.py` | SLURM submit / ingest driver |
+| `bin/af3_runner.py` | AF3 execution |
+| `bin/af3_parser.py` | Parses mmCIF and JSON outputs |
 | `bin/rbp_database.py` | POSTAR3 tabix query interface |
-| `bin/rbp_sequence_mapper.py` | RBP name $\rightarrow$ UniProt $\rightarrow$ sequence |
+| `bin/rbp_sequence_mapper.py` | RBP name -> UniProt -> sequence |
 | `bin/binding_metrics.py` | Delta computation and classification |
-
----
-
-## References
-
-- Abramson J. *et al.* (2024) Accurate structure prediction of biomolecular interactions with AlphaFold 3. **Nature**, 630:493-500.
-- Jumper J. *et al.* (2021) Highly accurate protein structure prediction with AlphaFold. **Nature**, 596:583-589.
-- Shepard D. (1968) A two-dimensional interpolation function for irregularly-spaced data. **Proceedings of the 23rd ACM National Conference**, pp. 517-524.
-- Zhao W. *et al.* (2022) POSTAR3: an updated platform for exploring post-transcriptional regulation coordinated by RNA-binding proteins. **Nucleic Acids Research**, 50:D483-D492.
-- Van Nostrand E.L. *et al.* (2020) A large-scale binding and functional map of human RNA-binding proteins. **Nature**, 583:711-719.
-
----
 
 ## License
 
-This project is licensed under the AGPL-3.0 License - see the [LICENSE](../../LICENSE) file in the root BioFeatureFactory directory for details.
+AGPL-3.0 - see [LICENSE](../../LICENSE) in the repository root.
 
-## Support
-
-For issues and questions:
-
-- GitHub Issues: https://github.com/jgoldmintz/BioFeatureFactory/issues
+Issues: https://github.com/jgoldmintz/BioFeatureFactory/issues

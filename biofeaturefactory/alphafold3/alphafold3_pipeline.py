@@ -1151,7 +1151,7 @@ def main():
     if not mutations_input and not chrom_map_input:
         parser.error("Provide --mutations or --chromosome-mapping")
 
-    # Chromosome name is always required for POSTAR3 lookup — chromosome-mapping only provides
+    # Chromosome name is always required for POSTAR3 lookup -- chromosome-mapping only provides
     # genomic positions, not the chromosome name itself
     if not args.chrom and not vcf_input:
         parser.error("--chrom or --vcf is required to resolve chromosome name for POSTAR3 lookup")

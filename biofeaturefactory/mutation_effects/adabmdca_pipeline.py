@@ -19,7 +19,7 @@
 BioFeatureFactory: adabmDCA mutation scoring (parallel backend to EVmutation/plmc).
 
 Inference runs IN-PROCESS via the adabmDCApy Python API (`from adabmDCA.training
-import ...`), NOT the `adabmDCA` console script — either Boltzmann learning
+import ...`), NOT the `adabmDCA` console script -- either Boltzmann learning
 (bmDCA/eaDCA/edDCA) or pseudolikelihood maximization (pseudoDCA), PyTorch/GPU
 native. This module then loads the resulting text-format params and produces
 per-mutation TSVs with the same routing logic as evmutation_pipeline.py:
@@ -28,10 +28,10 @@ per-mutation TSVs with the same routing logic as evmutation_pipeline.py:
   codon TSV    synonymous + stop variants only
 
 Math per mutation (i = position, a = WT token, b = mutant token):
-  ΔH_independent = h_i(b) - h_i(a)
-  ΔH_epistatic   = ΔH_independent + Σ_{j≠i} [J_ij(b, s_j) - J_ij(a, s_j)]
+  DeltaH_independent = h_i(b) - h_i(a)
+  DeltaH_epistatic   = DeltaH_independent + Sum_{j!=i} [J_ij(b, s_j) - J_ij(a, s_j)]
                    s_j is the WT (focus) token at column j
-  pairwise       = ΔH_epistatic - ΔH_independent
+  pairwise       = DeltaH_epistatic - DeltaH_independent
 
 Zero-sum gauge applied before scoring:
   h_i(a)    -= mean_a h_i(a)
@@ -39,9 +39,9 @@ Zero-sum gauge applied before scoring:
 
 Concordance (per-position relative threshold, matches EVmutation convention):
   threshold = 0.5 * std(pairwise) at this position
-  |pairwise| <= threshold or std == 0 → NEUTRAL
-  sign(epistatic) == sign(independent) → CONCORDANT
-  otherwise → DISCORDANT
+  |pairwise| <= threshold or std == 0 -> NEUTRAL
+  sign(epistatic) == sign(independent) -> CONCORDANT
+  otherwise -> DISCORDANT
 """
 
 from __future__ import annotations
@@ -135,7 +135,7 @@ CODON_FIELDNAMES_ADABM = [
 # its CLI (`adabmDCA train`) just adds startup overhead and re-introduces the
 # exit-code-swallowing bug in adabmDCA.cli (which discards the inner
 # train.py's return code, masking CUDA OOMs and other crashes as silent
-# successes). We call the training building blocks directly here — same
+# successes). We call the training building blocks directly here -- same
 # sequence train.py:main() runs, minus the argparse + subprocess plumbing.
 # Exceptions propagate naturally.
 
@@ -225,7 +225,7 @@ def train_adabmdca_in_process(
     log_weights = torch.zeros(size=(nchains,), device=device, dtype=dtype)
     sampler = torch.jit.script(get_sampler("gibbs"))
 
-    # 4. Checkpoint object — periodic + final save. file_paths["params"] is
+    # 4. Checkpoint object -- periodic + final save. file_paths["params"] is
     # the canonical write target for the trained model.
     out_dir = os.path.dirname(output_params_path) or "."
     base = os.path.basename(output_params_path)
@@ -269,7 +269,7 @@ def train_adabmdca_in_process(
     # target_density) are part of every training_routine's signature in
     # adabmDCApy; the bmDCA routine just ignores them.
     #
-    # OOM catch: Boltzmann learning's peak memory is ~4-5 × L²q². For codon
+    # OOM catch: Boltzmann learning's peak memory is ~4-5 x L^2q^2. For codon
     # at q=65 the constant is large enough that medium-sized genes can OOM
     # on a 40 GB GPU. Catch and surface the pseudolikelihood hint so the user
     # sees an actionable suggestion in Nextflow's .command.err, not just an
@@ -300,20 +300,20 @@ def train_adabmdca_in_process(
         )
     except RuntimeError as e:
         if "out of memory" not in str(e).lower():
-            raise  # not an OOM — propagate the original error untouched
+            raise  # not an OOM -- propagate the original error untouched
         peak_low  = 4 * L * L * q * q * 4 / 1e9
         peak_high = 5 * L * L * q * q * 4 / 1e9
         pl_low    = 2 * L * L * q * q * 4 / 1e9
         pl_high   = 3 * L * L * q * q * 4 / 1e9
         raise RuntimeError(
             f"adabmDCA Boltzmann training OOM'd at L={L}, q={q}.\n"
-            f"  Peak memory for Boltzmann is ~4–5 × L²q² × 4 bytes (float32) = "
-            f"~{peak_low:.1f}–{peak_high:.1f} GiB.\n"
-            f"  Pseudolikelihood mode roughly halves this (~{pl_low:.1f}–{pl_high:.1f} GiB)\n"
+            f"  Peak memory for Boltzmann is ~4-5 x L^2q^2 x 4 bytes (float32) = "
+            f"~{peak_low:.1f}-{peak_high:.1f} GiB.\n"
+            f"  Pseudolikelihood mode roughly halves this (~{pl_low:.1f}-{pl_high:.1f} GiB)\n"
             f"  by dropping the MCMC chains + fij_chains buffers. Re-run with:\n"
             f"      --adabmdca-model pseudoDCA\n"
             f"  For genes much larger than ~1200 codons at q=65, even pseudolikelihood\n"
-            f"  won't fit on a single GPU — use the EVmutation/plmc codon backend\n"
+            f"  won't fit on a single GPU -- use the EVmutation/plmc codon backend\n"
             f"  (pseudolikelihood on CPU, scales via system RAM).\n"
             f"  Original error: {e}"
         ) from e
@@ -328,7 +328,7 @@ def train_adabmdca_in_process(
     # save explicitly as a safety net (and so the caller can find the file).
     if not os.path.isfile(output_params_path):
         # Save mask: UPPER-TRIANGULAR i<j only, same contract as the
-        # pseudolikelihood save below — save_params writes every mask-True
+        # pseudolikelihood save below -- save_params writes every mask-True
         # entry and load_adabmdca_params symmetrizes via `J + J.transpose`,
         # so writing the both-triangle training mask would double every
         # coupling on reload.
@@ -344,13 +344,13 @@ def train_adabmdca_in_process(
 # adabmDCA training via pseudolikelihood maximization
 # ---------------------------------------------------------------------------
 # Alternative to Boltzmann learning. Drops the MCMC sampling + fij_chains
-# buffer, reducing peak GPU memory from ~4-5 × L²q² to ~2-3 × L²q² at the
+# buffer, reducing peak GPU memory from ~4-5 x L^2q^2 to ~2-3 x L^2q^2 at the
 # same L. The math is per-position conditional likelihood maximization
 # (Ekeberg et al. 2013; the approach plmc uses on CPU). GPU-accelerated here
 # so it stays fast for the medium-gene regime that doesn't fit Boltzmann.
 #
-# Note on scaling: the L² scaling on the dense J tensor is unchanged. This
-# is a constant-factor improvement (~2×), not a scaling-class change. For
+# Note on scaling: the L^2 scaling on the dense J tensor is unchanged. This
+# is a constant-factor improvement (~2x), not a scaling-class change. For
 # genes much larger than ~1200 codons at q=65 the dense J still won't fit
 # on a single GPU; in that regime fall back to the EVmutation/plmc codon
 # backend which holds J in system RAM.
@@ -383,7 +383,7 @@ def train_adabmdca_pseudolikelihood_in_process(
       lr: learning rate for plain SGD on h and J.
       chunk_size: positions processed per j-loop chunk in the J gradient
                   accumulator. Larger = faster but more peak intermediate
-                  memory (4 × L × q × chunk × q × 4 bytes float32).
+                  memory (4 x L x q x chunk x q x 4 bytes float32).
       tol, patience, check_every: convergence test. Every `check_every` epochs,
                   ||grad|| is compared against its value at the first check;
                   when the ratio stays below `tol` for `patience` consecutive
@@ -403,7 +403,7 @@ def train_adabmdca_pseudolikelihood_in_process(
 
     This matters most on rented hardware. `--adabmdca-nepochs` defaults to 50000
     (a Boltzmann-sized number; this function's own signature default is 500), and
-    at codon scale the per-epoch cost is the L²q² gradient einsum below, so the
+    at codon scale the per-epoch cost is the L^2q^2 gradient einsum below, so the
     difference between stopping at convergence and running the ceiling is the
     difference between a run and days of billed compute.
 
@@ -473,12 +473,12 @@ def train_adabmdca_pseudolikelihood_in_process(
     mask[_iu[0], :, _iu[1], :] = True
 
     # 4. Pre-compute the one-hot encoding of data sequences (used in gradient).
-    # Memory: B × L × q × 4 bytes. For F9 codon (B=531, L=764, q=65): ~106 MB.
+    # Memory: B x L x q x 4 bytes. For F9 codon (B=531, L=764, q=65): ~106 MB.
     B = X.shape[0]
     X_oh = torch.nn.functional.one_hot(X, num_classes=q).to(dtype)  # (B, L, q)
 
     # Heads-up if the user passed a Boltzmann-sized nepochs (default 50000) into
-    # pseudolikelihood — plmc's default is 500. Doesn't fail, just warns.
+    # pseudolikelihood -- plmc's default is 500. Doesn't fail, just warns.
     if not quiet and nepochs > 5000:
         print(f"    NOTE nepochs={nepochs} is large for pseudolikelihood "
               f"(plmc default: 500). Consider --adabmdca-nepochs 500.")
@@ -486,7 +486,7 @@ def train_adabmdca_pseudolikelihood_in_process(
     # 5. Training loop. Plain SGD on negative-PL + L2.
     #
     # MEMORY-CRITICAL CHANGES vs. the initial version:
-    #   (a) torch.no_grad() wraps the loop — autograd is irrelevant for
+    #   (a) torch.no_grad() wraps the loop -- autograd is irrelevant for
     #       hand-computed gradients but was building a graph during the j-sum
     #       that retained ~10 GiB of per-iteration intermediates.
     #   (b) grad_J and grad_h allocated ONCE before the loop; zeroed in-place
@@ -509,14 +509,14 @@ def train_adabmdca_pseudolikelihood_in_process(
         with torch.no_grad():
             for epoch in range(nepochs):
                 # ----- Forward: compute conditional fields E[s, i, a] -----
-                # E[s, i, a] = h[i, a] + Σ_{j != i} J[i, a, j, X[s, j]]
+                # E[s, i, a] = h[i, a] + Sum_{j != i} J[i, a, j, X[s, j]]
                 # Compute the full j-sum, then subtract the diagonal j=i term.
 
                 # Initialize E with the broadcast h (in-place into the reused buffer).
                 E.copy_(h.unsqueeze(0).expand(B, -1, -1))
 
                 for j in range(L):
-                    # J[:, :, j, X[:, j]] → (L, q, B) view → permute to (B, L, q),
+                    # J[:, :, j, X[:, j]] -> (L, q, B) view -> permute to (B, L, q),
                     # add to E in-place.
                     E.add_(J[:, :, j, :][:, :, X[:, j]].permute(2, 0, 1))
 
@@ -535,33 +535,33 @@ def train_adabmdca_pseudolikelihood_in_process(
                 log_p = E - logZ                                         # (B, L, q)
                 p = torch.exp(log_p)                                     # (B, L, q)
 
-                # Per-sequence summed log-likelihood: Σ_i log p(X[s, i] | s_{-i})
+                # Per-sequence summed log-likelihood: Sum_i log p(X[s, i] | s_{-i})
                 log_p_at_data = log_p.gather(-1, X.unsqueeze(-1)).squeeze(-1)  # (B, L)
                 PL = (weights.unsqueeze(-1) * log_p_at_data).sum() / weights_sum
 
-                # ----- Gradient of PL (data − model) weighted by sequence weights -----
+                # ----- Gradient of PL (data - model) weighted by sequence weights -----
                 diff = X_oh - p                                          # (B, L, q)
                 # weights/weights_sum, not weights: PL above is normalized by
-                # weights_sum, so the gradient must be too — otherwise lr and
+                # weights_sum, so the gradient must be too -- otherwise lr and
                 # the L2 term below are effectively scaled by M_eff.
                 wdiff = diff * (weights / weights_sum).view(-1, 1, 1)    # weighted (B, L, q)
                 # Free intermediates we no longer need so PyTorch's allocator can reuse.
                 del log_p, p, log_p_at_data, diff, logZ
 
-                # ∂PL/∂h[i, a] = Σ_s w_s · (X_oh[s, i, a] - p[s, i, a]) / weights_sum
+                # dPL/dh[i, a] = Sum_s w_s * (X_oh[s, i, a] - p[s, i, a]) / weights_sum
                 torch.sum(wdiff, dim=0, out=grad_h)                      # in-place into grad_h
 
-                # ∂PL/∂J[i, a, j, b] — symmetrized as in Ekeberg 2013 eq. 9.
-                # Term1[i, a, j, b] = Σ_s w_s · diff[s, i, a] · X_oh[s, j, b] / weights_sum
-                # Symmetrized: grad_J_sym[i,a,j,b] = 0.5·(Term1[i,a,j,b] + Term1[j,b,i,a]).
+                # dPL/dJ[i, a, j, b] -- symmetrized as in Ekeberg 2013 eq. 9.
+                # Term1[i, a, j, b] = Sum_s w_s * diff[s, i, a] * X_oh[s, j, b] / weights_sum
+                # Symmetrized: grad_J_sym[i,a,j,b] = 0.5*(Term1[i,a,j,b] + Term1[j,b,i,a]).
                 #
                 # We build the symmetrized gradient DIRECTLY via per-chunk dual
                 # accumulation so we never need to materialize the transpose of
                 # the full (L, q, L, q) grad_J (which would double peak memory).
                 # For each j-chunk:
-                #   - 0.5 · Term1[i, a, j_chunk, b]  → grad_J[:, :, j_chunk, :]
-                #   - 0.5 · Term1[j_chunk, b, i, a]  → grad_J[j_chunk, :, :, :]
-                #     (achieved by permuting the chunk axes: (L, q, chunk, q) →
+                #   - 0.5 * Term1[i, a, j_chunk, b]  -> grad_J[:, :, j_chunk, :]
+                #   - 0.5 * Term1[j_chunk, b, i, a]  -> grad_J[j_chunk, :, :, :]
+                #     (achieved by permuting the chunk axes: (L, q, chunk, q) ->
                 #      (chunk, q, L, q) and broadcasting into the j_chunk slice
                 #      of dim 0.)
                 grad_J.zero_()
@@ -571,9 +571,9 @@ def train_adabmdca_pseudolikelihood_in_process(
                     term1_chunk = torch.einsum(
                         "sia,sjb->iajb", wdiff, X_oh_chunk
                     )                                                     # (L, q, chunk, q)
-                    # Contribution of 0.5 · Term1 to the (∗, ∗, j_chunk, ∗) slot:
+                    # Contribution of 0.5 * Term1 to the (*, *, j_chunk, *) slot:
                     grad_J[:, :, j_start:j_end, :].add_(term1_chunk, alpha=0.5)
-                    # Contribution of 0.5 · Term1^T to the (j_chunk, ∗, ∗, ∗) slot:
+                    # Contribution of 0.5 * Term1^T to the (j_chunk, *, *, *) slot:
                     grad_J[j_start:j_end, :, :, :].add_(
                         term1_chunk.permute(2, 3, 0, 1), alpha=0.5
                     )
@@ -581,7 +581,7 @@ def train_adabmdca_pseudolikelihood_in_process(
                 grad_J[L_idx, :, L_idx, :] = 0.0
 
                 # ----- L2 regularization + SGD step (all in-place) -----
-                # max (PL - 0.5 λ ||·||²)  ⇒  param ← param·(1 - lr·λ) + lr·grad
+                # max (PL - 0.5 lambda ||.||^2)  =>  param <- param*(1 - lr*lambda) + lr*grad
                 h.mul_(1.0 - lr * lambda_h).add_(grad_h, alpha=lr)
                 J.mul_(1.0 - lr * lambda_J).add_(grad_J, alpha=lr)
                 J[L_idx, :, L_idx, :] = 0.0  # keep diagonal at zero after the update
@@ -644,10 +644,10 @@ def train_adabmdca_pseudolikelihood_in_process(
         pl_high = 3 * L * L * q * q * 4 / 1e9
         raise RuntimeError(
             f"adabmDCA pseudolikelihood training OOM'd at L={L}, q={q}.\n"
-            f"  Peak memory ~{pl_low:.1f}–{pl_high:.1f} GiB. GPU couldn't supply.\n"
+            f"  Peak memory ~{pl_low:.1f}-{pl_high:.1f} GiB. GPU couldn't supply.\n"
             f"  Pseudolikelihood is already the more memory-efficient option;\n"
             f"  this gene exceeds the single-GPU dense-Potts ceiling. Use the\n"
-            f"  EVmutation/plmc codon backend instead — it runs the same\n"
+            f"  EVmutation/plmc codon backend instead -- it runs the same\n"
             f"  pseudolikelihood math on CPU with system-RAM-scale budgets.\n"
             f"  Original error: {e}"
         ) from e
@@ -772,7 +772,7 @@ def load_adabmdca_params(path: str, alphabet: str,
         J[i, j, ai, bj] = val
         J[j, i, bj, ai] = val
 
-    # Reorganize to (L, q, L, q) — matches EVmutation's J_ij[i, a, j, b] layout.
+    # Reorganize to (L, q, L, q) -- matches EVmutation's J_ij[i, a, j, b] layout.
     # transpose returns a VIEW, so this costs nothing; the copy happens later in
     # apply_zero_sum_gauge, which is the other place peak memory is set.
     J = J.transpose(0, 2, 1, 3)
@@ -882,11 +882,11 @@ def build_lookup(
 
     seq_pos is the 1-based focus-sequence position (CDS codon position for the
     codon side, AA position for the protein side). Alignment columns where the
-    focus has a gap are skipped — they don't correspond to a sequence position.
+    focus has a gap are skipped -- they don't correspond to a sequence position.
 
     Returns:
-      lookup: dict keyed by (seq_pos, mut_token_char) → score dict
-      col_to_seq: dict mapping alignment column → seq_pos (1-based)
+      lookup: dict keyed by (seq_pos, mut_token_char) -> score dict
+      col_to_seq: dict mapping alignment column -> seq_pos (1-based)
     """
     L_align = h.shape[0]
     if len(focus_seq) != L_align:
@@ -897,7 +897,7 @@ def build_lookup(
     token_to_idx = {ch: i for i, ch in enumerate(alphabet)}
     gap_idx = token_to_idx.get("-")
 
-    # Map alignment column → CDS/AA position (1-based, skipping gap columns in focus)
+    # Map alignment column -> CDS/AA position (1-based, skipping gap columns in focus)
     col_to_seq: Dict[int, int] = {}
     seq_pos = 0
     for col, ch in enumerate(focus_seq):
@@ -907,7 +907,7 @@ def build_lookup(
         seq_pos += 1
         col_to_seq[col] = seq_pos
 
-    # Vectorize WT token indices over all alignment columns (gap → 0; we'll skip via col_to_seq)
+    # Vectorize WT token indices over all alignment columns (gap -> 0; we'll skip via col_to_seq)
     wt_idx_per_col = np.array(
         [token_to_idx.get(ch, gap_idx if gap_idx is not None else 0) for ch in focus_seq],
         dtype=np.int64,
@@ -922,8 +922,8 @@ def build_lookup(
         h_i = h[col_i]                            # (q,)
         J_i = J[col_i]                            # (q, L, q): J[col_i, a, j, b]
 
-        # Σ_{j≠col_i} J[col_i, a, j, s_j]  for each a
-        # J_i[:, j, wt_idx_per_col[j]]  → shape (q, L)
+        # Sum_{j!=col_i} J[col_i, a, j, s_j]  for each a
+        # J_i[:, j, wt_idx_per_col[j]]  -> shape (q, L)
         col_indices = np.arange(L_align)
         # gather J[col_i, :, j, wt[j]] over all j
         gathered = J_i[:, col_indices, wt_idx_per_col]  # (q, L)
@@ -1388,15 +1388,15 @@ def score_nt_mutations_adabm(
     """
     Map and score NT mutations through the adabmDCA backend.
 
-    aa_lookup keys: (aa_pos_1based, mut_aa_symbol) → {indep, epi, pair, concordance, frequency}
-    codon_lookup keys: (aa_pos_1based, mut_codon_3letter) → {indep, epi, pair, concordance, frequency}
+    aa_lookup keys: (aa_pos_1based, mut_aa_symbol) -> {indep, epi, pair, concordance, frequency}
+    codon_lookup keys: (aa_pos_1based, mut_codon_3letter) -> {indep, epi, pair, concordance, frequency}
 
     Routing:
-      missense / unknown_codon  → protein TSV (scored via aa_lookup if present)
-      synonymous (skip_codon=False) → codon TSV
-      synonymous (skip_codon=True)  → protein TSV with score 0 (trivial: M→M)
-      stop_gain/loss (skip_codon=False) → codon TSV (annotation only)
-      stop_gain/loss (skip_codon=True)  → protein TSV with empty scores
+      missense / unknown_codon  -> protein TSV (scored via aa_lookup if present)
+      synonymous (skip_codon=False) -> codon TSV
+      synonymous (skip_codon=True)  -> protein TSV with score 0 (trivial: M->M)
+      stop_gain/loss (skip_codon=False) -> codon TSV (annotation only)
+      stop_gain/loss (skip_codon=True)  -> protein TSV with empty scores
     """
     failure_map = failure_map or {}
     nt_re = re.compile(r"^([ACGT])(\d+)([ACGT])$")
@@ -1584,10 +1584,10 @@ def _build_codon_lookup_from_params(
     codon_focus_id: str,
 ) -> Dict[Tuple[int, str], Dict]:
     """
-    Build a codon (codon_pos, mut_codon_3letter) → score lookup.
+    Build a codon (codon_pos, mut_codon_3letter) -> score lookup.
 
     codon_msa_encoded_path must be the SINGLE-CHARACTER encoded MSA produced
-    by codon_encoding.encode_codon_msa — same input the params were trained on.
+    by codon_encoding.encode_codon_msa -- same input the params were trained on.
     """
     if not _CODON_ENCODING_AVAILABLE or CODON_ALPHABET is None:
         raise RuntimeError("codon_encoding module not available; cannot score codon side")
@@ -1600,7 +1600,7 @@ def _build_codon_lookup_from_params(
 
     char_lookup, col_to_seq = build_lookup(h, J, focus_seq, CODON_ALPHABET, column_freqs)
 
-    # Re-key from (seq_pos, mut_char) → (seq_pos, mut_codon_triplet) for downstream consumption
+    # Re-key from (seq_pos, mut_char) -> (seq_pos, mut_codon_triplet) for downstream consumption
     out: Dict[Tuple[int, str], Dict] = {}
     for (sp, mut_char), score in char_lookup.items():
         triplet = CHAR_TO_CODON.get(mut_char)
@@ -1625,7 +1625,7 @@ def _build_protein_lookup_from_params(
     alphabet: str = "-ACDEFGHIKLMNPQRSTVWY",
 ) -> Dict[Tuple[int, str], Dict]:
     """
-    Build a protein (aa_pos, mut_aa_symbol) → score lookup from the protein MSA.
+    Build a protein (aa_pos, mut_aa_symbol) -> score lookup from the protein MSA.
     """
     h, J = load_adabmdca_params(protein_params_path, alphabet)
     h, J = apply_zero_sum_gauge(h, J)
@@ -1806,7 +1806,7 @@ def _build_adabmdca_params(gene: str, msa_file: str, focus: str, output_path: st
 
     # Dispatch on the chosen training algorithm. bmDCA/eaDCA/edDCA are
     # Boltzmann-learning variants and go through train_adabmdca_in_process.
-    # pseudoDCA uses pseudolikelihood maximization — different algorithm,
+    # pseudoDCA uses pseudolikelihood maximization -- different algorithm,
     # different memory footprint (no MCMC chains).
     Path(output_path).parent.mkdir(parents=True, exist_ok=True)
     # Resolve the backend-aware epoch ceiling. Boltzmann self-terminates at
@@ -1935,7 +1935,7 @@ def main() -> None:
                         help="Protein MSA file or directory; triggers `adabmDCA train` if params absent")
     parser.add_argument("-cm", "--codon-msa",
                         help="Codon MSA file or directory (triplets); encoded + trained if params absent")
-    # Pre-built params (cache / override) — skip train if these resolve.
+    # Pre-built params (cache / override) -- skip train if these resolve.
     parser.add_argument("-pp", "--protein-params",
                         help="Pre-built protein params file or directory")
     parser.add_argument("-cp", "--codon-params",
@@ -1956,7 +1956,7 @@ def main() -> None:
                         choices=["bmDCA", "eaDCA", "edDCA", "pseudoDCA"],
                         help="Training algorithm. bmDCA/eaDCA/edDCA are Boltzmann-learning "
                              "variants (high memory); pseudoDCA is pseudolikelihood maximization "
-                             "(~2× less peak memory, no MCMC).")
+                             "(~2x less peak memory, no MCMC).")
     # Backend-aware: None resolves in _build_adabmdca_params to 50000 for the
     # Boltzmann routines and 500 for pseudoDCA. A single default cannot serve both
     # -- 50000 is Boltzmann-sized, and the pseudoDCA function's own signature says

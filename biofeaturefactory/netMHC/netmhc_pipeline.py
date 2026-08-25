@@ -18,15 +18,19 @@
 """
 NetMHC Pipeline for MHC Binding Prediction
 
-Predicts MHC class I and II binding peptides for WT and mutant protein sequences.
-Supports both Docker and native execution modes.
-Generates ensemble TSV outputs with WT vs MUT comparisons.
+Predicts MHC class I binding peptides for WT and mutant protein sequences and
+compares the two. Only netMHC-4.0 is supported, invoked natively.
+
+netMHC scores every peptide window, so a length-L sequence yields exactly
+L - l + 1 rows per allele, non-binders included. Zero rows is therefore a tool
+failure, not a negative result; the usual cause is a missing data/ directory,
+which leaves netMHC exiting 0 with no predictions. The pipeline echoes netMHC's
+raw output and sets a qc_flags code when that happens.
 
 Key features:
-- MHC class I and II binding prediction
-- Multiple HLA allele support
+- MHC class I binding prediction across multiple HLA alleles
 - WT vs mutant comparison with delta scores
-- Batch processing for large FASTA files
+- Three-tier output: summary, events, sites
 - Integration with mutation mapping CSVs
 """
 
@@ -73,7 +77,7 @@ from biofeaturefactory.lib.utility import (
 
 
 # write_tsv is called with these lists and extrasaction='ignore', so a row key absent
-# here is dropped silently — add the column here whenever a row dict gains one.
+# here is dropped silently -- add the column here whenever a row dict gains one.
 #
 # The first 17 event columns and the first 18 summary columns are the pre-existing
 # layout, in their original order. Everything non-SNV support needed is APPENDED,
@@ -110,7 +114,7 @@ SITE_FIELDNAMES = [
 
 # The 20 standard residues. parse_variant's amino-acid grammar accepts any run of
 # letters as an allele, so the alphabet has to be checked separately before an
-# aa-level allele is spliced into a protein — see aa_allele_problem.
+# aa-level allele is spliced into a protein -- see aa_allele_problem.
 AA_RESIDUES = frozenset('ACDEFGHIKLMNPQRSTVWY')
 
 
@@ -125,12 +129,16 @@ def resolve_native_netmhc_path(user_path=None, tool_version="netMHC"):
 
     Search order:
     1. Explicit --native-netmhc-path value
-    2. $NETMHC_PATH or $NETMHCPAN_PATH environment variable
-    3. Common install locations
+    2. $NETMHC_PATH
+    3. $NETMHC_HOME/<tool_version>
+    4. Common install locations (~/netMHC/, /opt/netMHC/, /usr/local/bin/)
+
+    $NETMHCPAN_PATH is deliberately NOT consulted -- see the comment on
+    common_roots below.
 
     Args:
         user_path: User-specified path to NetMHC binary
-        tool_version: Which NetMHC tool to use. Only netMHC-4.0 is supported —
+        tool_version: Which NetMHC tool to use. Only netMHC-4.0 is supported --
             the invocation and the 15-column/'HLA'-header parser are hardcoded to
             it (see --netmhc-tool, choices=['netMHC']). The default is 'netMHC' so
             a programmatic caller that omits it cannot silently resolve netMHCpan,
@@ -150,7 +158,7 @@ def resolve_native_netmhc_path(user_path=None, tool_version="netMHC"):
         _add(os.path.join(netmhc_home, tool_version))
 
     home = Path.home()
-    # netMHC-4.0 only (see --netmhc-tool): do NOT auto-discover netMHCpan — its
+    # netMHC-4.0 only (see --netmhc-tool): do NOT auto-discover netMHCpan -- its
     # output format is unreadable by this parser and would silently yield zero
     # predictions.
     common_roots = [
@@ -358,8 +366,8 @@ def infer_pos_base(predictions, sequence, sample=25):
 
     Returns (base, qc_flag). The whole WT<->MUT register join is an arithmetic
     projection of this column onto the mutant protein, so the convention is
-    verified against the submitted sequence — a reported peptide must be exactly
-    ``sequence[pos - base : pos - base + len(peptide)]`` — instead of trusted.
+    verified against the submitted sequence -- a reported peptide must be exactly
+    ``sequence[pos - base : pos - base + len(peptide)]`` -- instead of trusted.
     netMHC-4.0 emits 0-based positions and 0 is preferred when both conventions
     happen to reproduce every sampled peptide (a homopolymer stretch can).
 
@@ -400,15 +408,15 @@ def aa_allele_problem(variant):
     carrying the literal text 'fs', which netMHC then scores and this pipeline
     reports as a successful measurement of a variant nobody declared.
 
-    A '*' is allowed through here because it IS meaningful — the protein ends
-    there — and the caller truncates at it, matching what the nucleotide path
+    A '*' is allowed through here because it IS meaningful -- the protein ends
+    there -- and the caller truncates at it, matching what the nucleotide path
     does in _non_snv_mutant_protein. Both alleles are checked over their WHOLE
     span, not just their first character.
 
     The frameshift rendering needs its own test rather than an alphabet test,
     because 'fs' upper-cases to Phe-Ser and so passes any alphabet check. Its
-    shape is exactly what format_aa_token emits — a single REF residue and the
-    literal 'fs' — and it is refused case-insensitively. That does refuse a
+    shape is exactly what format_aa_token emits -- a single REF residue and the
+    literal 'fs' -- and it is refused case-insensitively. That does refuse a
     genuine 1->2 delins whose ALT really is Phe-Ser, written 'L20FS'; the token
     alone cannot distinguish the two, and a refusal that names itself is
     recoverable where a fabricated mutant protein scored as real is not.
@@ -432,7 +440,7 @@ def workdir_stem(gene_name, mutation, limit=80):
     mutant died with OSError before netMHC was ever invoked. The token is
     therefore bounded and made unique with a digest of the full token.
 
-    A token that is already short and filesystem-safe — every SNV — is used
+    A token that is already short and filesystem-safe -- every SNV -- is used
     unchanged, so existing temp paths are byte-identical. These files live in a
     per-gene temp directory deleted in main's `finally`; nothing reads the name.
     """
@@ -450,16 +458,16 @@ def resolve_aa_alignment(mutation, wt_aa_seq, mut_aa_seq, wt_nt_seq=None, is_nt=
     Returns (wt_to_mut, variant_class, aa_consequence, note).
 
     wt_to_mut is a list where entry i is the mutant index of WT residue i, or None
-    where the edit removed it — the shared `align_wt_to_mut` convention. It is
+    where the edit removed it -- the shared `align_wt_to_mut` convention. It is
     None (meaning "identity, index for index") only when the two proteins are
     provably the same length and no frameshift is involved, which is exactly the
     SNV/MNV case; the SNV path therefore behaves exactly as it did before.
 
     The edit is recovered from the two PROTEIN sequences with `infer_edit_span`,
     because netMHC is a protein tool and this is the pair of sequences it actually
-    scored. The one thing prefix/suffix trimming cannot recover is a frameshift —
+    scored. The one thing prefix/suffix trimming cannot recover is a frameshift --
     it would report the minimal replacement and then pair residues that are not
-    counterparts — so the frameshift flag comes from `protein_consequence` on the
+    counterparts -- so the frameshift flag comes from `protein_consequence` on the
     nucleotide token and is passed in explicitly.
     """
     variant = parse_variant(mutation, is_nt=is_nt)
@@ -477,7 +485,7 @@ def resolve_aa_alignment(mutation, wt_aa_seq, mut_aa_seq, wt_nt_seq=None, is_nt=
     #
     # The row is FLAGGED, not dropped: the predictions themselves are genuine
     # measurements of the protein that was submitted, and dropping the row would
-    # trade one silent error for another. Comparing seq[pos] alone would not do —
+    # trade one silent error for another. Comparing seq[pos] alone would not do --
     # a multi-base REF whose first base happens to match would pass.
     reference = wt_nt_seq if is_nt else wt_aa_seq
     if variant is not None and reference:
@@ -537,7 +545,7 @@ def _event_row(gene_name, mutation, variant_class, aa_consequence, allele,
     absent side, which is not a measurement: it produced |delta_rank| ~ 99 that
     dominated max_abs_delta_rank and top_event selection, and it was
     indistinguishable from a genuine non-binder that netMHC actually scored.
-    classification_code is likewise empty rather than 0 on an unpaired row — 0
+    classification_code is likewise empty rather than 0 on an unpaired row -- 0
     means "stable", i.e. measured and unchanged.
     """
     wt_rank = wt_pred['rank'] if wt_pred else ''
@@ -555,8 +563,8 @@ def _event_row(gene_name, mutation, variant_class, aa_consequence, allele,
         #   0 = NB (non-binder,    %Rank >= 2.0)
         # Strength order SB(2) > WB(1) > NB(0). Classification is a band transition;
         # delta_rank/delta_affinity are retained as reported magnitudes only.
-        # (The former delta_rank <>±5 test was dead: inside the both-bind branch
-        # delta_rank is bounded to [-2, 2] and could never reach ±5.)
+        # (The former delta_rank <>+/-5 test was dead: inside the both-bind branch
+        # delta_rank is bounded to [-2, 2] and could never reach +/-5.)
         wt_band = 2 if wt_rank < threshold else (1 if wt_rank < 2.0 else 0)
         mut_band = 2 if mut_rank < threshold else (1 if mut_rank < 2.0 else 0)
 
@@ -631,7 +639,7 @@ def compare_wt_mut_predictions(gene_name, mutation, wt_preds, mut_preds, thresho
         (The former set-of-keys iteration left row order dependent on
         per-process string hashing.)
     """
-    # Lookup maps keyed on the REGISTER (allele, pos) — NOT the peptide. A window
+    # Lookup maps keyed on the REGISTER (allele, pos) -- NOT the peptide. A window
     # covering the mutated residue has different WT vs MUT peptide strings by
     # construction; keying on the sequence would give them different keys so they
     # would never be paired at all.
@@ -734,7 +742,7 @@ def summarize_epitope_changes(gene_name, mutation, events, threshold=0.5,
         threshold: Strong-binder %Rank cutoff. Was hardcoded to 0.5 here while
             --threshold reached only the band classifier, so the two disagreed
             whenever the user changed it. n_epitopes_* now means exactly "band 2
-            (SB)" — the same `< threshold` test the classifier uses — rather than
+            (SB)" -- the same `< threshold` test the classifier uses -- rather than
             the former `<= 0.5`.
         variant_class / aa_consequence / align_note: carried through from
             resolve_aa_alignment.
@@ -756,14 +764,14 @@ def summarize_epitope_changes(gene_name, mutation, events, threshold=0.5,
     count_stable = sum(1 for e in aligned if e['classification'] == 'stable')
 
     # An epitope is an epitope whether or not it has a counterpart in the other
-    # allele, so these count over ALL events with a rank on the relevant side —
+    # allele, so these count over ALL events with a rank on the relevant side --
     # a WT epitope the edit deleted still existed in the WT.
     n_epitopes_wt = sum(1 for e in events if e['wt_rank'] != '' and e['wt_rank'] < threshold)
     n_epitopes_mut = sum(1 for e in events if e['mut_rank'] != '' and e['mut_rank'] < threshold)
 
     abs_deltas = [abs(e['delta_rank']) for e in aligned]
-    # Ties on |delta_rank| are common — every register of a synonymous change ties
-    # at 0.0 — and a bare max() then returns whichever tied row happened to come
+    # Ties on |delta_rank| are common -- every register of a synonymous change ties
+    # at 0.0 -- and a bare max() then returns whichever tied row happened to come
     # first, which made this column depend on the order the events were built in.
     # (allele, pos) breaks the tie by a property of the record instead.
     top_event = (max(aligned, key=lambda e: (abs(e['delta_rank']), e['mhc_allele'], e['pos']))
@@ -776,7 +784,7 @@ def summarize_epitope_changes(gene_name, mutation, events, threshold=0.5,
         # Count over the UNION of both alleles' registers, not just WT ones.
         # "aligned N/N" over WT registers alone reports an insertion as fully
         # aligned however large it is, because every WT register does keep an
-        # entry — the registers with no counterpart are all on the mutant side.
+        # entry -- the registers with no counterpart are all on the mutant side.
         qc_flags.append(
             f"length_changed:{mut_aa_len - wt_aa_len:+d}aa;"
             f"aligned_{len(aligned)}/{len(events)};"
@@ -824,7 +832,7 @@ def summarize_epitope_changes(gene_name, mutation, events, threshold=0.5,
 
 
 # The three writers used to `return` before calling write_tsv when their row list
-# was empty, so a gene with no rows got NO FILE — indistinguishable downstream from
+# was empty, so a gene with no rows got NO FILE -- indistinguishable downstream from
 # a gene the pipeline never reached, and a stale file from a previous run survived
 # in its place. write_tsv already emits a header-only file when fieldnames are
 # supplied (utility.py), which is what every other BFF pipeline produces.
@@ -860,8 +868,8 @@ def first_line(text, default='unknown'):
     return default
 
 
-# netMHC-4.0's default peptide length. Not passed on the command line — the
-# invocation deliberately stays as it was — so this is only used to state the
+# netMHC-4.0's default peptide length. Not passed on the command line -- the
+# invocation deliberately stays as it was -- so this is only used to state the
 # expected window count in a diagnostic message.
 NETMHC_PEPTIDE_LENGTH = 9
 
@@ -875,7 +883,7 @@ def netmhc_output_problem(predictions, sequence, peptide_length=NETMHC_PEPTIDE_L
     netMHC scores EVERY window of the submitted sequence and prints a row for
     each one: a non-binder is a row with a blank BindLevel, not an absent row.
     A protein of length L therefore has exactly L - l + 1 rows per allele, and
-    ZERO rows is never a measurement — it means the tool refused the input, or
+    ZERO rows is never a measurement -- it means the tool refused the input, or
     the tool's output layout and parse_netmhc_output disagree.
 
     Both of those were previously reported as "0 predictions" on stdout and then
@@ -895,7 +903,7 @@ def echo_netmhc_output(label, raw_output, limit=NETMHC_OUTPUT_ECHO_LINES):
     """Print the tool's own output when nothing could be parsed from it.
 
     The per-gene workdir is deleted in main's `finally`, so the .out file is gone
-    by the time the user sees "0 predictions" — there was no way to tell a tool
+    by the time the user sees "0 predictions" -- there was no way to tell a tool
     refusal from a parser mismatch without re-running netMHC by hand. The text is
     already in memory: the executor returns it and both call sites discarded it.
     """
@@ -919,7 +927,7 @@ def iter_mutation_tokens(mapping_file):
     The duplication exists because build_mutant_sequences_for_gene returns only
     {header: sequence} and prints its skipped-token list instead of returning it,
     so a caller cannot otherwise distinguish "this token was rejected" from "this
-    token was never in the file" — which contract D requires. utility.py is not
+    token was never in the file" -- which contract D requires. utility.py is not
     modified here; the shared fix would be for it to return (sequences, skipped).
     """
     if not mapping_file or not os.path.exists(mapping_file):
@@ -965,8 +973,8 @@ def iter_mutation_tokens(mapping_file):
 def pending_mutation_tokens(mapping_file, gene_name, log_path, failure_map):
     """Tokens that SHOULD have produced a mutant, after the deliberate filters.
 
-    Applies the same two filters build_mutant_sequences_for_gene applies — the
-    validation-log allow-list and should_skip_mutation — so a token that was
+    Applies the same two filters build_mutant_sequences_for_gene applies -- the
+    validation-log allow-list and should_skip_mutation -- so a token that was
     deliberately excluded is not then reported as a failure.
     """
     tokens = iter_mutation_tokens(mapping_file)
@@ -1000,7 +1008,7 @@ def explain_missing_token(token, wt_nt_seq, wt_aa_seq, is_nt):
     The checks are the same ones build_mutant_sequences_for_gene /
     _non_snv_mutant_protein apply, re-run here purely to attach a reason code to
     the row. Bounds are tested on the END of the REF span, and the REF guard
-    compares the WHOLE span — a single-base check passes on any multi-base REF
+    compares the WHOLE span -- a single-base check passes on any multi-base REF
     whose first base happens to match.
     """
     # A gd./ch. token is WELL FORMED and out of SCOPE for a protein tool, not
@@ -1028,8 +1036,8 @@ def explain_missing_token(token, wt_nt_seq, wt_aa_seq, is_nt):
         cons = protein_consequence(variant, wt_nt_seq)
         if cons is not None:
             aa_consequence = cons['aa_consequence']
-        # infer_aamutation_from_nt — the SNV path inside
-        # build_mutant_sequences_for_gene — returns None for a stop-gain, because
+        # infer_aamutation_from_nt -- the SNV path inside
+        # build_mutant_sequences_for_gene -- returns None for a stop-gain, because
         # codon_to_aa renders a stop as the 4-character string 'Stop' which must
         # not be spliced in as a residue. Real, pre-existing, and named here
         # rather than dropped.
@@ -1093,7 +1101,7 @@ def main():
     parser.add_argument('-t', '--threshold', type=float, default=0.5,
                        help='Binding rank threshold for strong binders (default: 0.5)')
     parser.add_argument('-bs', '--batch-size', type=int, default=100,
-                       help='(deprecated; unused — netMHC input is no longer batched)')
+                       help='(deprecated; unused -- netMHC input is no longer batched)')
     parser.add_argument('-ti', '--timeout', type=int, default=600,
                        help='Command timeout in seconds (default: 600)')
     parser.add_argument('--max-workers', type=int, default=4,
@@ -1274,7 +1282,7 @@ def main():
 
             # Run netMHC on the single-record WT FASTA. netMHC digests the
             # sequence into all k-mer windows itself, so no input batching is
-            # needed (audit F8 — the former split-by-record batching was a no-op).
+            # needed (audit F8 -- the former split-by-record batching was a no-op).
             wt_output = os.path.join(gene_workdir, f"{gene_name}_wt.out")
             success, wt_raw, error = executor(wt_fasta, wt_output, args.timeout, args.alleles)
             if not success:
@@ -1289,7 +1297,7 @@ def main():
                     print(f"  WT: {len(wt_predictions)} predictions")
                 # netMHC reported an exit the executor accepted, but nothing came
                 # back through the parser. That is a failure of the gene, not a WT
-                # with no epitopes — see netmhc_output_problem. Without this the
+                # with no epitopes -- see netmhc_output_problem. Without this the
                 # mutants were all compared against an EMPTY WT register map and
                 # every one of them returned a full set of rows saying nothing
                 # changed.
@@ -1315,7 +1323,7 @@ def main():
             # Process each mutant in parallel. Every netMHC run is a separate OS
             # process (subprocess), so threads give real concurrency (the GIL is
             # released during subprocess.run) while keeping ONE netMHC invocation
-            # per mutant — unambiguous output attribution and per-mutant failure
+            # per mutant -- unambiguous output attribution and per-mutant failure
             # isolation. Genes with thousands of mutations no longer pay a fully
             # serial process-spawn cost.
             def _process_mutant(item):

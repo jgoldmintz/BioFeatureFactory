@@ -475,7 +475,7 @@ else
   echo "  WARN AF3/RBP_db/msa is missing. Set AF3_RBP_MSA_ARCHIVE_URL to auto-populate."
 fi
 
-# ── Step 9b: CoCoPUTs human codon usage table (rare_codon null model) ────
+# -- Step 9b: CoCoPUTs human codon usage table (rare_codon null model) ----
 # Lives here rather than in bootstrap.sh because it IS a prepared database: it is
 # derived data, it is shared across checkouts, and rare_codon reads it by path.
 # Every other artifact under DB_ROOT is built by this script; having bootstrap

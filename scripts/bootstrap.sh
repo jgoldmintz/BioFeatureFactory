@@ -330,7 +330,7 @@ fi
 if [[ "$PHASE_ENV" -eq 1 && "$PHASE_GIT" -eq 0 && "$PHASE_DB" -eq 0 && "$PIP_INSTALL" -eq 0 ]]; then
   echo "WARN: env-phase with --exclude-pip-install; only the conda and editable-install steps will run." >&2
 fi
-# ── Preflight: interpreter must be in the supported range ───────────────
+# -- Preflight: interpreter must be in the supported range ---------------
 # Ceiling 3.12: pyproject pins numpy>=1.20,<2, and numpy 1.26.4 (the last 1.x) ships
 #   no wheel past cp312. Above it pip falls back to an sdist and compiles numpy.
 # Floor 3.10: adabmDCA requires it (see pyproject [project.optional-dependencies]).
@@ -438,7 +438,7 @@ if [[ "$DOWNLOAD_UNIREF90" -eq 1 || "$DOWNLOAD_IDMAPPING" -eq 1 ]]; then
   mkdir -p _downloads
 fi
 
-# ── Failure collection ──────────────────────────────────────────────────
+# -- Failure collection --------------------------------------------------
 # `set -e` makes ANY unguarded failure abort the run, so a single step that
 # cannot succeed on this host (e.g. the GeneSplicer source build, which needs
 # GNU g++ and hard-errors under Apple clang) used to kill every step after it.
@@ -539,7 +539,7 @@ clone_or_update() {
   fi
 }
 
-# ── Step 1: Core tool checks ─────────────────────────────────────────────
+# -- Step 1: Core tool checks ---------------------------------------------
 echo "[1/12] Validating core tools..."
 require_cmd git
 require_cmd tar
@@ -573,7 +573,7 @@ pkg_install() {
   return 1
 }
 
-# ── Step 1b: Build toolchain (gcc, g++, make) ───────────────────────────
+# -- Step 1b: Build toolchain (gcc, g++, make) ---------------------------
 # Required for compiling plmc and (potentially) GeneSplicer + native Python
 # extensions during pip install. Skipped unless the git phase is selected.
 # Policy: verify presence; do NOT change/upgrade if already installed.
@@ -586,7 +586,7 @@ if [[ "$INSTALL_BUILD_TOOLS" -eq 1 ]]; then
   if [[ "$have_gcc" -eq 1 && "$have_gxx" -eq 1 && "$have_make" -eq 1 ]]; then
     gcc_ver="$(gcc -dumpversion 2>/dev/null || echo unknown)"
     make_ver="$(make --version 2>/dev/null | head -n1)"
-    echo "  OK gcc $gcc_ver, g++ $(g++ -dumpversion 2>/dev/null || echo unknown), $make_ver — no install needed"
+    echo "  OK gcc $gcc_ver, g++ $(g++ -dumpversion 2>/dev/null || echo unknown), $make_ver -- no install needed"
   else
     missing=()
     [[ "$have_gcc"  -eq 0 ]] && missing+=("gcc")
@@ -601,7 +601,7 @@ if [[ "$INSTALL_BUILD_TOOLS" -eq 1 ]]; then
   fi
 fi
 
-# ── Step 1c: tcsh (DTU tool launchers) ──────────────────────────────────
+# -- Step 1c: tcsh (DTU tool launchers) ----------------------------------
 # MEASURED, netNglyc 1.0c on Ubuntu x86_64: with tcsh only in $CONDA_PREFIX/bin,
 # the outer launcher can be run as `tcsh -f netNglyc`, but Template/test_how --
 # which Template/test execs nine times, once per neural-net parameter set -- dies
@@ -628,7 +628,7 @@ if [[ "$INSTALL_TCSH" -eq 1 ]]; then
   fi
 fi
 
-# ── Step 1d: Array::Base (netNglyc neural-net driver) ───────────────────
+# -- Step 1d: Array::Base (netNglyc neural-net driver) -------------------
 # netNglyc-1.0/Template/test is the perl program that drives the neural nets, and
 # its line 3 is `use Array::Base +1;` -- the whole file is written for 1-based
 # arrays. Without the module it aborts at BEGIN, the nine per-parameter-set runs
@@ -668,7 +668,7 @@ if [[ "$INSTALL_PERL_MODS" -eq 1 ]]; then
   fi
 fi
 
-# ── Step 2: Pip install ──────────────────────────────────────────────────
+# -- Step 2: Pip install --------------------------------------------------
 echo "[2/12] Core Python requirements..."
 if [[ "$PIP_INSTALL" -eq 1 ]]; then
   echo "  PIP install -e .[all] (editable install with all optional deps)"
@@ -679,7 +679,7 @@ if [[ "$PIP_INSTALL" -eq 1 ]]; then
     || record_failure "step 2: pyarrow reinstall (numpy ABI fix)"
 fi
 
-# ── Step 3: mutation_effects (EVmutation + plmc) + adabmDCApy + cg_cotrans ──
+# -- Step 3: mutation_effects (EVmutation + plmc) + adabmDCApy + cg_cotrans --
 echo "[3/12] mutation_effects module dependencies..."
 if [[ "$CLONE_EVMUTATION" -eq 1 ]]; then
   clone_or_update "https://github.com/debbiemarkslab/EVmutation.git" "$BFF_DIR/mutation_effects/EVmutation" \
@@ -705,10 +705,10 @@ if [[ "$CLONE_EVMUTATION" -eq 1 ]]; then
 fi
 
 # adabmDCApy: PyTorch implementation of adabmDCA. adabmdca_pipeline.py imports
-# it IN-PROCESS (`from adabmDCA.training import ...`) to train/score — the
+# it IN-PROCESS (`from adabmDCA.training import ...`) to train/score -- the
 # `adabmDCA` console script is never invoked, so the package must be IMPORTABLE
 # (CLI on PATH is irrelevant). Used by Nextflow processes run_protein_adabmdca /
-# run_codon_adabmdca. Repo: spqb/adabmDCApy (NOT spqb/adabmDCA — a different package).
+# run_codon_adabmdca. Repo: spqb/adabmDCApy (NOT spqb/adabmDCA -- a different package).
 ADABMDCA_MIN="0.7.5"
 if [[ "$CLONE_ADABMDCA" -eq 1 ]]; then
   ADABM_DIR="$BFF_DIR/mutation_effects/adabmDCApy"
@@ -735,7 +735,7 @@ if [[ "$DOWNLOAD_CG_COTRANS" -eq 1 ]]; then
   fi
 fi
 
-# ── Step 4: NetSurfP3 ───────────────────────────────────────────────────
+# -- Step 4: NetSurfP3 ---------------------------------------------------
 echo "[4/12] NetSurfP3 module dependency..."
 if [[ "$CLONE_NETSURFP3" -eq 1 ]]; then
   clone_or_update "https://github.com/Eryk96/NetSurfP-3.0.git" "$BFF_DIR/NetSurfP3/nsp3" \
@@ -743,7 +743,7 @@ if [[ "$CLONE_NETSURFP3" -eq 1 ]]; then
   # Editable install (pip install -e nsp3/nsp3) is handled centrally in step [8b].
 fi
 
-# ── Step 5: SignalP 6.0 ─────────────────────────────────────────────────
+# -- Step 5: SignalP 6.0 -------------------------------------------------
 # CHECK ONLY. SignalP 6.0 is a licensed manual install like the other DTU tools
 # (netNglyc, netphos, netMHC) -- see the step 11 checklist.
 #
@@ -764,12 +764,12 @@ if [[ "$INSTALL_SIGNALP" -eq 1 ]]; then
   if command -v signalp6 >/dev/null 2>&1; then
     echo "  OK signalp6 on PATH: $(command -v signalp6)"
   else
-    echo "  MISSING signalp6 not on PATH — see the step 11 checklist for install steps."
+    echo "  MISSING signalp6 not on PATH -- see the step 11 checklist for install steps."
     echo "          netNglyc runs will FAIL at SignalP6Handler until it is present."
   fi
 fi
 
-# ── Step 6: Miranda ─────────────────────────────────────────────────────
+# -- Step 6: Miranda -----------------------------------------------------
 echo "[6/12] Miranda (conda)..."
 if [[ "$INSTALL_MIRANDA" -eq 1 ]]; then
   if command -v miranda >/dev/null 2>&1; then
@@ -779,7 +779,7 @@ if [[ "$INSTALL_MIRANDA" -eq 1 ]]; then
   fi
 fi
 
-# ── Step 6b: mmseqs2 (EVmutation codon MSA) ─────────────────────────────
+# -- Step 6b: mmseqs2 (EVmutation codon MSA) -----------------------------
 echo "[6b/12] mmseqs2..."
 if [[ "$INSTALL_MMSEQS2" -eq 1 ]]; then
   if command -v mmseqs >/dev/null 2>&1; then
@@ -789,7 +789,7 @@ if [[ "$INSTALL_MMSEQS2" -eq 1 ]]; then
   fi
 fi
 
-# ── Step 6c: HMMER / jackhmmer (EVmutation protein MSA) ────────────────
+# -- Step 6c: HMMER / jackhmmer (EVmutation protein MSA) ----------------
 echo "[6c/12] HMMER (jackhmmer)..."
 if [[ "$INSTALL_HMMER" -eq 1 ]]; then
   if command -v jackhmmer >/dev/null 2>&1; then
@@ -799,7 +799,7 @@ if [[ "$INSTALL_HMMER" -eq 1 ]]; then
   fi
 fi
 
-# ── Step 6c2: HTSlib / bgzip + tabix ───────────────────────────────────
+# -- Step 6c2: HTSlib / bgzip + tabix -----------------------------------
 # THREE consumers, not one, which is why this sits in every phase:
 #
 #   spliceai/bin/main.nf:324-325   compress_and_index runs `bgzip -c` then
@@ -840,7 +840,7 @@ if [[ "$INSTALL_HTSLIB" -eq 1 ]]; then
   fi
 fi
 
-# ── Step 6d: SpliceAI ───────────────────────────────────────────────────
+# -- Step 6d: SpliceAI ---------------------------------------------------
 # Placed here, with the other conda installs, rather than in the steps 10-12
 # block where the spliceai CHECK lives: that block is skipped unless the git phase runs,
 # and the env phase is documented as pip/conda installs. A conda
@@ -981,7 +981,7 @@ SPLICEAI_CHECK
   fi
 fi
 
-# ── Step 7: GeneSplicer ─────────────────────────────────────────────────
+# -- Step 7: GeneSplicer -------------------------------------------------
 # SOURCE BUILD, not conda. `conda install -c bioconda genesplicer` installs a
 # DIFFERENT binary (md5 b2e2384f..., 70848 bytes) from the one JHU ships
 # (md5 61a8648a..., 53448 bytes). Measured on this stack: identical input and
@@ -1036,13 +1036,13 @@ if [[ "$BUILD_GENESPLICER" -eq 1 ]]; then
   fi
 fi
 
-# ── Step 7b: Nextflow + OpenJDK ──────────────────────────────────────────
+# -- Step 7b: Nextflow + OpenJDK ------------------------------------------
 # Floors:
-#   Java 17  — Nextflow 24+ requires it.
-#   Nextflow 22.10.0 — minimum where the DSL2 operators used here are stable.
+#   Java 17  -- Nextflow 24+ requires it.
+#   Nextflow 22.10.0 -- minimum where the DSL2 operators used here are stable.
 # Policy: verify version; if at/above the floor, skip install (no version
 # change). If below, WARN with the manual upgrade command rather than
-# silently replacing — system Java affects unrelated tooling.
+# silently replacing -- system Java affects unrelated tooling.
 JAVA_MIN_MAJOR=17
 NEXTFLOW_MIN="22.10.0"
 echo "[7b/12] Nextflow + OpenJDK..."
@@ -1050,7 +1050,7 @@ if [[ "$INSTALL_NEXTFLOW" -eq 1 ]]; then
   # ---- OpenJDK ----
   # Nextflow 24+ requires Java 17+. Earlier policy was warn-and-continue,
   # but the official Nextflow installer fails immediately when Java is below
-  # the floor — leaving the user with a broken nextflow shim. Now: when Java
+  # the floor -- leaving the user with a broken nextflow shim. Now: when Java
   # is too old, install OpenJDK 17 alongside (apt/yum don't replace the older
   # JVM) and re-point `update-alternatives` so `/usr/bin/java` resolves to
   # the new one. The older Java remains on disk for anything that needs it.
@@ -1059,14 +1059,14 @@ if [[ "$INSTALL_NEXTFLOW" -eq 1 ]]; then
     java_raw="$(java -version 2>&1 | head -n 1 | awk -F\" '{print $2}')"
     jmaj="$(java_major "$java_raw")"
     if [[ -n "$jmaj" && "$jmaj" -ge "$JAVA_MIN_MAJOR" ]]; then
-      echo "  OK java $java_raw (>= $JAVA_MIN_MAJOR) — no install needed"
+      echo "  OK java $java_raw (>= $JAVA_MIN_MAJOR) -- no install needed"
     else
       echo "  java $java_raw is below the required floor (Java $JAVA_MIN_MAJOR+ for Nextflow 24+)."
       echo "  Installing OpenJDK $JAVA_MIN_MAJOR alongside; switching default java -> 17."
       needs_java_install=1
     fi
   else
-    echo "  java not found — installing OpenJDK $JAVA_MIN_MAJOR"
+    echo "  java not found -- installing OpenJDK $JAVA_MIN_MAJOR"
     needs_java_install=1
   fi
 
@@ -1113,10 +1113,10 @@ if [[ "$INSTALL_NEXTFLOW" -eq 1 ]]; then
 
   # ---- Nextflow ----
   if command -v nextflow >/dev/null 2>&1; then
-    # Nextflow prints "      version 25.10.4 build 11173" — $1=version, $2=25.10.4.
+    # Nextflow prints "      version 25.10.4 build 11173" -- $1=version, $2=25.10.4.
     nf_ver="$(nextflow -version 2>&1 | awk '$1=="version" {print $2; exit}')"
     if [[ -n "$nf_ver" ]] && version_at_least "$nf_ver" "$NEXTFLOW_MIN"; then
-      echo "  OK nextflow $nf_ver (>= $NEXTFLOW_MIN) — no install needed"
+      echo "  OK nextflow $nf_ver (>= $NEXTFLOW_MIN) -- no install needed"
     else
       echo "  WARN nextflow ${nf_ver:-unknown} is below the required floor ($NEXTFLOW_MIN)."
       echo "       Not auto-upgrading. Upgrade manually:"
@@ -1124,7 +1124,7 @@ if [[ "$INSTALL_NEXTFLOW" -eq 1 ]]; then
       echo "         conda:        conda install -y ${CONDA_CHANNELS[*]} 'nextflow>=$NEXTFLOW_MIN'"
     fi
   else
-    echo "  nextflow not found — installing"
+    echo "  nextflow not found -- installing"
     if command -v conda >/dev/null 2>&1; then
       echo "  CONDA install nextflow"
       conda install -y "${CONDA_CHANNELS[@]}" "nextflow>=${NEXTFLOW_MIN}" \
@@ -1213,14 +1213,14 @@ if [[ "$INSTALL_NEXTFLOW" -eq 1 ]]; then
   fi
 fi
 
-# ── Step 8: AlphaFold3 ──────────────────────────────────────────────────
+# -- Step 8: AlphaFold3 --------------------------------------------------
 echo "[8/12] AlphaFold3 upstream (optional clone)..."
 if [[ "$CLONE_AF3" -eq 1 ]]; then
   clone_or_update "https://github.com/google-deepmind/alphafold3.git" "$BFF_DIR/alphafold3/alphafold3" \
     || record_failure "step 8: clone AlphaFold3"
 fi
 
-# ── Step 8b: Editable installs of python-based cloned repos ─────────────
+# -- Step 8b: Editable installs of python-based cloned repos -------------
 # Runs whenever the env or git phase is selected. Decoupled from the core
 # `pip install -e .[all]` (PIP_INSTALL) and from the per-repo CLONE_* flags so:
 #   - env-phase installs whatever python repos are already cloned, and warns for
@@ -1270,7 +1270,7 @@ if [[ "$INSTALL_EDITABLE_REPOS" -eq 1 ]]; then
         echo "  WARN installed adabmDCA $installed_ver is below floor ($ADABMDCA_MIN)"
       fi
     else
-      echo "  WARN adabmDCA package not detected via pip show — install may have failed"
+      echo "  WARN adabmDCA package not detected via pip show -- install may have failed"
     fi
     if command -v adabmDCA >/dev/null 2>&1; then
       echo "  OK adabmDCA CLI on PATH: $(command -v adabmDCA)"
@@ -1280,7 +1280,7 @@ if [[ "$INSTALL_EDITABLE_REPOS" -eq 1 ]]; then
   fi
 fi
 
-# ── Step 8c: Verify the installed package layout ────────────────────────
+# -- Step 8c: Verify the installed package layout ------------------------
 # The package is layered lib -> core -> pipelines (see biofeaturefactory/core/__init__.py):
 #   lib/    import-only modules, no CLI
 #   core/   input producers, driven by CLI (including from Nextflow), not imported
@@ -1347,7 +1347,7 @@ else
   echo "  SKIP (no python env step ran in this mode)"
 fi
 
-# ── Step 9: FTP datasets ────────────────────────────────────────────────
+# -- Step 9: FTP datasets ------------------------------------------------
 echo "[9/12] Optional FTP datasets..."
 if [[ "$DOWNLOAD_UNIREF90" -eq 1 ]]; then
   download_file \
@@ -1362,7 +1362,7 @@ if [[ "$DOWNLOAD_IDMAPPING" -eq 1 ]]; then
     || record_failure "step 9: download idmapping.dat.gz"
 fi
 
-# ── Step 9b: CoCoPUTs codon usage table -- MOVED ────────────────────────
+# -- Step 9b: CoCoPUTs codon usage table -- MOVED ------------------------
 # The table is built by scripts/build_db.sh (step 9b there), not here. It is a
 # prepared database like every other artifact under Bio_DBs, and building it from
 # bootstrap gave that directory two owners with two different ideas of where it
@@ -1371,7 +1371,7 @@ fi
 # PHASE_DB_FLAGS and both default to 1, so any invocation that used to reach the
 # build here reaches it there.
 
-# ── Steps 10-12: summaries over what the git phase clones/builds ─────────
+# -- Steps 10-12: summaries over what the git phase clones/builds ---------
 if [[ "$PHASE_GIT" -eq 1 ]]; then
   # SpliceAI is checked at the end of step 6d, in the ENV phase, because that is
   # where it is installed and because it now lives in its own conda env -- it is
@@ -1452,15 +1452,15 @@ if [[ "$RUN_BUILD_DB" -eq 1 ]]; then
   fi
 fi
 
-# ── Final report ────────────────────────────────────────────────────────
+# -- Final report --------------------------------------------------------
 if [[ "${#BOOTSTRAP_FAILURES[@]}" -gt 0 ]]; then
   echo
-  echo "════════════════════════════════════════════════════════════════"
+  echo "================================================================"
   echo "Bootstrap finished with ${#BOOTSTRAP_FAILURES[@]} failure(s):"
   for _f in "${BOOTSTRAP_FAILURES[@]}"; do
-    echo "  ✗ $_f"
+    echo "  x $_f"
   done
-  echo "════════════════════════════════════════════════════════════════"
+  echo "================================================================"
   echo "Every other step completed. Re-run with the matching --exclude-* flags"
   echo "to skip the failures, or fix them and re-run the same phase."
   exit 1

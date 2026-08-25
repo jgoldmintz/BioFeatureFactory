@@ -22,8 +22,8 @@ Parsing and recombination of DTU tool output (NetNGlyc, NetPhos), including
 per-mutation prediction filtering. Consumers: netNglyc and netphos.
 
 Split out of utility.py, which had grown to 92 symbols. utility.py re-exports
-every name here lazily, so existing `from ...utility import X` callers are
-unaffected.
+every name here with a plain eager import, so existing
+`from ...utility import X` callers are unaffected.
 """
 
 import csv

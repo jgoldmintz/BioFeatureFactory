@@ -1,273 +1,73 @@
 # Codon Usage Pipeline
 
-## Overview
+Per-mutation codon and codon-pair usage metrics (RSCU, W, CAI, tAI, RSCPU, CPS) for the mutated codon and its 5'/3' bicodons.
 
-This pipeline computes codon and codon-pair usage statistics, quantifying translational efficiency through codon optimality metrics.
+## Requirements
 
----
-
-## Metrics Computed
-
-### Single Codon Metrics
-
-| Metric | Full Name | Description | Range |
-|--------|-----------|-------------|-------|
-| **RSCU** | Relative Synonymous Codon Usage | Observed frequency / expected frequency for synonymous codons | 0 to ~6 |
-| **W** | Relative Adaptiveness | Codon frequency relative to most frequent synonymous codon (gene-specific) | 0 to 1 |
-| **CAI_W** | CAI Reference W | Reference W value from human highly expressed genes | 0 to 1 |
-| **tAI** | tRNA Adaptation Index | tRNA availability weight based on gene copy numbers | 0 to 1 |
-
-### Gene-Level Metrics
-
-| Metric | Full Name | Description | Range |
-|--------|-----------|-------------|-------|
-| **CAI_gene** | Codon Adaptation Index | Geometric mean of CAI_W values across gene | 0 to 1 |
-| **tAI_gene** | tRNA Adaptation Index | Geometric mean of tAI weights across gene | 0 to 1 |
-
-### Codon Pair Metrics
-
-| Metric | Full Name | Description | Range |
-|--------|-----------|-------------|-------|
-| **RSCPU** | Relative Synonymous Codon Pair Usage | Observed pair frequency / expected | 0 to ~10 |
-| **CPS** | Codon Pair Score | ln(observed/expected) for codon pairs | $-\infty$ to $+\infty$ |
-| **noln CPS** | Non-log CPS | observed/expected ratio (no logarithm) | 0 to $+\infty$ |
-| **W_CP** | Relative Adaptiveness (Pair) | Pair frequency relative to most frequent pair | 0 to 1 |
-
----
-
-## Biological Background
-
-### Codon Usage Bias
-
-Synonymous codons are not used equally. Highly expressed genes preferentially use "optimal" codons that:
-- Match abundant tRNAs
-- Enable faster translation elongation
-- Reduce ribosome stalling
-
-### Codon Pair Bias
-
-Adjacent codon pairs also show non-random usage patterns:
-- Some pairs are favored (CPS > 0)
-- Some pairs are avoided (CPS < 0)
-- Pair bias affects translation efficiency and co-translational folding
-
----
-
-## Workflow
-
-1. **Load ORF Sequence**
-   Read nucleotide sequence from FASTA file.
-
-2. **Compute Reference Statistics**
-   Calculate genome-wide codon and codon-pair frequencies.
-
-3. **Process Each Mutation**
-   For each mutation:
-   - Identify the mutated codon
-   - Extract flanking codons (bicodons)
-   - Look up usage metrics
-
-4. **Output Results**
-   Write TSV with per-mutation codon usage statistics.
-
----
-
-## Output Format
-
-### Output Structure
-
-Output is written to:
-
-```
-{output}/
-  {GENE}/
-    CodonUsage/
-      {GENE}.codon_usage.tsv
-```
-
-### Main Output (`{GENE}.codon_usage.tsv`)
-
-| Column | Description |
-|--------|-------------|
-| `pkey` | Unique identifier (`GENE-mutation`) |
-| `Gene` | Gene symbol |
-| `codon_number` | Codon position in ORF (1-based) |
-| `codon` | Mutated codon sequence |
-| `position_in_codon` | Position of SNV within codon (1-3) |
-| `RSCU` | Relative synonymous codon usage |
-| `W` | Relative adaptiveness (gene-specific) |
-| `CAI_W` | CAI reference W (human highly expressed) |
-| `tAI` | tRNA adaptation weight for codon |
-| `CAI_gene` | CAI for entire gene |
-| `tAI_gene` | tAI for entire gene |
-| `bicodon_3prime` | 3' bicodon (this codon + next) |
-| `RSCPU_3prime` | RSCPU for 3' bicodon |
-| `CPS_3prime` | Codon pair score for 3' bicodon |
-| `noln_CPS_3prime` | Non-log CPS for 3' bicodon |
-| `W_CP_3prime` | Relative adaptiveness for 3' pair |
-| `bicodon_5prime` | 5' bicodon (previous codon + this) |
-| `RSCPU_5prime` | RSCPU for 5' bicodon |
-| `CPS_5prime` | Codon pair score for 5' bicodon |
-| `noln_CPS_5prime` | Non-log CPS for 5' bicodon |
-| `W_CP_5prime` | Relative adaptiveness for 5' pair |
-| `bicodon_context` | Position context |
-| `qc_flags` | Quality flags |
-
----
+| Component | Notes |
+|-----------|-------|
+| Python >= 3.9 | Uses `biofeaturefactory/lib/`. No external tool binary required. |
+| ORF FASTA | Nucleotide ORF per gene. |
+| Mutations CSV | Nucleotide mutation tokens. Optional; omit to score the ORF only. |
 
 ## Usage
 
-### Single File Processing
 ```bash
-python codon_usage_pipeline.py \
-    --fasta /path/to/BRCA1.fasta \
-    --mutations /path/to/BRCA1_mutations.csv \
-    --output results/
-# Writes: results/BRCA1/CodonUsage/BRCA1.codon_usage.tsv
+# Directory mode (one subdirectory per gene)
+python codon_usage_pipeline.py -f /path/to/fastas/ -m /path/to/mutations/ -o results/
+
+# Single file
+python codon_usage_pipeline.py -f BRCA1.fasta -m BRCA1_mutations.csv -o results/
 ```
 
-### Directory Processing
-```bash
-python codon_usage_pipeline.py \
-    --fasta /path/to/fastas/ \
-    --mutations /path/to/mutations/ \
-    --output results/
-# Writes per gene: results/{GENE}/CodonUsage/{GENE}.codon_usage.tsv
+## Arguments
+
+| Flag | Required | Description |
+|------|----------|-------------|
+| `-f, --fasta` | Yes | FASTA file or directory of FASTA files |
+| `-m, --mutations` | No | Mutations CSV file or directory of CSV files |
+| `-vl, --validation-log` | No | Validation log for filtering failed mutations |
+| `-o, --output` | Yes | Output base directory |
+
+## Output
+
+```
+{output}/{GENE}/CodonUsage/{GENE}.codon_usage.tsv
 ```
 
-### Arguments
+| Column | Description |
+|--------|-------------|
+| `pkey` | `GENE-mutation` |
+| `Gene` | Gene symbol |
+| `codon_number` | Codon position in ORF (1-based) |
+| `codon` | Mutated codon |
+| `position_in_codon` | Position of the change within the codon (1-3) |
+| `RSCU` | Relative synonymous codon usage |
+| `W` | Relative adaptiveness (gene-specific) |
+| `CAI_W` | CAI reference W |
+| `tAI` | tRNA adaptation weight for the codon |
+| `CAI_gene`, `tAI_gene` | Gene-level geometric means |
+| `bicodon_3prime` | This codon + next |
+| `RSCPU_3prime`, `CPS_3prime`, `noln_CPS_3prime`, `W_CP_3prime` | 3' bicodon metrics |
+| `bicodon_5prime` | Previous codon + this codon |
+| `RSCPU_5prime`, `CPS_5prime`, `noln_CPS_5prime`, `W_CP_5prime` | 5' bicodon metrics |
+| `bicodon_context` | `first_codon_3prime_only`, `last_codon_5prime_only`, `middle_codon_both_directions`, `insufficient_sequence` |
+| `qc_flags` | See below |
 
-| Argument | Required | Description |
-|----------|----------|-------------|
-| `--fasta` | Yes | FASTA file or directory of FASTA files |
-| `--mutations` | No | Mutations CSV file or directory of CSV files |
-| `--validation-log` | No | Validation log for filtering failed mutations |
-| `--output, -o` | Yes | Output base directory |
+Bicodon metrics are `null` when the pair is absent from the reference distribution; the row is flagged rather than filled with a placeholder.
 
----
-
-## Metric Calculations
-
-### RSCU (Relative Synonymous Codon Usage)
-
-$RSCU_i = \dfrac{X_i} {\frac{1}{n} \sum_{j=1}^{n} X_j}$
-
-Where:
-- $X_i$ = observed count of codon $i$
-- $n$ = number of synonymous codons for that amino acid
-
-**Interpretation**:
-- RSCU = 1.0: Used at expected frequency
-- RSCU > 1.0: Overrepresented (preferred)
-- RSCU < 1.0: Underrepresented (avoided)
-
-### W (Relative Adaptiveness)
-
-$W_i = \dfrac{X_i}{max(X_j)}$
-
-Where $\max(X_j)$ is the count of the most frequent synonymous codon.
-
-**Interpretation**:
-- W = 1.0: Most optimal codon for that amino acid
-- W < 1.0: Less optimal (proportional to usage)
-
-### CAI (Codon Adaptation Index)
-
-$CAI = e^{\frac{1}{L}} \sum_{i=1}^{L} \ln(W_i)$
-
-Where:
-- $L$ = number of codons (excluding stops)
-- $W_i$ = reference W value for codon $i$ (from highly expressed genes)
-
-**Interpretation**:
-- CAI $\approx 1.0$: Gene uses optimal codons (highly expressed gene pattern)
-- CAI < 0.5: Gene uses suboptimal codons
-- Reference W values derived from human highly expressed genes (Sharp & Li 1987)
-
-### tAI (tRNA Adaptation Index)
-
-$tAI = e^{\frac{1}{L}} \sum_{i=1}^{L} \ln(w_i)$
-
-Where:
-- $L$ = number of codons
-- $w_i$ = tRNA adaptation weight for codon $i$ based on tRNA gene copy numbers
-
-**Interpretation**:
-- tAI $\approx 1.0$: Codons match abundant tRNAs (fast translation)
-- Low tAI: Codons require rare tRNAs (slow translation)
-- Weights from dos Reis et al. 2004, Tuller et al. 2010
-
-### CPS (Codon Pair Score)
-
-$CPS_{ij} = \ln(\frac{f_{ij}}{f_i \cdot f_j})$
-
-Where:
-- $f_{ij}$ = observed frequency of codon pair
-- $f_i, f_j$ = individual codon frequencies
-
-**Interpretation**:
-- CPS > 0: Pair is favored (occurs more than expected)
-- CPS = 0: Pair occurs at expected frequency
-- CPS < 0: Pair is avoided (occurs less than expected)
-
----
-
-## Bicodon Context
-
-The `bicodon_context` field indicates what codon pairs are available:
-
-| Context | Description |
-|---------|-------------|
-| `first_codon_3prime_only` | Mutation in first codon (no 5' neighbor) |
-| `last_codon_5prime_only` | Mutation in last codon (no 3' neighbor) |
-| `middle_codon_both_directions` | Both 5' and 3' bicodons available |
-| `insufficient_sequence` | Cannot extract bicodons (flagged) |
-
----
-
-## QC Flags
+## QC flags
 
 | Flag | Meaning |
 |------|---------|
-| `PASS` | All metrics computed successfully |
-| `NO_BICODON` | Could not extract codon pairs |
-
----
-
-## Reference Data
-
-Codon usage statistics are calculated from:
-- Human coding sequences (CDS) from RefSeq/Ensembl
-- Weighted by expression levels (optional)
-- Excludes first/last codons and rare genes
-
-### Default Reference: Human Genome
-- ~20,000 protein-coding genes
-- ~40 million codons
-- Standard genetic code
-
----
-
-## Limitations
-
-1. **Reference-dependent**: Metrics depend on reference codon usage table
-2. **Context-limited**: Does not consider mRNA structure
-3. **Single codon focus**: Analyzes one mutation at a time
-4. **Species-specific**: Human codon usage may not apply to other organisms
-
----
-
-## References
-
-- Sharp PM, Li WH (1987) The codon adaptation index. **Nucleic Acids Res**, 15:1281-1295.
-- dos Reis M, Savva R, Wernisch L (2004) Solving the riddle of codon usage preferences: a test for translational selection. **Nucleic Acids Res**, 32:5036-5044.
-- Tuller T, et al. (2010) An evolutionarily conserved mechanism for controlling the efficiency of protein translation. **Cell**, 141:344-354.
-- Plotkin JB, Kudla G (2011) Synonymous but not the same. **Nat Rev Genet**, 12:32-42.
-- Coleman JR, et al. (2008) Virus attenuation by genome-scale changes in codon pair bias. **Science**, 320:1784-1787.
-- Quax TE, et al. (2015) Codon bias as a means to fine-tune gene expression. **Mol Cell**, 59:149-161.
-
----
+| `PASS` | All metrics computed |
+| `NO_BICODON` | Could not extract a codon pair |
+| `NO_WT_CODON` | WT codon could not be resolved |
+| `BICODON_NOT_IN_REFERENCE:<which>` | Named bicodon(s) absent from the reference distribution; those columns are null |
+| `CODON_INSERTED` / `CODON_DELETED` | In-frame indel changed the codon count |
+| `INDEL_NOT_CODON_ALIGNED:<n>` | Indel length not a multiple of 3 |
+| `REF_SPANS_PAST_ORF` | Reference allele extends beyond the ORF |
 
 ## License
 
-This project is licensed under the AGPL-3.0 License - see the [LICENSE](../../LICENSE) file in the root BioFeatureFactory directory for details.
+AGPL-3.0 - see [LICENSE](../../LICENSE) in the repository root.

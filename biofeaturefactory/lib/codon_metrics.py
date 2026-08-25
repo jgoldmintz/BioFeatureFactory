@@ -22,8 +22,8 @@ Codon-level translational-efficiency metrics: codon counts, CAI, tAI and
 bicodon context. Consumers: codon_usage and rare_codon.
 
 Split out of utility.py, which had grown to 92 symbols. utility.py re-exports
-every name here lazily, so existing `from ...utility import X` callers are
-unaffected.
+every name here with a plain eager import, so existing
+`from ...utility import X` callers are unaffected.
 """
 
 import csv
@@ -291,7 +291,7 @@ def extract_codon_with_bicodons(ntposnt, seq):
     # F46: apply the ALT base before slicing. Previously `mut` was bound and never
     # used, so every codon/bicodon (and every RSCU/W/CAI/tAI derived from them) was
     # sliced from the unmodified WT ORF while the caller labeled it 'mutated_codon'
-    # — the mutation was invisible on the only CLI-reachable path. Only the mutated
+    # -- the mutation was invisible on the only CLI-reachable path. Only the mutated
     # codon changes; neighbouring codons in the bicodons stay WT, which is correct.
     if pos_0_indexed < 0 or pos_0_indexed >= len(seq):
         return None, "", "", 0, 0, 0
@@ -299,8 +299,8 @@ def extract_codon_with_bicodons(ntposnt, seq):
     # F46 REF GUARD: splicing ALT onto a base that is not REF invents a codon present
     # in NEITHER the WT nor the true mutant sequence. Measured on the production corpus
     # (59 genes / 35,089 tokens vs Bio_DBs/fastas ORF records): 1,537 tokens (4.38%)
-    # have a REF that disagrees with the ORF base — concentrated in MECP2 295/423,
-    # NOD2 271/387, FGFR2 215/290, MPZ 195/270 — i.e. an ORF/isoform mismatch, not noise.
+    # have a REF that disagrees with the ORF base -- concentrated in MECP2 295/423,
+    # NOD2 271/387, FGFR2 215/290, MPZ 195/270 -- i.e. an ORF/isoform mismatch, not noise.
     # Reject rather than fabricate; the caller turns None into a skipped row.
     if ref_nt and seq[pos_0_indexed].upper() != ref_nt.upper():
         return None, "", "", 0, 0, 0

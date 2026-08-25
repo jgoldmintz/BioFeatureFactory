@@ -25,19 +25,19 @@ class TestGetCodonCountsBasicCounting:
         assert cd["counts"]["ATG"] == 1
 
     def test_repeated_codon_counted(self):
-        """ATGATG → ATG appears twice."""
+        """ATGATG -> ATG appears twice."""
         cd, _ = get_codon_counts("ATGATG")
         assert cd["counts"]["ATG"] == 2
 
     def test_multiple_distinct_codons(self):
-        """ATGAAAGAA → ATG=1, AAA=1, GAA=1."""
+        """ATGAAAGAA -> ATG=1, AAA=1, GAA=1."""
         cd, _ = get_codon_counts("ATGAAAGAA")
         assert cd["counts"]["ATG"] == 1
         assert cd["counts"]["AAA"] == 1
         assert cd["counts"]["GAA"] == 1
 
     def test_trailing_nucleotides_ignored(self):
-        """ATGA → only ATG counted, trailing A ignored."""
+        """ATGA -> only ATG counted, trailing A ignored."""
         cd, _ = get_codon_counts("ATGA")
         assert cd["counts"]["ATG"] == 1
         total = sum(cd["counts"].values())
@@ -64,7 +64,7 @@ class TestGetCodonCountsRSCU:
         assert cd["RSCU"]["TTC"] == pytest.approx(0.0)
 
     def test_rscu_equal_usage(self):
-        """Equal usage of synonymous codons → RSCU = 1.0 for each."""
+        """Equal usage of synonymous codons -> RSCU = 1.0 for each."""
         cd, _ = get_codon_counts("TTTTTC")
         assert cd["RSCU"]["TTT"] == pytest.approx(1.0)
         assert cd["RSCU"]["TTC"] == pytest.approx(1.0)
@@ -83,7 +83,7 @@ class TestGetCodonCountsRSCU:
         """When an amino acid has no codons used, RSCU for those codons = 0.0 (not error)."""
         # Only use ATG (Met), no Phe codons used at all
         cd, _ = get_codon_counts("ATG")
-        # numsyn for Phe = 0, numsyn/len = 0/2 = 0 → ZeroDivisionError → NaN
+        # numsyn for Phe = 0, numsyn/len = 0/2 = 0 -> ZeroDivisionError -> NaN
         assert np.isnan(cd["RSCU"]["TTT"]) or cd["RSCU"]["TTT"] == pytest.approx(0.0)
 
 
@@ -107,7 +107,7 @@ class TestGetCodonCountsW:
         assert np.isnan(cd["W"]["TAA"])
 
     def test_w_equal_usage_both_one(self):
-        """Equal usage → both W = 1.0."""
+        """Equal usage -> both W = 1.0."""
         cd, _ = get_codon_counts("TTTTTC")
         assert cd["W"]["TTT"] == pytest.approx(1.0)
         assert cd["W"]["TTC"] == pytest.approx(1.0)
@@ -116,18 +116,18 @@ class TestGetCodonCountsW:
 class TestGetCodonCountsBicodonCounting:
 
     def test_bicodon_pair_counted(self):
-        """ATGAAA → bicodon ATGAAA counted once."""
+        """ATGAAA -> bicodon ATGAAA counted once."""
         _, cpd = get_codon_counts("ATGAAA")
         assert cpd["counts"]["ATGAAA"] == 1
 
     def test_two_bicodon_pairs(self):
-        """ATGAAAGAA → bicodons ATGAAA and AAAGAA each counted once."""
+        """ATGAAAGAA -> bicodons ATGAAA and AAAGAA each counted once."""
         _, cpd = get_codon_counts("ATGAAAGAA")
         assert cpd["counts"]["ATGAAA"] == 1
         assert cpd["counts"]["AAAGAA"] == 1
 
     def test_single_codon_no_bicodon(self):
-        """ATG alone → no bicodon."""
+        """ATG alone -> no bicodon."""
         _, cpd = get_codon_counts("ATG")
         total = sum(cpd["counts"].values())
         assert total == 0
@@ -136,12 +136,12 @@ class TestGetCodonCountsBicodonCounting:
 class TestGetCodonCountsRSCPU:
 
     def test_rscpu_stop_codon_pair_is_nan(self):
-        """Bicodon involving stop codon → RSCPU = NaN."""
+        """Bicodon involving stop codon -> RSCPU = NaN."""
         _, cpd = get_codon_counts("ATGTAA")
         assert np.isnan(cpd["RSCPU"]["ATGTAA"])
 
     def test_rscpu_single_pair_used(self):
-        """Single codon pair used once → RSCPU computed."""
+        """Single codon pair used once -> RSCPU computed."""
         _, cpd = get_codon_counts("ATGAAA")
         # Both ATG (Met, 1 synonym) and AAA (Lys, 2 synonyms)
         # Total syn pairs = 1 * 2 = 2, only ATGAAA used
@@ -163,7 +163,7 @@ class TestGetCodonCountsCPS:
     def test_cps_nan_when_codon_not_used(self):
         """CPS = NaN when one codon in the pair has zero count (expected=0)."""
         _, cpd = get_codon_counts("ATGAAA")
-        # ATGTTC: ATG count=1 but TTC count=0 → expected=0 → ZeroDivisionError → NaN
+        # ATGTTC: ATG count=1 but TTC count=0 -> expected=0 -> ZeroDivisionError -> NaN
         # But ATGTTC wasn't observed either, so count=0
         # Actually this bicodon isn't used so it won't appear in CPS unless it's a stop
         # Let's check a pair where one codon is unused
@@ -228,4 +228,4 @@ class TestGetCodonCountsReturnStructure:
         total_codons = sum(cd["counts"].values())
         assert total_codons == 8
         total_bicodons = sum(cpd["counts"].values())
-        assert total_bicodons == 7  # 8 codons → 7 pairs
+        assert total_bicodons == 7  # 8 codons -> 7 pairs

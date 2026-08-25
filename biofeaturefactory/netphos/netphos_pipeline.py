@@ -253,7 +253,7 @@ def _run_native_netphos(fasta_file, output_file, timeout=300, ape_bin=None):
 
 
 def process_netphos_batched(fasta_file, output_file, batch_size=100, timeout=300, executor_fn=None, ape_bin=None):
-    """Process large FASTA files in batches (APE caps at ~2000 seqs/run — see
+    """Process large FASTA files in batches (APE caps at ~2000 seqs/run -- see
     software/ape-1.0/ape 'maxn').
 
     Returns (ok, complete):
@@ -262,7 +262,7 @@ def process_netphos_batched(fasta_file, output_file, batch_size=100, timeout=300
 
     Each successful batch's output is content-cached, so a rerun reuses the good
     batches (APE skipped) and re-runs only the failed batch(es). Mutants in failed
-    batches are written to <output_file>.dropped and printed — a partial run is
+    batches are written to <output_file>.dropped and printed -- a partial run is
     never reported as a silent success.
     """
     if executor_fn is None:
@@ -319,7 +319,7 @@ def process_netphos_batched(fasta_file, output_file, batch_size=100, timeout=300
             except Exception:
                 drop_path = '(unwritten)'
             print(f"WARNING: {len(dropped)} mutant(s) DROPPED from {len(failed_batches)} "
-                  f"failed batch(es); listed in {drop_path}. Re-run to retry — successful "
+                  f"failed batch(es); listed in {drop_path}. Re-run to retry -- successful "
                   f"batches are cached, so only the failed batch(es) re-run.")
 
         complete = not failed_batches
@@ -511,7 +511,7 @@ def run_netphos_with_fasta(fasta_file, output_file, batch_size=None, timeout=300
         print(f"Using batch processing (batch_size: {batch_size})...")
         ok, complete = process_netphos_batched(fasta_file, output_file, batch_size, timeout,
                                                executor_fn=executor_fn, ape_bin=ape_bin)
-        # Cache the whole-gene result only when COMPLETE — never cache a partial
+        # Cache the whole-gene result only when COMPLETE -- never cache a partial
         # (dropped-batch) output, or reruns would serve the incomplete result.
         if ok and complete and use_cache:
             seq_count = count_fasta_sequences(fasta_file)

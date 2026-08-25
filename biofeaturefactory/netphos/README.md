@@ -1,141 +1,134 @@
- # NetPhos Pipeline
+# NetPhos Pipeline
 
-  High-throughput kinase-site prediction for WT and mutant protein FASTAs using NetPhos 3.1/APE.
+Kinase phosphorylation-site prediction for WT and mutant protein sequences using NetPhos 3.1 / APE.
 
-  ## 1. Prerequisites
+## Requirements
 
-  | Component | Notes |
-  |-----------|-------|
-  | NetPhos 3.1 + APE | Download from [DTU Health Tech](https://services.healthtech.dtu.dk/services/NetPhos-3.1/) (academic license). Requires `tcsh`. Set path via `--native-ape-path` or `NETPHOS_APE_PATH`/`NETPHOS_HOME` env var. |
-  | Python $\geq$ 3.9 | With dependencies in `../utils/`. |
-  | Mutation mapping CSVs | `{GENE}`-specific CSVs used for pkey generation (`mutations/combined/aa/` style). |
-  | FASTA inputs | WT and/or mutant AA FASTAs, one gene per file. Extensions: `.fasta`, `.fa`, `.fas`, `.fna`. |
+| Component | Notes |
+|-----------|-------|
+| NetPhos 3.1 + APE | [DTU Health Tech](https://services.healthtech.dtu.dk/services/NetPhos-3.1/), academic license. Requires `tcsh`. Point at it with `-nap/--native-ape-path`, or set `NETPHOS_APE_PATH`, `NETPHOS_HOME`, or `NETNGLYC_HOME` (searched in that order). |
+| Python >= 3.9 | Uses `biofeaturefactory/lib/`. |
+| Input FASTAs | WT ORF FASTAs (`.fasta`, `.fa`, `.fas`, `.fna`). |
+| Mapping CSVs | Per-gene mutation CSVs matched as `*{GENE}*.csv`, case-insensitive. |
 
-  ## 2. Required Inputs
+## Usage
 
-  | Path / Flag | Description |
-  |-------------|-------------|
-  | `--mapping-dir` | Directory containing mutation CSVs named like `*{GENE}*.csv` (case-insensitive). |
-  | `INPUT` arg | FASTA file/dir. |
-  | `OUTPUT` arg | Output directory for TSV results. |
-  | Optional logs | `--log` validation log to skip failed mutations in mutant mode. |
-
-  ## 3. Quick Start Recipes
-
-  ```bash
-  # Full pipeline, WT sequences (auto-detect native or Docker)
-  python3 netphos_pipeline.py \
-      --mapping-dir mutations/combined/aa/ \
-      wt/aaseq/ \
-      results/
-  # Writes per gene: results/{GENE}/NetPhos/{GENE}.{tsv,events.tsv,sites.tsv}
-```
 ```bash
-  # Mutant run with validation filtering
-  python3 netphos_pipeline.py \
-      --log validation.log \
-      --mapping-dir mutations/combined/aa/ \
-      mut/aaseq/ \
-      results/
-  # Writes per gene: results/{GENE}/NetPhos/{GENE}.{tsv,events.tsv,sites.tsv}
+# Directory mode: variant_mapping output root
+python netphos_pipeline.py -i out/ -o results/
+
+# Flat directory or single FASTA + explicit mapping directory
+python netphos_pipeline.py -i wt/aaseq/ -o results/ -md mutations/aa/ -l validation.log
 ```
-  ## 4. Execution Backend Controls
 
-  | Option | Purpose |
-  |--------|---------|
-  | `--native-ape-path /opt/netphos/ape-1.0/ape` | Explicit binary path. |
-  | Env vars | `NETPHOS_APE_PATH`, `NETPHOS_HOME`, and `NETNGLYC_HOME` influence detection (searched in that order). |
+In directory mode `-i` is the `variant_mapping` output root (`<root>/<GENE>/fastas/` and
+`<root>/<GENE>/mappings/`); the gene is taken from the directory name. A flat directory of
+FASTAs or a single FASTA also works, in which case supply `-md`.
+`input` and `output` are also accepted positionally.
 
-  ## 5. Processing Controls
+## Arguments
 
-  - `--batch-size N` and `--timeout SEC` -- tune long FASTA runs. Batch strategy is chosen automatically by sequence count: 1 seq $\rightarrow$ single run; 2-10 $\rightarrow$ batch of 10; 11-100 $\rightarrow$ batch of 25; >100 $\rightarrow$ batch of 50.
-  - `--threshold FLOAT` -- filter by score (default: 0.5). Sites with score below threshold are excluded.
-  - `--yes-only` -- sets `--threshold` to 0.0 (disables score filtering entirely); does not filter for YES-answered predictions.
-  - `--no-cache` / `--clear-cache` -- manage `~/.netphos_cache`.
-  - `--wt-header HEADER` -- FASTA header used to identify the WT sequence (default: `ORF`).
-  - `--keep-intermediates` -- retain intermediate files for debugging.
-  - `--verbose` -- enable verbose output.
+| Flag | Default | Description |
+|------|---------|-------------|
+| `-i, --input` | -- | variant_mapping output root, flat FASTA directory, or single FASTA |
+| `-o, --output` | -- | Output base directory |
+| `-md, --mapping-dir` | -- | Mutation mapping directory or single CSV |
+| `-l, --log` | -- | Validation log file or directory; skips failed mutations |
+| `-t, --threshold` | `0.5` | Minimum score for a site to count |
+| `-yo, --yes-only` | off | Redefine a site as a NetPhos `YES` answer instead of `score >= --threshold`. It does NOT zero the threshold |
+| `-wh, --wt-header` | `ORF` | FASTA header identifying the WT sequence |
+| `-bs, --batch-size` | auto | Sequences per APE run. Given explicitly, it bypasses the tiering below |
+| `-ti, --timeout` | `300` | Command timeout in seconds |
+| `-nc, --no-cache` | off | Disable result caching (`~/.netphos_cache`) |
+| `-cc, --clear-cache` | off | Clear the cache and exit |
+| `-nap, --native-ape-path` | -- | Explicit path to the APE binary |
+| `-v, --verbose` | off | Verbose output |
 
-  ## 6. Outputs
+### Automatic batching
 
-  The pipeline produces three TSV files per gene.
+With `-bs` omitted, batch size is chosen from the sequence count:
 
-  Output structure:
-  ```
-  {output}/
-    {GENE}/
-      NetPhos/
-        {GENE}.tsv          -- per-mutation summary
-        {GENE}.events.tsv   -- per-site, per-kinase events
-        {GENE}.sites.tsv    -- raw WT and MUT predictions
-  ```
+| Sequences | Behaviour |
+|-----------|-----------|
+| 1 | Single APE run |
+| 2-10 | Single run first; on failure, retry at batch size **1** |
+| 11-100 | Batch size 25 |
+| > 100 | Batch size 50 |
 
-  ### 6.1 Summary TSV (`{GENE}.tsv`)
+The 2-10 fallback is 1, not 10, deliberately: on the native APE install a single
+sequence predicts, while 2, 3 and 6 all segfault every kinase and emit nothing.
+One sequence per invocation is the only configuration observed to work. APE itself
+caps at roughly 2000 sequences per run.
 
-  Per-mutation summary with phosphorylation site changes.
+Each successful batch is content-cached, so a rerun re-runs only the failed
+batches. Mutants in a failed batch are written to `<output>.dropped` and printed --
+a partial run is never reported as a success.
 
-  | Column | Description | Units |
-  |--------|-------------|-------|
-  | `pkey` | `{GENE}-{MUTATION}` primary key | string |
-  | `Gene` | Gene symbol | string |
-  | `n_sites_wt`, `n_sites_mut` | Count of sites with score $\geq$ `--threshold` | count |
-  | `count_gained`, `count_lost`, `count_strengthened`, `count_weakened`, `count_stable` | Classification tallies | count |
-  | `max_abs_delta`, `sum_abs_delta` | Maximum and sum of absolute score changes | probability (0-1) |
-  | `n_kinases_affected` | Number of kinases with any event | count |
-  | `top_event_type` | Dominant event (`gained`, `lost`, etc.) | categorical |
-  | `top_event_delta` | $\Delta$ score for dominant event | probability (0-1) |
-  | `top_event_position` | Amino-acid index of dominant event | residue index |
-  | `top_event_kinase` | Kinase for dominant event | string |
-  | `top_event_classification_code` | Numeric encoding of dominant event | integer |
-  | `qc_flags` | Quality control flags | string |
+## Output
 
-  ### 6.2 Events TSV (`{GENE}.events.tsv`)
+```
+{output}/{GENE}/NetPhos/
+    {GENE}.tsv          -- per-mutation summary
+    {GENE}.events.tsv   -- per-site, per-kinase events
+    {GENE}.sites.tsv    -- raw WT and MUT predictions
+```
 
-  Per-mutation, per-site, per-kinase events.
+### `{GENE}.tsv`
 
-  | Column | Description | Units |
-  |--------|-------------|-------|
-  | `pkey` | `{GENE}-{MUTATION}` primary key | string |
-  | `Gene` | Gene symbol | string |
-  | `position` | 1-based amino-acid position | residue index |
-  | `amino_acid_wt`, `amino_acid_mut` | WT and MUT residues | single-letter |
-  | `kinase` | Kinase motif classifier | string |
-  | `wt_score`, `mut_score` | NetPhos phosphorylation propensity | probability (0-1) |
-  | `delta` | $\Delta$ score ($\text{MUT} - \text{WT}$) | probability (0-1) |
-  | `wt_answer`, `mut_answer` | NetPhos YES/NO flag | categorical |
-  | `classification` | gained/lost/strengthened/weakened/stable/subthreshold | categorical |
-  | `classification_code` | Numeric encoding (gained=2, lost=-2, strengthened=1, weakened=-1, stable=0, subthreshold=-3) | integer |
+| Column | Description |
+|--------|-------------|
+| `pkey` | `GENE-mutation` |
+| `Gene` | Gene symbol |
+| `n_sites_wt`, `n_sites_mut` | Sites at or above `--threshold` |
+| `count_gained`, `count_lost`, `count_strengthened`, `count_weakened`, `count_stable` | Classification tallies |
+| `max_abs_delta`, `sum_abs_delta` | Max and sum of absolute score changes |
+| `n_kinases_affected` | Kinases with any event |
+| `top_event_type` | Dominant event label |
+| `top_event_delta` | Score change for the dominant event |
+| `top_event_position` | Residue index of the dominant event |
+| `top_event_kinase` | Kinase for the dominant event |
+| `top_event_classification_code` | Numeric encoding of the dominant event |
+| `qc_flags` | Quality control flags |
 
-  ### 6.3 Sites TSV (`{GENE}.sites.tsv`)
+### `{GENE}.events.tsv`
 
-  Raw WT and MUT predictions for all residues.
+| Column | Description |
+|--------|-------------|
+| `pkey`, `Gene` | Identifiers |
+| `position` | 1-based residue position |
+| `amino_acid_wt`, `amino_acid_mut` | WT and MUT residues |
+| `kinase` | Kinase motif classifier |
+| `wt_score`, `mut_score`, `delta` | NetPhos scores and MUT - WT |
+| `wt_answer`, `mut_answer` | NetPhos YES/NO flag |
+| `classification` | gained / lost / strengthened / weakened / stable / subthreshold |
+| `classification_code` | gained=2, lost=-2, strengthened=1, weakened=-1, stable=0, subthreshold=-3 |
 
-  | Column | Description | Units / Format |
-  |--------|-------------|----------------|
-  | `pkey` | `{GENE}-{MUTATION}` primary key | string |
-  | `Gene` | Gene symbol | string |
-  | `allele` | Sequence label (wt or mutant ID) | string |
-  | `seq_name` | Full sequence name from NetPhos output | string |
-  | `position` | 1-based amino-acid position | amino-acid index |
-  | `amino_acid` | Residue at position (S/T/Y) | single-letter code |
-  | `context` | Flanking peptide window reported by NetPhos | string |
-  | `score` | NetPhos phosphorylation propensity | probability (0-1) |
-  | `kinase` | Kinase motif classifier (e.g., CKII, cdc2, unsp) | string |
-  | `answer` | NetPhos YES/NO confidence flag | categorical |
+### `{GENE}.sites.tsv`
 
-  Classification codes and $|\Delta|$ threshold: sites are **gained** if score crosses `--threshold` only in MUT, **lost** if the reverse, and **strengthened/weakened** when both are above threshold but $|\Delta| > 0.05$.
+| Column | Description |
+|--------|-------------|
+| `pkey`, `Gene` | Identifiers |
+| `allele` | Sequence label (wt or mutant ID) |
+| `seq_name` | Sequence name from NetPhos output |
+| `position` | 1-based residue position |
+| `amino_acid` | Residue (S/T/Y) |
+| `context` | Flanking peptide window |
+| `score` | NetPhos score |
+| `kinase` | Kinase motif classifier (CKII, cdc2, unsp, ...) |
+| `answer` | NetPhos YES/NO flag |
 
-  ## 7. Troubleshooting
+Classification: a site is **gained** if it crosses `--threshold` only in MUT, **lost** if only in WT,
+and **strengthened**/**weakened** when both are above threshold and `|delta| > 0.05`.
 
-  | Symptom | Resolution |
-  |---------|------------|
-  | tcsh: Command not found | Install tcsh (required by APE). |
-  | "No mapping file found" | Confirm --mapping-dir contains files named like *{GENE}*.csv. |
-  | APE binary not found | Ensure the binary is executable and provide --native-ape-path or set NETPHOS_APE_PATH. |
-  | Cache confusion | Run python3 netphos_pipeline.py --clear-cache. |
+## Troubleshooting
 
----
+| Symptom | Resolution |
+|---------|------------|
+| `tcsh: Command not found` | Install tcsh; APE requires it |
+| `No mapping file found` | `-md` must contain files named `*{GENE}*.csv` |
+| APE binary not found | Make it executable; pass `-nap` or set `NETPHOS_APE_PATH` |
+| Stale results | `python3 netphos_pipeline.py -cc` |
 
 ## License
 
-This project is licensed under the AGPL-3.0 License - see the [LICENSE](../../LICENSE) file in the root BioFeatureFactory directory for details.
+AGPL-3.0 - see [LICENSE](../../LICENSE) in the repository root.

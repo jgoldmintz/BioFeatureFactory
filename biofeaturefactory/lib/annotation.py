@@ -23,8 +23,8 @@ transcript selection, and chromosome-name normalisation. Consumers:
 variant_mapping and vcf_converter.
 
 Split out of utility.py, which had grown to 92 symbols. utility.py re-exports
-every name here lazily, so existing `from ...utility import X` callers are
-unaffected.
+every name here with a plain eager import, so existing
+`from ...utility import X` callers are unaffected.
 """
 
 import csv

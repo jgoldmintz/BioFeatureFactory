@@ -1003,7 +1003,7 @@ def load_mapping(mapping_file: str, mapType: str ='transcript') -> Dict[str, str
 
     mapping = {}
     res = validate_mapping_content(mapping_file)
-    if not res:  # False on a single-column / unreadable file → graceful empty, no unpack crash (F37)
+    if not res:  # False on a single-column / unreadable file -> graceful empty, no unpack crash (F37)
         return mapping
     tval, delim = res
     try:
@@ -1699,12 +1699,12 @@ def load_wt_sequences(input_dir: str, wt_header: str = "transcript") -> Dict[str
         else:
             non_empty = [(h, s) for h, s in data.items() if s and s.strip()]
             if len(non_empty) == 1:
-                # Single record: no ambiguity — use it regardless of header label.
+                # Single record: no ambiguity -- use it regardless of header label.
                 seq = non_empty[0][1].strip()
             elif len(non_empty) > 1:
                 # F39: >1 record and none matches wt_header. The old max-by-length
                 # pick silently seeded WT/MUT from an arbitrary isoform. Refuse to
-                # guess — skip this file loudly so the gene is absent, not wrong.
+                # guess -- skip this file loudly so the gene is absent, not wrong.
                 print(f"[WT][SKIP] {fasta_file.name}: header '{wt_header}' not found among "
                       f"{len(non_empty)} records ({', '.join(h for h, _ in non_empty)}); "
                       f"cannot disambiguate WT isoform. Pass --wt-header to select one. Skipping.")
@@ -2278,7 +2278,7 @@ def synthesize_gene_fastas(wt_sequences, mapping_lookup, sequence_root, log_path
 # 0-9 (10) + '!' '@' (2), plus '-' gap = 65 symbols. Case-sensitive by design
 # ('A' encodes codon AAA, 'a' a different codon), which is why the codon check
 # below runs BEFORE any upper-casing.
-# Symbols that occur ONLY in the codon-encoded alphabet — never in nucleotide
+# Symbols that occur ONLY in the codon-encoded alphabet -- never in nucleotide
 # (ACGTU/IUPAC) or standard protein (20 aa + BXZUO*) sequences. Their presence
 # is an unambiguous codon-encoding signal.
 

@@ -269,8 +269,8 @@ class AF3Parser:
         """Parse AF3 confidence files.
 
         Args:
-            conf_path: Per-atom confidences (_confidences.json) — plddt, pae matrix
-            summary_path: Summary confidences (_summary_confidences.json) — ptm, iptm, chain_pair_pae_min
+            conf_path: Per-atom confidences (_confidences.json) -- plddt, pae matrix
+            summary_path: Summary confidences (_summary_confidences.json) -- ptm, iptm, chain_pair_pae_min
         """
         plddt = []
         pae = []

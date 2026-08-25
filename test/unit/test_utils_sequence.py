@@ -47,22 +47,22 @@ class TestUpdateStr:
 class TestSubseq:
 
     def test_centered_window(self):
-        # pos=4, l=3 → half=1, start=3, end=6
+        # pos=4, l=3 -> half=1, start=3, end=6
         assert subseq("ACGTACGT", 4, 3) == "TAC"
 
     def test_truncates_at_left_boundary(self):
-        # pos=0, l=3 → half=1, start=0, end=2 (clipped)
+        # pos=0, l=3 -> half=1, start=0, end=2 (clipped)
         assert subseq("ACGT", 0, 3) == "AC"
 
     def test_truncates_at_right_boundary(self):
-        # pos=3, l=3 → half=1, start=2, end=4 (len=4, clipped)
+        # pos=3, l=3 -> half=1, start=2, end=4 (len=4, clipped)
         assert subseq("ACGT", 3, 3) == "GT"
 
     def test_window_length_one(self):
         assert subseq("ACGT", 2, 1) == "G"
 
     def test_full_window_returned_when_centered(self):
-        # pos=3, l=3 in seq of length 7 → no clipping
+        # pos=3, l=3 in seq of length 7 -> no clipping
         result = subseq("ACGTACG", 3, 3)
         assert len(result) == 3
 
@@ -181,14 +181,14 @@ class TestInferAamutationFromNt:
     SEQ = "ATGAAAGAATGG"
 
     def test_synonymous_mut_same_aa(self):
-        # codon 2 = AAA (K); 3rd base A6→G gives AAG (still K)
+        # codon 2 = AAA (K); 3rd base A6->G gives AAG (still K)
         result = infer_aamutation_from_nt("A6G", self.SEQ)
         assert result is not None
         aa_pos, wt_aa, mut_aa = result
         assert wt_aa == mut_aa == "K"
 
     def test_missense_mut_changes_aa(self):
-        # codon 2 = AAA (K); 1st base A4→G gives GAA (E)
+        # codon 2 = AAA (K); 1st base A4->G gives GAA (E)
         result = infer_aamutation_from_nt("A4G", self.SEQ)
         assert result is not None
         aa_pos, wt_aa, mut_aa = result

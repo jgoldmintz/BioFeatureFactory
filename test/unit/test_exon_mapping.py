@@ -116,11 +116,11 @@ class TestDeriveOrfFromTranscript:
         # ATGAAATAAATGAAAGAATAA
         transcript = "ATGAAATAAATGAAAGAATAA"
         orf, start = derive_orf_from_transcript("GENE1", transcript, [], {}, False, None)
-        # Longer orf covers more — should prefer longer
+        # Longer orf covers more -- should prefer longer
         assert len(orf) >= 9
 
     def test_orf_covers_mutation_positions(self):
-        # Mutation at position 7 (1-based) — ORF must be long enough
+        # Mutation at position 7 (1-based) -- ORF must be long enough
         transcript = "ATGAAAGAATAA"
         mutation_positions = [7]
         pos_to_mut = {7: ["G7A"]}

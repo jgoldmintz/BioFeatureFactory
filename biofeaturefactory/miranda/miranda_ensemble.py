@@ -210,11 +210,11 @@ def load_transcript_mappings(mapping_dir: str, map_type: str = "transcript") -> 
         files = sorted(f for f in path.rglob("*") if f.is_file() and f.suffix.lower() in (".csv", ".tsv", ".txt"))
     for f in files:
         # F36: rglob("*") + suffix filter admits .csv/.tsv/.txt (was rglob("*.csv"),
-        # which silently dropped .tsv/.txt mappings). F37: no local pre-validation —
+        # which silently dropped .tsv/.txt mappings). F37: no local pre-validation --
         # load_mapping now self-guards and returns {} on an invalid/single-column file,
         # which the `if not mp` skip already handles. (The old try/except was a no-op:
         # validate_mapping_content returns False rather than raising, so it caught
-        # nothing and the ignored False later reached load_mapping's unpack → TypeError.)
+        # nothing and the ignored False later reached load_mapping's unpack -> TypeError.)
         mp = load_mapping(str(f), mapType=map_type)
         if not mp:
             continue
@@ -688,7 +688,7 @@ def parse_miranda_text(miranda_text: str) -> List[Dict]:
             continue
 
         if "Query:" in line:
-            # Alignment display line — extract sequence for query_seq only.
+            # Alignment display line -- extract sequence for query_seq only.
             seg = line.split("Query:", 1)[1].strip()
             if "'" in seg:
                 parts = seg.split("'")
@@ -754,7 +754,7 @@ def parse_miranda_text(miranda_text: str) -> List[Dict]:
                 "site_pos": ref_start,
                 "tot_score": score,
                 "tot_energy": energy,
-                "max_score": score,     # single hit → its own score is its max
+                "max_score": score,     # single hit -> its own score is its max
                 "max_energy": energy,
                 "strand": "",
                 "len_mirna": None,

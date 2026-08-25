@@ -141,7 +141,7 @@ class TestStockholmToA2m:
 
     def test_rf_none_fallback_uses_focus_gaps(self):
         # No RF: match cols = non-gap positions of focus sequence
-        # focus="ACGT" has no gaps → all 4 cols are match → all uppercase
+        # focus="ACGT" has no gaps -> all 4 cols are match -> all uppercase
         msa = {"focus": "ACGT", "other": "AC-T"}
         a2m = stockholm_to_a2m(msa, "focus", rf_annotation=None)
         assert a2m["focus"] == "ACGT"

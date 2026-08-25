@@ -20,7 +20,7 @@ from biofeaturefactory.lib.utility import (
 )
 
 
-# ── Helper factories ──────────────────────────────────────────────────────
+# -- Helper factories ------------------------------------------------------
 
 def _netphos_pred(gene, pos, aa, score=0.9, answer="YES", kinase="PKC"):
     return {
@@ -42,7 +42,7 @@ def _netnglyc_pred(seq_name, position, sequon, potential=0.7):
     }
 
 
-# ── extract_mutation_from_sequence_name ──────────────────────────────────
+# -- extract_mutation_from_sequence_name ----------------------------------
 
 class TestExtractMutationFromSequenceName:
 
@@ -62,7 +62,7 @@ class TestExtractMutationFromSequenceName:
         assert mut == "Y110F"
 
 
-# ── should_skip_mutation ─────────────────────────────────────────────────
+# -- should_skip_mutation -------------------------------------------------
 
 class TestShouldSkipMutation:
 
@@ -81,7 +81,7 @@ class TestShouldSkipMutation:
         assert should_skip_mutation(None, None, {"X": set()}) is False
 
 
-# ── get_mutation_data_bioAccurate ────────────────────────────────────────
+# -- get_mutation_data_bioAccurate ----------------------------------------
 
 class TestGetMutationDataBioAccurate:
 
@@ -100,7 +100,7 @@ class TestGetMutationDataBioAccurate:
         assert pos == 1
 
 
-# ── process_single_mutation_for_sequence (netphos) ───────────────────────
+# -- process_single_mutation_for_sequence (netphos) -----------------------
 
 class TestProcessSingleMutationNetphos:
 
@@ -165,11 +165,11 @@ class TestProcessSingleMutationNetphos:
         assert results == []
 
 
-# ── process_single_mutation_for_sequence (netnglyc) ──────────────────────
+# -- process_single_mutation_for_sequence (netnglyc) ----------------------
 
 class TestProcessSingleMutationNetnglyc:
 
-    # A300G → N100S means target_aa = 'S' (the mutant aa)
+    # A300G -> N100S means target_aa = 'S' (the mutant aa)
     # netnglyc pred_aa = sequon[0], so sequon must start with 'S' to match
     MAPPING = {"A300G": "N100S"}
 
@@ -181,7 +181,7 @@ class TestProcessSingleMutationNetnglyc:
         )
         assert len(results) == 1
         assert results[0]["pkey"] == mint_pkey("GENE1", "A300G")
-        # Field renaming: position → pos, sequon → Sequon
+        # Field renaming: position -> pos, sequon -> Sequon
         assert "pos" in results[0]
         assert "Sequon" in results[0]
         assert "seq_name" not in results[0]
@@ -228,7 +228,7 @@ class TestProcessSingleMutationNetnglyc:
         assert f(mint_pkey("GENE1", "A300G"), preds, self.MAPPING, tool_type="netphos") == []
 
 
-# ── parse_predictions_with_mutation_filtering ────────────────────────────
+# -- parse_predictions_with_mutation_filtering ----------------------------
 
 class TestParsePredictionsMutationFiltering:
 
@@ -293,7 +293,7 @@ class TestParsePredictionsMutationFiltering:
         results = parse_predictions_with_mutation_filtering(
             preds, mapping, is_mutant=True, tool_type="netphos"
         )
-        # Only ZFP36 pos=110 matches; BRCA1 target_aa='A' but pred_aa='V' → no match
+        # Only ZFP36 pos=110 matches; BRCA1 target_aa='A' but pred_aa='V' -> no match
         assert len(results) == 1
 
     def test_failure_map_filters_in_parse(self):
