@@ -63,6 +63,7 @@ set -euo pipefail
 #   --spliceai-env NAME       Name of the dedicated spliceai env (default: bff-spliceai).
 #   --exclude-mmseqs2         Skip conda install of mmseqs2.
 #   --exclude-hmmer           Skip conda install of HMMER (jackhmmer).
+#   --exclude-htslib          Skip conda install of HTSlib (bgzip + tabix).
 #   --exclude-editable-repos  Skip `pip install -e` of cloned python repos (nsp3, adabmDCApy).
 #   --exclude-genesplicer     Skip downloading/building GeneSplicer from JHU source.
 #   --exclude-clone-af3       Skip cloning AlphaFold3.
@@ -91,6 +92,7 @@ INSTALL_MIRANDA=1
 INSTALL_SPLICEAI=1
 INSTALL_MMSEQS2=1
 INSTALL_HMMER=1
+INSTALL_HTSLIB=1
 BUILD_GENESPLICER=1
 INSTALL_NEXTFLOW=1
 CLONE_AF3=1
@@ -224,14 +226,14 @@ done
 # Flag membership per phase. env-phase and git-phase intentionally overlap on the
 # conda installs, Nextflow and the editable installs -- a flag named by EITHER
 # phase is enabled, and its step still runs exactly once.
-PHASE_ENV_FLAGS="PIP_INSTALL INSTALL_MIRANDA INSTALL_SPLICEAI INSTALL_MMSEQS2 INSTALL_HMMER INSTALL_NEXTFLOW INSTALL_EDITABLE_REPOS"
+PHASE_ENV_FLAGS="PIP_INSTALL INSTALL_MIRANDA INSTALL_SPLICEAI INSTALL_MMSEQS2 INSTALL_HMMER INSTALL_HTSLIB INSTALL_NEXTFLOW INSTALL_EDITABLE_REPOS"
 # INSTALL_SPLICEAI is env-phase ONLY. It no longer installs into the active env:
 # it creates and populates a dedicated conda env (bff-spliceai, step 6d), which
 # is an environment concern with nothing to clone or build. Leaving it in the git
 # phase meant `git-phase` alone would create that env as a side effect.
-PHASE_GIT_FLAGS="INSTALL_BUILD_TOOLS CLONE_EVMUTATION BUILD_PLMC CLONE_ADABMDCA DOWNLOAD_CG_COTRANS CLONE_NETSURFP3 INSTALL_SIGNALP INSTALL_MIRANDA INSTALL_MMSEQS2 INSTALL_HMMER BUILD_GENESPLICER INSTALL_NEXTFLOW CLONE_AF3 INSTALL_EDITABLE_REPOS"
-PHASE_DB_FLAGS="DOWNLOAD_UNIREF90 DOWNLOAD_IDMAPPING BUILD_COCOPUTS_CUT RUN_BUILD_DB"
-ALL_PHASE_FLAGS="PIP_INSTALL INSTALL_BUILD_TOOLS CLONE_EVMUTATION BUILD_PLMC CLONE_ADABMDCA DOWNLOAD_CG_COTRANS CLONE_NETSURFP3 INSTALL_SIGNALP INSTALL_MIRANDA INSTALL_SPLICEAI INSTALL_MMSEQS2 INSTALL_HMMER BUILD_GENESPLICER INSTALL_NEXTFLOW CLONE_AF3 INSTALL_EDITABLE_REPOS DOWNLOAD_UNIREF90 DOWNLOAD_IDMAPPING BUILD_COCOPUTS_CUT RUN_BUILD_DB"
+PHASE_GIT_FLAGS="INSTALL_BUILD_TOOLS CLONE_EVMUTATION BUILD_PLMC CLONE_ADABMDCA DOWNLOAD_CG_COTRANS CLONE_NETSURFP3 INSTALL_SIGNALP INSTALL_MIRANDA INSTALL_MMSEQS2 INSTALL_HMMER INSTALL_HTSLIB BUILD_GENESPLICER INSTALL_NEXTFLOW CLONE_AF3 INSTALL_EDITABLE_REPOS"
+PHASE_DB_FLAGS="INSTALL_HTSLIB DOWNLOAD_UNIREF90 DOWNLOAD_IDMAPPING BUILD_COCOPUTS_CUT RUN_BUILD_DB"
+ALL_PHASE_FLAGS="PIP_INSTALL INSTALL_BUILD_TOOLS CLONE_EVMUTATION BUILD_PLMC CLONE_ADABMDCA DOWNLOAD_CG_COTRANS CLONE_NETSURFP3 INSTALL_SIGNALP INSTALL_MIRANDA INSTALL_SPLICEAI INSTALL_MMSEQS2 INSTALL_HMMER INSTALL_HTSLIB BUILD_GENESPLICER INSTALL_NEXTFLOW CLONE_AF3 INSTALL_EDITABLE_REPOS DOWNLOAD_UNIREF90 DOWNLOAD_IDMAPPING BUILD_COCOPUTS_CUT RUN_BUILD_DB"
 
 enable_phase_flags() {
   local f
@@ -268,6 +270,7 @@ while [[ $# -gt 0 ]]; do
     --spliceai-env)          SPLICEAI_ENV_NAME="${2:?--spliceai-env needs a name}"; shift ;;
     --exclude-mmseqs2)       INSTALL_MMSEQS2=0 ;;
     --exclude-hmmer)         INSTALL_HMMER=0 ;;
+    --exclude-htslib)        INSTALL_HTSLIB=0 ;;
     --exclude-editable-repos) INSTALL_EDITABLE_REPOS=0 ;;
     --exclude-genesplicer)   BUILD_GENESPLICER=0 ;;
     --exclude-clone-af3)     CLONE_AF3=0 ;;
@@ -713,6 +716,43 @@ if [[ "$INSTALL_HMMER" -eq 1 ]]; then
     echo "  OK jackhmmer already on PATH"
   else
     conda_install_pinned hmmer hmmer || true
+  fi
+fi
+
+# ── Step 6c2: HTSlib / bgzip + tabix ───────────────────────────────────
+# THREE consumers, not one, which is why this sits in every phase:
+#
+#   spliceai/bin/main.nf:324-325   compress_and_index runs `bgzip -c` then
+#       `tabix -p vcf` and declares .vcf.gz + .vcf.gz.tbi as its outputs, so the
+#       process dies before SpliceAI is ever reached. HARD FAILURE.
+#   scripts/build_db.sh:458-467    builds human-POSTAR3.bed.gz and its .tbi;
+#       without them it prints a WARN and the RBP database is never indexed.
+#       This is why INSTALL_HTSLIB is in PHASE_DB_FLAGS as well.
+#   alphafold3/bin/rbp_database.py:119,203,282,312   checks `tabix --version`,
+#       queries the POSTAR3 BED by region, and can build the index itself.
+#       DEGRADES rather than fails -- burst.py:1092 warns that tabix queries
+#       "will fall back to slower in-memory mode".
+#
+# Neither binary is a python package and neither arrives with pysam's wheel:
+# pysam bundles htslib as a SHARED LIBRARY, not as the bgzip/tabix executables
+# these three call by name on PATH.
+#
+# The bioconda package is `htslib`, which ships both binaries. `tabix` also
+# exists as a package name but is an older split that provides tabix alone,
+# leaving bgzip missing -- the half-installed state is worse than none, because
+# the process then fails on line 2 of 2 with a partial output already written.
+echo "[6c2/12] HTSlib (bgzip + tabix)..."
+if [[ "$INSTALL_HTSLIB" -eq 1 ]]; then
+  if command -v bgzip >/dev/null 2>&1 && command -v tabix >/dev/null 2>&1; then
+    echo "  OK bgzip and tabix already on PATH"
+  else
+    conda_install_pinned htslib htslib || true
+    for _t in bgzip tabix; do
+      command -v "$_t" >/dev/null 2>&1 \
+        || echo "  WARN $_t still not on PATH; spliceai compress_and_index will fail,"
+      command -v "$_t" >/dev/null 2>&1 \
+        || echo "       build_db.sh cannot index POSTAR3, and af3 falls back to in-memory"
+    done
   fi
 fi
 
