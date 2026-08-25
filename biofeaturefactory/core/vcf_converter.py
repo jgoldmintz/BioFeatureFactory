@@ -40,6 +40,8 @@ from biofeaturefactory.lib.utility import (
     chromosome_map,
     get_genome_loc,
     load_mapping,
+    discover_mapping_files,
+    discover_mutation_files,
     read_fasta,
 )
 
@@ -242,14 +244,30 @@ def _vcf_row(chrom, pos, ref, alt, fetch_base):
     return anchor_pos, anchor + ref, anchor + alt
 
 
-def _resolve_mapping_source(chromosome_mapping_input, gene_name):
-    """Return the mapping CSV path for a gene (if one should exist)."""
+def _resolve_mapping_source(chromosome_mapping_input, gene_name, discovered=None):
+    """Return the chromosome mapping CSV path for a gene (if one should exist).
+
+    discovered is the {GENE: path} produced once by
+    discover_mapping_files(root, "chromosome") in DIRECTORY MODE, so a per-gene
+    tree is scanned once for the whole run rather than re-walked per gene.
+
+    chromosome_mapping_input is FILE MODE ONLY and is used verbatim. It used to
+    accept a directory and build `combined_<GENE>.csv` from it; nothing in core/
+    has ever written that name -- variant_mapping writes
+    <root>/<GENE>/mappings/chromosome/chr_mapping_<GENE>.csv -- so the probe
+    resolved to a nonexistent path for every gene, the caller got
+    "No chromosome mapping file found", and every ORF token was then rejected as
+    no_chromosome_mapping while the real file sat two directories away. -i now
+    covers that case properly; the dead convention is gone.
+    """
+    if discovered:
+        hit = (discovered.get(gene_name)
+               or discovered.get((gene_name or "").upper()))
+        if hit:
+            return Path(hit)
     if not chromosome_mapping_input:
         return None
-    candidate = Path(chromosome_mapping_input)
-    if candidate.is_dir():
-        return candidate / f"combined_{gene_name}.csv"
-    return candidate
+    return Path(chromosome_mapping_input)
 
 
 def _collect_log_metadata(log_path):
@@ -342,6 +360,7 @@ def process_single_file(
     chromosome_mapping_input=None,
     validate_mapping=False,
     log_path=None,
+    chromosome_mapping_index=None,
 ):
     try:
         gene_name = extract_gene_from_filename(mutations_file)
@@ -370,7 +389,8 @@ def process_single_file(
         variants, processed_count = [], 0
 
         mapping_lookup = {}
-        mapping_source = _resolve_mapping_source(chromosome_mapping_input, gene_name)
+        mapping_source = _resolve_mapping_source(chromosome_mapping_input, gene_name,
+                                                 chromosome_mapping_index)
         if mapping_source:
             if mapping_source.exists():
                 mapping_lookup = load_mapping(str(mapping_source), mapType="chromosome")
@@ -571,7 +591,18 @@ def main():
     parser = argparse.ArgumentParser(
         description="Convert gene-specific SNP CSVs to VCF with RefSeq support and exon-aware mapping"
     )
-    parser.add_argument("-m", "--mutation", required=True, help="Path to mutation CSV or dir")
+    parser.add_argument(
+        "-i", "--input",
+        help="DIRECTORY MODE: variant_mapping output root (<root>/<GENE>/mappings/). "
+             "Supplies BOTH the mutation CSVs (mappings/mutations/) and the "
+             "chromosome mappings (mappings/chromosome/), so -m and "
+             "--chromosome-mapping-input are not needed.",
+    )
+    parser.add_argument(
+        "-m", "--mutations", "--mutation", dest="mutation",
+        help="FILE MODE ONLY: path to a single mutation CSV. Use -i for a "
+             "variant_mapping output root.",
+    )
     parser.add_argument("-o", "--outdir", required=True, help="Output directory")
     parser.add_argument(
         "--chromosome-format", choices=["simple", "refseq", "ucsc"], default="refseq"
@@ -579,8 +610,10 @@ def main():
     parser.add_argument("-r", "--reference", required=True, help="Reference FASTA")
     parser.add_argument("-a", "--annotation", required=True, help="Gene annotation file")
     parser.add_argument(
-        "--chromosome-mapping-input",
-        help="Path to a chromosome mapping CSV or directory of combined_<GENE>.csv files",
+        "-cmi", "--chromosome-mapping-input",
+        help="FILE MODE ONLY: path to a single chr_mapping_<GENE>.csv. Required "
+             "for ORF-space tokens, which cannot be placed from the annotation "
+             "alone. Use -i for a variant_mapping output root.",
     )
     parser.add_argument(
         "--validate-mapping",
@@ -599,7 +632,35 @@ def main():
     parser.add_argument("-vs", "--verify-sequences", help="FASTA file or directory containing FASTA files to verify against reference")
     args = parser.parse_args()
 
-    mutation_path = Path(args.mutation)
+    # -i is the whole tree; -m and -cmi each name ONE file. Mixing them is a
+    # caller mistake worth naming, not silently resolving by precedence.
+    if not args.input and not args.mutation:
+        parser.error("one of -i/--input (variant_mapping output root) or "
+                     "-m/--mutations (a single mutation CSV) is required")
+    if args.input and args.mutation:
+        parser.error("-i/--input and -m/--mutations are mutually exclusive: "
+                     "-i already supplies the mutation CSVs")
+    for flag, value in (("-m/--mutations", args.mutation),
+                        ("-cmi/--chromosome-mapping-input", args.chromosome_mapping_input)):
+        if value and Path(value).is_dir():
+            parser.error(f"{flag} is FILE MODE ONLY and was given a directory "
+                         f"({value}); use -i/--input for a variant_mapping output root")
+
+    # DIRECTORY MODE. Both indexes come from the same root, scanned once.
+    chrom_map_index = {}
+    if args.input:
+        mutation_files = discover_mutation_files(str(args.input))
+        if not mutation_files:
+            parser.error(f"no <GENE>/mappings/mutations/*.csv under -i {args.input}")
+        chrom_map_index = discover_mapping_files(str(args.input), "chromosome")
+        print(f"[vcf_converter] -i {args.input}: {len(mutation_files)} gene(s), "
+              f"{len(chrom_map_index)} chromosome mapping(s)")
+        if not chrom_map_index:
+            print("[vcf_converter] Warning: no <GENE>/mappings/chromosome/ found; "
+                  "ORF-space tokens will be rejected (gd./ch. tokens still convert).",
+                  file=sys.stderr)
+
+    mutation_path = Path(args.mutation) if args.mutation else Path(args.input)
     outdir_path = Path(args.outdir)
     outdir_path.mkdir(parents=True, exist_ok=True)
     reference_fasta, annotation_file = args.reference, args.annotation
@@ -611,16 +672,15 @@ def main():
             print(f"Sequence verification failed: {results['error']}", file=sys.stderr)
             sys.exit(1)
 
-    # rglob, not glob: core/variant_mapping.py writes mutations to
-    # <out>/<GENE>/mappings/mutations/<GENE>_mutations.csv, so a non-recursive
-    # glob at an output root matched nothing and reported "0/0 files successful".
-    # <GENE>_mutations.csv is preferred when present so the recursive walk does not
-    # also pick up the aa/chromosome/gDNA mapping CSVs that sit alongside it.
-    if mutation_path.is_file():
-        files = [mutation_path]
+    # DIRECTORY MODE goes through discover_mutation_files, which reads
+    # <root>/<GENE>/mappings/mutations/ by layout. The rglob that stood here
+    # walked the whole tree and fell back to *.csv, so it also swept up the
+    # aa/chromosome/gDNA mapping CSVs sitting alongside and tried to convert
+    # them as mutation lists.
+    if args.input:
+        files = [Path(p) for _, p in sorted(mutation_files.items())]
     else:
-        named = sorted(mutation_path.rglob("*_mutations.csv"))
-        files = named if named else sorted(mutation_path.rglob("*.csv"))
+        files = [mutation_path]
 
     cache_path = outdir_path / ".vcf_converter_cache.json"
     if args.clear_cache and cache_path.exists():
@@ -638,7 +698,8 @@ def main():
     for f in files:
         gene_name = extract_gene_from_filename(str(f))
         mutation_file = Path(f).resolve()
-        mapping_source = _resolve_mapping_source(args.chromosome_mapping_input, gene_name)
+        mapping_source = _resolve_mapping_source(args.chromosome_mapping_input, gene_name,
+                                                 chrom_map_index)
         mapping_source_str = None
         mapping_mtime = None
         if mapping_source:
@@ -696,6 +757,7 @@ def main():
             chromosome_mapping_input=args.chromosome_mapping_input,
             validate_mapping=args.validate_mapping,
             log_path=args.log,
+            chromosome_mapping_index=chrom_map_index,
         )
         if success:
             successful_files += 1
