@@ -47,6 +47,30 @@ params.max_isoforms_per_gene      = 50
 // See the note above the spliceai invocation in run_spliceai for why it has one.
 params.spliceai_env               = 'bff-spliceai'
 
+// ---- GPU bounds for run_spliceai ----------------------------------------
+// spliceai is a Keras model and TensorFlow claims the WHOLE device by default,
+// so on a machine with a visible GPU every concurrent run_spliceai task tries to
+// own the same card. MEASURED on a 30-CPU / 1-GPU box with maxforks 0: three
+// concurrent tasks, two of them killed with `exit status (134)` -- 128+6,
+// SIGABRT, which is how a TF allocation failure exits. Confirmed the device is
+// visible there: tf.config.list_physical_devices('GPU') -> [GPU:0], TF 2.21.0.
+//
+// maxforks is the directive that decides this on a single-GPU box: it turns
+// "both tasks abort" into "the second waits". accelerator is honoured by the
+// grid/cloud executors and ignored harmlessly by the local one. Same reasoning,
+// and the same defaults, as mutation_effects/bin/main.nf:80-105.
+//
+// spliceai_gpus is the number of cards to SPREAD tasks across, not a per-task
+// count. spliceai never takes a device index -- TF binds whatever it can see --
+// so each task gets CUDA_VISIBLE_DEVICES pinned to ONE card instead. Leave at 1
+// for a single-GPU box; set it to the card count and raise spliceai_maxforks to
+// match to actually use them.
+params.spliceai_accelerator       = 1
+params.spliceai_gpus              = 1
+// TF grows its allocation instead of reserving the whole device up front. This
+// is what lets two tasks share a card at all when spliceai_maxforks > 1.
+params.spliceai_mem_growth        = true
+
   // Nextflow 26+ forbids statements outside a process / workflow / function body,
   // so the legacy aliases, the required checks and the concurrency guard all live
   // in functions now and are called from the workflow block. As bare top-level
@@ -190,17 +214,27 @@ params.spliceai_env               = 'bff-spliceai'
           // run through --input_vcf_path is precisely the case a flat
           // "<root>/*.vcf" glob cannot see -- it built an EMPTY channel and the
           // run finished having done nothing.
+          //
+          // The file is named EXPLICITLY, not matched with "*/vcf/*.vcf". That
+          // directory is shared by three publishDir targets -- generate_vcfs
+          // writes <GENE>.vcf (:283), compress_and_index writes <GENE>.vcf.gz
+          // (:312), and run_spliceai writes <GENE>.spliceai.vcf (:333) -- so a
+          // wildcard re-ingests this pipeline's own ANNOTATED output. Measured on a
+          // two-gene tree after one completed run: 3 inputs instead of 2, the third
+          // carrying gene_id "NPM1.spliceai", which then failed resolveMap with
+          // "no mapping CSV in <root> for gene NPM1.spliceai". <GENE>/vcf/<GENE>.vcf
+          // is generate_vcfs' output contract, and the only file here that is input.
           def vcfBase = new File(params.input_vcf_dir as String)
-          def vcfGlob = "${params.input_vcf_dir}/*.vcf"
-          if (vcfBase.isDirectory()) {
-              def vcfTree = ((vcfBase.listFiles() ?: []) as List).any {
-                  it.isDirectory() && new File(it, "vcf").isDirectory()
-              }
-              if (vcfTree) vcfGlob = "${params.input_vcf_dir}/*/vcf/*.vcf"
-          }
+          def vcfFiles = vcfBase.isDirectory()
+              ? ((vcfBase.listFiles() ?: []) as List)
+                  .findAll { it.isDirectory() && new File(it, "vcf/${it.name}.vcf").isFile() }
+                  .collect { new File(it, "vcf/${it.name}.vcf").getAbsolutePath() }
+                  .sort()
+              : []
 
-          vcf_source = Channel
-              .fromPath(vcfGlob)
+          vcf_source = ( vcfFiles
+                         ? Channel.fromPath(vcfFiles)
+                         : Channel.fromPath("${params.input_vcf_dir}/*.vcf") )
               .map { v -> tuple(v.baseName.replaceAll(/\.vcf$/, ''), v) }
       }
       else {
@@ -328,6 +362,7 @@ params.spliceai_env               = 'bff-spliceai'
 
 process run_spliceai {
     maxForks params.maxforks.toInteger()
+    accelerator params.spliceai_accelerator.toInteger()
     errorStrategy 'retry'
     maxRetries 3
     publishDir { params.vcf_output_dir ? params.vcf_output_dir : "${params.output_dir ?: '.'}/${gene_id}/vcf" }, mode: 'copy', pattern: '*.spliceai.vcf*'
@@ -351,6 +386,19 @@ process run_spliceai {
     export TF_NUM_INTEROP_THREADS=1
     export TF_NUM_INTRAOP_THREADS=1
     export OMP_NUM_THREADS=1
+
+    # One card per task. See params.spliceai_gpus. Left unset on a single-GPU box
+    # so nothing changes there: pinning to card 0 is what TF already does.
+    GPU_COUNT=${params.spliceai_gpus}
+    if [[ "\$GPU_COUNT" -gt 1 ]]; then
+      export CUDA_VISIBLE_DEVICES=\$(( (${task.index} - 1) % \$GPU_COUNT ))
+      echo "[run_spliceai] ${gene_id}: task ${task.index} -> CUDA_VISIBLE_DEVICES=\$CUDA_VISIBLE_DEVICES"
+    fi
+    # Without this TF reserves the entire device on first use, so a second task
+    # on the same card cannot allocate at all -- the 134 above.
+    if [[ "${params.spliceai_mem_growth}" == "true" ]]; then
+      export TF_FORCE_GPU_ALLOW_GROWTH=true
+    fi
 
     # Check isoform count and apply filtering if needed
     ISOFORM_COUNT=\$(grep -c "^${gene_id}\t" "${annotation_file}" || echo 0)

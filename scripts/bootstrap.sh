@@ -180,6 +180,21 @@ conda_env_args() {
   if [[ -n "${CONDA_PREFIX:-}" ]]; then printf -- '-p\n%s\n' "$CONDA_PREFIX"; fi
 }
 
+# CHANNELS: conda-forge BEFORE bioconda, which is the channel order bioconda
+# itself documents. Every bioconda package builds against conda-forge's C
+# libraries, so with `-c bioconda` alone the solver has to satisfy those from
+# `defaults` -- and when it cannot, it does not fail, it walks BACKWARDS through
+# the version history until it finds a build old enough to link what `defaults`
+# has. That is a silent downgrade to a package from years ago.
+#
+# MEASURED: `conda install -c bioconda htslib` resolved to a build linked against
+# OpenSSL 1.0.2, and bgzip died at run time with
+#     error while loading shared libraries: libcrypto.so.1.0.0
+# libcrypto.so.1.0.0 has not shipped in a current distribution or a current
+# conda-forge openssl since 2019. Adding conda-forge is what makes the modern
+# build installable; the per-package floors below are what stop the walk back.
+CONDA_CHANNELS=(-c conda-forge -c bioconda)
+
 conda_install_pinned() {
   local label="$1"; shift
   local extra=() pin=()
@@ -187,12 +202,12 @@ conda_install_pinned() {
   if [[ -n "$PY_VER" ]]; then pin=("python=$PY_VER"); fi
   if command -v conda >/dev/null 2>&1; then
     echo "  CONDA install $label (pinned python=${PY_VER:-unpinned}, env=${CONDA_PREFIX:-<none>})"
-    conda install -y "${extra[@]+"${extra[@]}"}" -c bioconda "$@" "${pin[@]+"${pin[@]}"}"
+    conda install -y "${extra[@]+"${extra[@]}"}" "${CONDA_CHANNELS[@]}" "$@" "${pin[@]+"${pin[@]}"}"
   elif command -v mamba >/dev/null 2>&1; then
     echo "  MAMBA install $label (conda not found; pinned python=${PY_VER:-unpinned})"
-    mamba install -y "${extra[@]+"${extra[@]}"}" -c bioconda "$@" "${pin[@]+"${pin[@]}"}"
+    mamba install -y "${extra[@]+"${extra[@]}"}" "${CONDA_CHANNELS[@]}" "$@" "${pin[@]+"${pin[@]}"}"
   else
-    echo "  WARN conda/mamba not found; install $label manually: conda install -c bioconda $*"
+    echo "  WARN conda/mamba not found; install $label manually: conda install ${CONDA_CHANNELS[*]} $*"
     return 1
   fi
 }
@@ -746,7 +761,11 @@ if [[ "$INSTALL_HTSLIB" -eq 1 ]]; then
   if command -v bgzip >/dev/null 2>&1 && command -v tabix >/dev/null 2>&1; then
     echo "  OK bgzip and tabix already on PATH"
   else
-    conda_install_pinned htslib htslib || true
+    # Version floor, not just the channel fix: htslib 1.17 (2023) is the first
+    # release series whose bioconda builds link OpenSSL 3. Without the floor a
+    # constrained solve can still land on the 1.0.2-linked build that produced
+    # the libcrypto.so.1.0.0 failure.
+    conda_install_pinned htslib 'htslib>=1.17' || true
     for _t in bgzip tabix; do
       command -v "$_t" >/dev/null 2>&1 \
         || echo "  WARN $_t still not on PATH; spliceai compress_and_index will fail,"
@@ -792,18 +811,41 @@ if [[ "$INSTALL_SPLICEAI" -eq 1 ]]; then
   command -v conda >/dev/null 2>&1 && CONDA_BIN=conda
   [[ -z "$CONDA_BIN" ]] && command -v mamba >/dev/null 2>&1 && CONDA_BIN=mamba
 
+  # This env's python is DECOUPLED from the bff env's. It has to be: the numpy<2
+  # pin below is mandatory (see the comment there), and neither numpy 1.26.4 nor
+  # any other 1.x publishes a cp313 build on conda-forge -- inheriting a 3.13 or
+  # 3.14 PY_VER would make the solve either fail or compile numpy from source.
+  # Nothing is shared between the two envs; bin/main.nf reaches this one through
+  # `conda run -n`, never by import, so the versions need not match.
+  case "${PY_VER:-}" in
+    3.10|3.11|3.12) SPLICEAI_PY="$PY_VER" ;;
+    *)              SPLICEAI_PY="3.11" ;;
+  esac
+
   if [[ "$SPLICEAI_OWN_ENV" -eq 1 && -n "$CONDA_BIN" ]]; then
     # `conda env list` is the only reliable existence test: `conda run -n` on a
     # missing env exits non-zero for several unrelated reasons too.
     if "$CONDA_BIN" env list | awk '{print $1}' | grep -qx "$SPLICEAI_ENV_NAME"; then
       echo "  OK env '$SPLICEAI_ENV_NAME' already exists"
     else
-      echo "  CREATE env '$SPLICEAI_ENV_NAME' (python=${PY_VER:-3.11})"
-      "$CONDA_BIN" create -y -n "$SPLICEAI_ENV_NAME" "python=${PY_VER:-3.11}" \
+      echo "  CREATE env '$SPLICEAI_ENV_NAME' (python=$SPLICEAI_PY)"
+      "$CONDA_BIN" create -y -n "$SPLICEAI_ENV_NAME" "python=$SPLICEAI_PY" \
         || record_failure "step 6d: conda create -n $SPLICEAI_ENV_NAME"
     fi
-    echo "  INSTALL spliceai + setuptools<81 into '$SPLICEAI_ENV_NAME'"
-    "$CONDA_BIN" install -y -n "$SPLICEAI_ENV_NAME" -c bioconda spliceai "python=${PY_VER:-3.11}" \
+    # numpy<2 is REQUIRED here and is not a caution. spliceai 1.3.1 is
+    # unmaintained and utils.py:79 calls np.fromstring(seq, np.int8) -- the BINARY
+    # mode, which numpy 2.0 removed outright. MEASURED on numpy 2.4.6:
+    #     np.fromstring(b'ACGT', np.int8)
+    #     ValueError: The binary mode of fromstring is removed, use frombuffer instead
+    # It raises inside one_hot_encode, i.e. per VARIANT, so an env with numpy 2.x
+    # installs cleanly, passes every import check, and then dies in the middle of
+    # a real run -- and only for genes that actually reach the scoring path.
+    #
+    # This env is isolated, so the pin costs nothing elsewhere: the bff env keeps
+    # numpy>=1.26.4,<2.5 from pyproject.toml. tensorflow declares numpy>=1.26.0
+    # with no upper bound, so 1.26.x satisfies it.
+    echo "  INSTALL spliceai + numpy<2 + setuptools<81 into '$SPLICEAI_ENV_NAME'"
+    "$CONDA_BIN" install -y -n "$SPLICEAI_ENV_NAME" "${CONDA_CHANNELS[@]}" spliceai 'numpy<2' "python=$SPLICEAI_PY" \
       || record_failure "step 6d: conda install spliceai -n $SPLICEAI_ENV_NAME"
     "$CONDA_BIN" run -n "$SPLICEAI_ENV_NAME" python -m pip install --quiet "setuptools>=77.0,<81" \
       || record_failure "step 6d: setuptools<81 in $SPLICEAI_ENV_NAME"
@@ -833,6 +875,16 @@ try:
     print("  OK  keras predict completed")
 except Exception as exc:
     print(f"  FAIL keras predict: {exc}"); sys.exit(1)
+# spliceai/utils.py:79 one_hot_encode. numpy 2.0 removed fromstring's binary
+# mode, and this raises PER VARIANT -- late, mid-run, and only for genes that
+# reach the scoring path, so nothing above would have caught it.
+try:
+    np.fromstring(b"ACGT", np.int8)
+    print(f"  OK  np.fromstring binary mode available (numpy {np.__version__})")
+except Exception as exc:
+    print(f"  FAIL numpy {np.__version__}: {exc}")
+    print("       spliceai utils.py:79 needs numpy<2; reinstall this env with 'numpy<2'")
+    sys.exit(1)
 faulthandler.cancel_dump_traceback_later()
 SPLICEAI_CHECK
     if "$CONDA_BIN" run -n "$SPLICEAI_ENV_NAME" spliceai --help >/dev/null 2>&1 \
@@ -1004,17 +1056,17 @@ if [[ "$INSTALL_NEXTFLOW" -eq 1 ]]; then
       echo "  WARN nextflow ${nf_ver:-unknown} is below the required floor ($NEXTFLOW_MIN)."
       echo "       Not auto-upgrading. Upgrade manually:"
       echo "         self-update:  nextflow self-update"
-      echo "         conda:        conda install -y -c bioconda 'nextflow>=$NEXTFLOW_MIN'"
+      echo "         conda:        conda install -y ${CONDA_CHANNELS[*]} 'nextflow>=$NEXTFLOW_MIN'"
     fi
   else
     echo "  nextflow not found — installing"
     if command -v conda >/dev/null 2>&1; then
       echo "  CONDA install nextflow"
-      conda install -y -c bioconda "nextflow>=${NEXTFLOW_MIN}" \
+      conda install -y "${CONDA_CHANNELS[@]}" "nextflow>=${NEXTFLOW_MIN}" \
         || record_failure "step 7b: conda install nextflow"
     elif command -v mamba >/dev/null 2>&1; then
       echo "  MAMBA install nextflow (conda not found)"
-      mamba install -y -c bioconda "nextflow>=${NEXTFLOW_MIN}" \
+      mamba install -y "${CONDA_CHANNELS[@]}" "nextflow>=${NEXTFLOW_MIN}" \
         || record_failure "step 7b: mamba install nextflow"
     else
       # Fallback: official installer at https://get.nextflow.io writes the
