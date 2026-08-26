@@ -328,6 +328,6 @@ The `cg_cotrans` library is Copyright (C) 2017 William M. Jacobs and is licensed
 
 ## License
 
-This wrapper pipeline is licensed under the AGPL-3.0 License - see the [LICENSE](../../LICENSE) file in the root BioFeatureFactory directory for details.
+This wrapper pipeline is licensed under the PolyForm Noncommercial 1.0.0 License - see the [LICENSE](../../LICENSE) file in the root BioFeatureFactory directory for details.
 
 The underlying `cg_cotrans` library remains under GPL v3.

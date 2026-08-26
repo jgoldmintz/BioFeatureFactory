@@ -569,4 +569,4 @@ The `EVmutation` library (`model.py` and `tools.py`) is from the EVmutation pack
 
 ## License
 
-These pipeline wrappers are licensed under the AGPL-3.0 License -- see the [LICENSE](../../LICENSE) file in the root BioFeatureFactory directory for details.
+These pipeline wrappers are licensed under the PolyForm Noncommercial 1.0.0 License -- see the [LICENSE](../../LICENSE) file in the root BioFeatureFactory directory for details.

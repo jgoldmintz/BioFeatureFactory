@@ -270,4 +270,4 @@ Codon usage statistics are calculated from:
 
 ## License
 
-This project is licensed under the AGPL-3.0 License - see the [LICENSE](../../LICENSE) file in the root BioFeatureFactory directory for details.
+This project is licensed under the PolyForm Noncommercial 1.0.0 License - see the [LICENSE](../../LICENSE) file in the root BioFeatureFactory directory for details.

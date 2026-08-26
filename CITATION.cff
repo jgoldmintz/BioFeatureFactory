@@ -6,7 +6,7 @@ authors:
   - family-names: Goldmintz
     given-names: Jacob
 repository-code: "https://github.com/jgoldmintz/biofeaturefactory"
-license: "AGPL-3.0-or-later"
+license: "PolyForm-Noncommercial-1.0.0"
 version: "0.1.0"
 date-released: "2025-11-25"
 keywords:

@@ -356,6 +356,6 @@ NetSurfP-3.0 predictions complement other BioFeatureFactory analyses:
 
 ## License
 
-This pipeline wrapper is licensed under the AGPL-3.0 License - see the [LICENSE](../../LICENSE) file in the root BioFeatureFactory directory for details.
+This pipeline wrapper is licensed under the PolyForm Noncommercial 1.0.0 License - see the [LICENSE](../../LICENSE) file in the root BioFeatureFactory directory for details.
 
 The NetSurfP-3.0 library (`nsp3/`) is third-party software with its own license.
