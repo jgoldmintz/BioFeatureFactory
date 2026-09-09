@@ -73,13 +73,22 @@ are also accepted positionally.
 | `-it, --input-type` | auto | `nt` or `aa`. Omitted: auto-detected from the WT sequence via `detect_alphabet` |
 | `-l, --log` | -- | Validation log; skips failed mutations |
 | `-bs, --batch-size` | `100` | Sequences per NSP3 batch |
-| `--max-seq-length` | `1500` | Length above which sequences are chunked |
+| `--max-seq-length` | `1500` | Requested chunk ceiling, capped at 1021 to avoid upstream ESM stitching |
 | `-v, --verbose` | off | Verbose output |
 
 With `-it nt` the mutation CSVs hold NT tokens (`A1002T`, and non-SNV forms such as `ACAA1002A`,
 `T28TGGT`); with `-it aa` they hold AA tokens (`M334V`, `KE100K`). Non-SNV tokens are processed by default.
 
 ## Output
+
+Chunks overlap by 50 residues; overlapping predictions use the chunk with the
+greater distance from its edges. Every sequence must have complete residue
+coverage. Loaded ESM layers embed each full token batch, including the terminal
+residue and EOS, instead of trimming token arrays to a residue-only mask length.
+Context-sensitive model predictions can still vary with chunk size.
+Completed genes are published before the next gene starts, with each table
+replaced atomically. Later model failures retain earlier output, produce named
+`PREDICTION_FAILED` rows for affected mutants, and make the final exit status 1.
 
 ```
 {output}/{GENE}/NetSurfP3/

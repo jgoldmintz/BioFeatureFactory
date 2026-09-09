@@ -32,6 +32,7 @@ from core/variant_mapping.py, and optional sequence verification.
 import argparse
 import csv
 import datetime
+import hashlib
 import json
 import os
 import sys
@@ -169,22 +170,22 @@ def reverse_complement(nucleotide):
     return comp.get(nucleotide.upper(), nucleotide)
 
 
-def get_reference_nucleotide(fasta_file, chromosome, position):
+def get_reference_nucleotide(fasta_file, chromosome, position, length=1):
     try:
-        fasta = pysam.FastaFile(fasta_file)
-        candidates = [str(chromosome), f"chr{chromosome}"]
-        for build in ["GRCh38", "GRCh37"]:
-            if str(chromosome) in chromosome_map.get(build, {}):
-                candidates.append(chromosome_map[build][str(chromosome)])
-        for ref_name in fasta.references:
+        with pysam.FastaFile(fasta_file) as fasta:
+            candidates = [str(chromosome), f"chr{chromosome}"]
             for build in ["GRCh38", "GRCh37"]:
                 if str(chromosome) in chromosome_map.get(build, {}):
-                    base = chromosome_map[build][str(chromosome)].split(".")[0]
-                    if ref_name.startswith(base):
-                        candidates.append(ref_name)
-        for cand in dict.fromkeys(candidates):  # preserve order, unique
-            if cand in fasta.references:
-                return fasta.fetch(cand, position - 1, position).upper()
+                    candidates.append(chromosome_map[build][str(chromosome)])
+            for ref_name in fasta.references:
+                for build in ["GRCh38", "GRCh37"]:
+                    if str(chromosome) in chromosome_map.get(build, {}):
+                        base = chromosome_map[build][str(chromosome)].split(".")[0]
+                        if ref_name.startswith(base):
+                            candidates.append(ref_name)
+            for cand in dict.fromkeys(candidates):
+                if cand in fasta.references:
+                    return fasta.fetch(cand, position - 1, position - 1 + length).upper()
         return None
     except Exception as e:
         print(f"Error extracting reference nucleotide: {e}", file=sys.stderr)
@@ -358,9 +359,24 @@ def _save_cache(cache_path, cache):
         print(f"Warning: Unable to write cache file {cache_path}: {exc}", file=sys.stderr)
 
 
+def _annotation_state(annotation_file):
+    try:
+        digest = hashlib.sha256()
+        with open(annotation_file, "rb") as annotation:
+            metadata = os.fstat(annotation.fileno())
+            for chunk in iter(lambda: annotation.read(1024 * 1024), b""):
+                digest.update(chunk)
+        return {"mtime_ns": metadata.st_mtime_ns, "size": metadata.st_size,
+                "sha256": digest.hexdigest()}
+    except OSError:
+        return None
+
+
 def _is_cache_valid(entry, info):
     """Return True if the cached entry still matches the current input state."""
     try:
+        if not info.get("annotation_state") or entry.get("annotation_state") != info["annotation_state"]:
+            return False
         if entry.get("source_mtime") != info.get("source_mtime"):
             return False
 
@@ -442,10 +458,10 @@ def process_single_file(
 
         rejected = []
 
-        def _fetch(posn):
+        def _fetch(posn, length=1):
             if not reference_fasta:
                 return None
-            return get_reference_nucleotide(reference_fasta, chromosome, posn)
+            return get_reference_nucleotide(reference_fasta, chromosome, posn, length)
 
         for snp_string in mut_list:
             try:
@@ -472,7 +488,7 @@ def process_single_file(
                                else gene_start + gvar.pos - 1)
                     ref, alt = gvar.ref.upper(), gvar.alt.upper()
                     if reference_fasta:
-                        actual = "".join((_fetch(abs_pos + i) or "?") for i in range(len(ref)))
+                        actual = _fetch(abs_pos, len(ref))
                         if actual != ref:
                             rejected.append(
                                 (snp_string,
@@ -507,12 +523,11 @@ def process_single_file(
                         ref, alt = m_var.ref.upper(), m_var.alt.upper()
                         ok = True
                         if validate_mapping and reference_fasta:
-                            actual = _fetch(abs_pos)
-                            if actual and actual != ref[0]:
-                                print(f"  Warning: Mapping REF mismatch for {snp_string} "
-                                      f"(mapping {ref}, reference {actual}). Recomputing from annotation.",
-                                      file=sys.stderr)
-                                ok = False
+                            actual = _fetch(abs_pos, len(ref))
+                            if actual != ref:
+                                rejected.append((snp_string,
+                                    f"REF_MISMATCH:expected_{ref}_reference_has_{actual}_at_{abs_pos}"))
+                                continue
                         if ok:
                             row = _vcf_row(formatted_chr, abs_pos, ref, alt, _fetch)
                             if row is None:
@@ -730,6 +745,7 @@ def main():
     log_paths_global, log_mtimes_global = _collect_log_metadata(args.log)
     reference_resolved = str(Path(reference_fasta).resolve())
     annotation_resolved = str(Path(annotation_file).resolve())
+    annotation_state = _annotation_state(annotation_resolved)
 
     for f in files:
         gene_name = extract_gene_from_filename(str(f))
@@ -750,6 +766,7 @@ def main():
                     mapping_mtime = None
 
         key_payload = {
+            "cache_version": 2,
             "gene": gene_name,
             "mutation_file": str(mutation_file),
             "reference": reference_resolved,
@@ -769,6 +786,7 @@ def main():
             source_mtime = None
 
         info = {
+            "annotation_state": annotation_state,
             "source_mtime": source_mtime,
             "mapping_mtime": mapping_mtime,
             "log_paths": list(log_paths_global),
@@ -806,6 +824,7 @@ def main():
                 output_path = Path(vcf)
                 output_mtime = None
             cache[cache_key] = {
+                "annotation_state": annotation_state,
                 "source_mtime": source_mtime,
                 "output_path": str(output_path),
                 "output_mtime": output_mtime,

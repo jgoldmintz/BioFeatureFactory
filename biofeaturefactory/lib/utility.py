@@ -56,8 +56,6 @@ from biofeaturefactory.lib.primitives import (
 )
 
 # Re-exported so `from ...utility import X` keeps working for every caller.
-# Plain, eager imports: the package is acyclic (core -> siblings -> utility),
-# so nothing here needs deferring.
 from biofeaturefactory.lib.msa import (
     prepare_protein_query, run_jackhmmer, parse_stockholm, stockholm_to_a2m,
     filter_msa_by_gaps, compute_sequence_weights, compute_neff, _chunk_codons, write_a2m,
@@ -118,8 +116,6 @@ def subseq(seq: str, pos: int, l: int) -> str:
     return seq[start:end]
 
 _FILTER_LOG_CACHE: dict[tuple[str, ...], dict[str, set[str]]] = {}
-# Exon-aware validation lines look like "GENE: mutation A123G expects ..."
-_LOG_MUTATION_RE = re.compile(r"^(?P<gene>[^:]+): mutation (?P<mut>[ACGT][0-9]+[ACGT])\b")
 
 
 def _normalize_logs(log):
@@ -159,12 +155,13 @@ def _collect_failures_from_logs(log):
         try:
             with open(log_path, "r") as handle:
                 for line in handle:
-                    match = _LOG_MUTATION_RE.match(line.strip())
+                    match = _LOG_VARIANT_RE.match(line.strip())
                     if not match:
                         continue
                     gene = match.group("gene").strip().upper()
                     mut = match.group("mut").strip()
-                    if not gene or not mut:
+                    token = mut.split(".", 1)[-1]
+                    if not gene or parse_variant(token, is_nt=True) is None:
                         continue
                     # Track the failing mutation for this gene in upper-case form
                     failures.setdefault(gene, set()).add(mut)
@@ -243,11 +240,8 @@ _NT_ALPHABET = frozenset("ACGTU")
 _VARIANT_NT_RE = re.compile(r"^([ACGTUacgtu]+)([0-9]+)([ACGTUacgtu]+)$")
 _VARIANT_AA_RE = re.compile(r"^([A-Za-z*]+)([0-9]+)([A-Za-z*]+)$")
 
-# Multi-base sibling of _LOG_MUTATION_RE (see above). That pattern is
-# [ACGT][0-9]+[ACGT] -- single base either side -- so an indel named in a
-# validation log silently fails to match and is therefore never skipped.
 _LOG_VARIANT_RE = re.compile(
-    r"^(?P<gene>[^:]+): mutation (?P<mut>[ACGTacgtu]+[0-9]+[ACGTUacgtu]+)\b"
+    r"^(?P<gene>[^:]+): mutation (?P<mut>(?:(?:gd|ch)\.)?[ACGTUacgtu]+[0-9]+[ACGTUacgtu]+)(?=\s|$)"
 )
 
 _COMPLEMENT = {
@@ -576,17 +570,6 @@ def split_piece_cell(cell: str) -> list[str]:
     if cell.startswith("[") and cell.endswith("]"):
         return [p.strip() for p in cell[1:-1].split(",") if p.strip()]
     return [cell]
-
-
-
-
-
-
-# Every prefix that means "NOT ORF-relative". Kept as one tuple so the gates in
-# codon_usage / rare_codon / evmutation / build_mutant_sequences_for_gene and the
-# router in variant_mapping cannot disagree about which spaces exist.
-
-
 
 
 def split_intronic_tokens(tokens):
@@ -2242,64 +2225,6 @@ def synthesize_gene_fastas(wt_sequences, mapping_lookup, sequence_root, log_path
         })
 
     return wt_dir, mut_dir, summary
-
-
-# =============================================================================
-# Codon Usage Functions
-# =============================================================================
-
-
-
-# Human tRNA adaptation weights (tAI)
-# Based on tRNA gene copy numbers and wobble pairing efficiency
-# Sources: dos Reis et al. 2004, Tuller et al. 2010
-# Format: codon -> tAI weight (0-1 scale, normalized)
-
-# Human reference W values for CAI calculation
-# Based on highly expressed genes (Sharp & Li 1987, adapted for human)
-
-
-
-
-
-
-
-
-
-
-
-
-# =============================================================================
-# MSA Generation and Processing Utilities
-# =============================================================================
-
-# Single-character codon-encoded alphabet. MUST stay in lockstep with
-# mutation_effects/bin/codon_encoding.py: 64 codons -> A-Z (26) + a-z (26) +
-# 0-9 (10) + '!' '@' (2), plus '-' gap = 65 symbols. Case-sensitive by design
-# ('A' encodes codon AAA, 'a' a different codon), which is why the codon check
-# below runs BEFORE any upper-casing.
-# Symbols that occur ONLY in the codon-encoded alphabet -- never in nucleotide
-# (ACGTU/IUPAC) or standard protein (20 aa + BXZUO*) sequences. Their presence
-# is an unambiguous codon-encoding signal.
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
 
 def write_tsv(rows, path, fieldnames=None, *, extrasaction='ignore', mkdir=True):

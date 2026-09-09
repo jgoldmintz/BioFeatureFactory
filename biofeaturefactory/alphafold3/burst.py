@@ -41,9 +41,9 @@ ingestion via the L1 cache.
 
 The cache layout, key, and hit criterion match BFF/AF3_CACHE_PLAN.md:
   cache root     {output}/.cache/af3/
-  cache key      AF3Input.get_hash() = MD5(rna_seq + '_' + protein_seq)[:12]
-  hit criterion  the cache dir contains all three primary AF3 outputs:
-                 _model.cif, _confidences.json, _summary_confidences.json
+  cache key      AF3Input.get_hash() prediction-content identity (name excluded)
+  hit criterion  cache_dir/output_name contains the three exact primary
+                 outputs for output_name
 """
 
 import argparse
@@ -54,6 +54,7 @@ import shutil
 import subprocess
 import sys
 import time
+import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Dict, Iterator, List, Optional, Tuple
@@ -64,21 +65,23 @@ from biofeaturefactory.alphafold3.bin.af3_runner import AF3Input, create_rna_pro
 from biofeaturefactory.alphafold3.bin.af3_parser import (
     AggregatedBindingAnalysis, BindingAnalysis,
     aggregate_binding_analyses, analyze_binding, extract_interface_sites,
-    parse_all_samples,
+    parse_all_samples, AF3Parser, ensemble_interface_sites,
 )
 from biofeaturefactory.alphafold3.bin.binding_metrics import (
     BindingMetrics, DeltaMetrics, RnaEditSpan, ThresholdConfig,
     aggregate_mutation_summary, compute_delta_metrics,
-    format_events_rows, format_sites_rows,
+    format_events_rows, format_sites_rows, qc_flag_for_deltas, compute_window_delta,
 )
 from biofeaturefactory.alphafold3.bin.burst_manifest import (
-    ManifestRow, is_cache_complete, write_manifest,
+    ManifestRow, is_cache_complete, write_manifest, clear_cache, cache_generation,
 )
 
 from biofeaturefactory.lib.utility import (
+    discover_fasta_files, discover_mapping_files, discover_mutation_files,
     mint_pkey,
     Variant, _collect_failures_from_logs, extract_gene_from_filename,
-    get_mutation_data_bioAccurate, load_mapping, parse_variant, read_fasta,
+    find_gene_file, get_mutation_data_bioAccurate, load_mapping, parse_variant,
+    read_fasta,
     splice_seq, subseq, trim_muts, write_tsv,
 )
 
@@ -117,6 +120,11 @@ class BurstInput:
     @property
     def input_hash(self) -> str:
         return self.af3_input.get_hash()
+
+
+def _cache_output_name(input_hash: str) -> str:
+    """Return the stable AF3 result name for one prediction-content hash."""
+    return f"bff_af3_{input_hash}"
 
 
 @dataclass
@@ -274,9 +282,27 @@ def iterate_inputs(
     mutations_input = Path(args.mutations) if args.mutations else None
     vcf_input = Path(args.vcf) if args.vcf else None
     chrom_map_input = Path(args.chromosome_mapping) if args.chromosome_mapping else None
+    mutation_files = (discover_mutation_files(str(mutations_input))
+                      if mutations_input and mutations_input.is_dir() else {})
+    chromosome_files = (discover_mapping_files(str(chrom_map_input), 'chromosome')
+                        if chrom_map_input and chrom_map_input.is_dir() else {})
 
     if fasta_input.is_dir():
-        fasta_files = sorted(fasta_input.glob('*.fasta'))
+        # discover_fasta_files FIRST, flat glob only as a fallback. A flat
+        # glob('*.fasta') over a variant_mapping root sees only <GENE>/
+        # directories and returns [], because the FASTAs live at
+        # <root>/<GENE>/fastas/<GENE>.fasta. Burst then walked zero genes, wrote
+        # a zero-row manifest, and cmd_submit's n_pending == 0 branch printed
+        # "Nothing to submit; all inputs already cached." -- an affirmative
+        # false statement about an empty cache. The local driver already uses
+        # this helper; burst did not.
+        discovered = discover_fasta_files(str(fasta_input))
+        if discovered:
+            fasta_files = [Path(discovered[g]) for g in sorted(discovered)]
+            fasta_files.extend(path for path in sorted(fasta_input.glob('*.fasta'))
+                               if extract_gene_from_filename(str(path)) not in discovered)
+        else:
+            fasta_files = sorted(fasta_input.glob('*.fasta'))
     else:
         fasta_files = [fasta_input]
 
@@ -286,20 +312,23 @@ def iterate_inputs(
         # Resolve chromosome name
         chrom = args.chrom
         if vcf_input:
-            if vcf_input.is_dir():
-                cands = list(vcf_input.glob(f'{gene_name}.vcf'))
-                if cands:
-                    chrom = _parse_vcf_chrom(cands[0])
-            else:
-                chrom = _parse_vcf_chrom(vcf_input)
+            gene_vcf = find_gene_file(
+                str(vcf_input), gene_name, (f'{gene_name}.vcf',),
+            )
+            if gene_vcf:
+                chrom = _parse_vcf_chrom(Path(gene_vcf))
 
         # Resolve chromosome mapping (provides per-mutation chromosomal positions)
         chrom_mapping: Optional[Dict[str, str]] = None
         if chrom_map_input:
             if chrom_map_input.is_dir():
-                cands = list(chrom_map_input.glob(f'*{gene_name}*.csv'))
-                if cands:
-                    chrom_mapping = load_mapping(str(cands[0]), mapType="chromosome")
+                mapping_path = chromosome_files.get(gene_name) or find_gene_file(
+                    str(chrom_map_input), gene_name,
+                    (f'chr_mapping_{gene_name}.csv', f'{gene_name}_chromosome_mapping.csv',
+                     f'chromosome_mapping_{gene_name}.csv'),
+                )
+                if mapping_path:
+                    chrom_mapping = load_mapping(str(mapping_path), mapType="chromosome")
             else:
                 chrom_mapping = load_mapping(str(chrom_map_input), mapType="chromosome")
 
@@ -307,14 +336,20 @@ def iterate_inputs(
         mut_path: Optional[str] = None
         if mutations_input:
             if mutations_input.is_dir():
-                cands = list(mutations_input.glob(f'*{gene_name}*.csv'))
-                if cands:
-                    mut_path = str(cands[0])
+                candidate = mutation_files.get(gene_name)
+                canonical_name = f'{gene_name}_mutations.csv'
+                if candidate and (Path(candidate).name == canonical_name
+                                  or Path(candidate).parent.name == 'mutations'):
+                    mut_path = candidate
+                else:
+                    mut_path = find_gene_file(str(mutations_input), gene_name, (canonical_name,))
             else:
                 mut_path = str(mutations_input)
 
         if not mut_path and not chrom_mapping:
             print(f"No mutations source for {gene_name}", file=sys.stderr)
+            if skipped is not None:
+                skipped.append(SkippedMutation(gene_name, '', 'FAILED:no_mutations_source'))
             continue
 
         # Load transcript
@@ -568,26 +603,34 @@ def _iterate_mutation(
 def cmd_submit(args) -> int:
     output_dir = Path(args.output)
     burst_dir = output_dir / ".burst"
-    inputs_dir = burst_dir / "inputs"
     cache_root = output_dir / ".cache" / "af3"
-    log_dir = Path(args.slurm_log_dir) if args.slurm_log_dir else (burst_dir / "logs")
 
     burst_dir.mkdir(parents=True, exist_ok=True)
-    inputs_dir.mkdir(parents=True, exist_ok=True)
-    cache_root.mkdir(parents=True, exist_ok=True)
-    log_dir.mkdir(parents=True, exist_ok=True)
 
     # Hold an exclusive lock for the duration of submit; prevents concurrent
     # submit + submit or submit + ingest. Released when this function returns.
     _lock_fh = _acquire_burst_lock(burst_dir)
 
+    generation_id = f"{time.strftime('%Y%m%d-%H%M%S')}-{uuid.uuid4().hex}"
+    submission_dir = burst_dir / "submissions" / generation_id
+    inputs_dir = submission_dir / "inputs"
+    manifest_path = submission_dir / "manifest.tsv"
+    script_path = submission_dir / "run.slurm"
+    log_dir = (
+        Path(args.slurm_log_dir)
+        if args.slurm_log_dir
+        else submission_dir / "logs"
+    )
+
+    inputs_dir.mkdir(parents=True, exist_ok=False)
+    cache_root.mkdir(parents=True, exist_ok=True)
+    log_dir.mkdir(parents=True, exist_ok=True)
+
     # Optional pre-run cache wipe
     if args.clear_cache:
-        ext_cache = output_dir / ".cache"
-        if ext_cache.exists():
-            shutil.rmtree(ext_cache)
-            print(f"Cleared cache at {ext_cache}", file=sys.stderr)
-        cache_root.mkdir(parents=True, exist_ok=True)
+        clear_cache(cache_root)
+        print(f"Cleared AF3 cache at {cache_root}; active staging preserved", file=sys.stderr)
+    submission_cache_generation = cache_generation(cache_root)
 
     # Initialize POSTAR3 + RBP mapper (same as LOCAL pipeline)
     print("Loading POSTAR3 database...", file=sys.stderr)
@@ -616,15 +659,18 @@ def cmd_submit(args) -> int:
         seen_hashes.add(h)
 
         cache_dir = cache_root / h
-        if is_cache_complete(cache_dir):
+        output_name = _cache_output_name(h)
+        if is_cache_complete(cache_dir, output_name):
             skipped_cached += 1
             continue
 
-        # Write input JSON (idempotent: skip if already written)
+        # Write one canonical-named input JSON per prediction-content hash.
         input_json_path = inputs_dir / f"{h}.json"
         if not input_json_path.exists():
+            payload = bi.af3_input.to_json_dict()
+            payload['name'] = output_name
             with open(input_json_path, 'w') as f:
-                json.dump(bi.af3_input.to_json_dict(), f, indent=2)
+                json.dump(payload, f, indent=2)
 
         manifest_rows.append(ManifestRow(
             array_idx=len(manifest_rows),
@@ -635,6 +681,7 @@ def cmd_submit(args) -> int:
             window_idx=bi.window_idx,
             input_json_path=str(input_json_path.resolve()),
             cache_dir=str(cache_dir.resolve()),
+            output_name=output_name,
         ))
 
     n_pending = len(manifest_rows)
@@ -647,15 +694,8 @@ def cmd_submit(args) -> int:
         print(f"Mutations with no AF3 input: {len(skipped_muts)} "
               f"(ingest emits one summary row for each)", file=sys.stderr)
 
-    manifest_path = burst_dir / "manifest.tsv"
     write_manifest(manifest_rows, manifest_path)
     print(f"Wrote manifest: {manifest_path}", file=sys.stderr)
-
-    if n_pending == 0:
-        print("Nothing to submit; all inputs already cached.", file=sys.stderr)
-        print(f"Run ingest: python -m biofeaturefactory.alphafold3.burst ingest "
-              f"--output {output_dir} ...", file=sys.stderr)
-        return 0
 
     # Render SLURM array script
     template_path = Path(__file__).parent / "bin" / "slurm_array.sh.tmpl"
@@ -673,14 +713,27 @@ def cmd_submit(args) -> int:
         "__MANIFEST__":     str(manifest_path.resolve()),
         "__MODEL_DIR__":    str(Path(args.model_dir).resolve()),
         "__DOCKER_IMAGE__": args.docker_image,
+        "__CACHE_GENERATION__": submission_cache_generation,
+        "__PYTHON_BIN__":    sys.executable,
+        "__CACHE_HELPER__":  str(
+            (Path(__file__).parent / "bin" / "burst_manifest.py").resolve()
+        ),
     }
     rendered = template
     for k, v in substitutions.items():
         rendered = rendered.replace(k, v)
-    script_path = burst_dir / "run.slurm"
     script_path.write_text(rendered)
     script_path.chmod(0o755)
     print(f"Rendered SLURM script: {script_path}", file=sys.stderr)
+
+    if n_pending == 0:
+        if not total_inputs:
+            print('No AF3 inputs could be prepared; inspect the input diagnostics.', file=sys.stderr)
+            return int(any(sk.qc_flag.startswith('FAILED:') for sk in skipped_muts) or not skipped_muts)
+        print("Nothing to submit; all prepared inputs already cached.", file=sys.stderr)
+        print(f"Run ingest: python -m biofeaturefactory.alphafold3.burst ingest "
+              f"--output {output_dir} ...", file=sys.stderr)
+        return 0
 
     if args.no_submit:
         print("--no-submit: skipping sbatch.", file=sys.stderr)
@@ -692,7 +745,7 @@ def cmd_submit(args) -> int:
     sbatch_cmd = [
         "sbatch",
         f"--array=0-{n_pending - 1}%{args.array_throttle}",
-        str(script_path),
+        str(script_path.resolve()),
     ]
     print(f"Submitting: {' '.join(sbatch_cmd)}", file=sys.stderr)
     result = subprocess.run(sbatch_cmd, capture_output=True, text=True)
@@ -712,7 +765,10 @@ def cmd_submit(args) -> int:
     with open(last_submit_path, 'w') as f:
         json.dump({
             "job_id": job_id,
+            "generation_id": generation_id,
+            "submission_dir": str(submission_dir.resolve()),
             "manifest_path": str(manifest_path.resolve()),
+            "log_dir": str(log_dir.resolve()),
             "submit_time": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
             "n_tasks": n_pending,
             "throttle": args.array_throttle,
@@ -784,14 +840,8 @@ def cmd_ingest(args) -> int:
 
         win_indices = sorted({wi for (wi, _) in inputs_by_winallele.keys()})
 
-        wt_metrics_per_win: List[Optional[BindingMetrics]] = []
-        mut_metrics_per_win: List[Optional[BindingMetrics]] = []
-        first_wt_sites: Optional[list] = None
-        first_mut_sites: Optional[list] = None
-        first_wt_freq_rna: Optional[Dict[int, float]] = None
-        first_wt_freq_prot: Optional[Dict[int, float]] = None
-        first_mut_freq_rna: Optional[Dict[int, float]] = None
-        first_mut_freq_prot: Optional[Dict[int, float]] = None
+        wt_by_window = {}
+        mut_by_window = {}
 
         for win_idx in win_indices:
             wt_bi = inputs_by_winallele.get((win_idx, 'WT'))
@@ -799,54 +849,49 @@ def cmd_ingest(args) -> int:
 
             wt_m, wt_sites, wt_agg = _parse_cache_entry(
                 cache_root / wt_bi.input_hash if wt_bi else None,
+                output_name=_cache_output_name(wt_bi.input_hash) if wt_bi else '',
                 rbp_name=rbp_name, threshold_config=threshold_config,
             )
             mut_m, mut_sites, mut_agg = _parse_cache_entry(
                 cache_root / mut_bi.input_hash if mut_bi else None,
+                output_name=_cache_output_name(mut_bi.input_hash) if mut_bi else '',
                 rbp_name=rbp_name, threshold_config=threshold_config,
             )
-            wt_metrics_per_win.append(wt_m)
-            mut_metrics_per_win.append(mut_m)
-
-            if first_wt_sites is None and wt_sites is not None:
-                first_wt_sites = wt_sites
-                first_wt_freq_rna = wt_agg.contact_frequency_rna if wt_agg else None
-                first_wt_freq_prot = wt_agg.contact_frequency_protein if wt_agg else None
-            if first_mut_sites is None and mut_sites is not None:
-                first_mut_sites = mut_sites
-                first_mut_freq_rna = mut_agg.contact_frequency_rna if mut_agg else None
-                first_mut_freq_prot = mut_agg.contact_frequency_protein if mut_agg else None
+            if wt_m is not None:
+                wt_by_window[win_idx] = wt_m
+            if mut_m is not None:
+                mut_by_window[win_idx] = mut_m
+            for allele, allele_input, sites, aggregation in (
+                ('WT', wt_bi, wt_sites, wt_agg), ('MUT', mut_bi, mut_sites, mut_agg),
+            ):
+                if not sites:
+                    continue
+                if allele_input is None or allele_input.edit_span is None:
+                    raise RuntimeError(
+                        f"Cannot format {allele} sites for {pkey}/{rbp_name} window "
+                        f"{win_idx}: exact edit_span is unavailable"
+                    )
+                sites_rows.setdefault(gene, []).extend(format_sites_rows(
+                    pkey, rbp_name, allele, sites,
+                    aggregation.contact_frequency_rna if aggregation else None,
+                    aggregation.contact_frequency_protein if aggregation else None,
+                    edit_span=allele_input.edit_span, window_idx=win_idx,
+                ))
 
         if len(win_indices) == 1:
-            wt_metrics = wt_metrics_per_win[0]
-            mut_metrics = mut_metrics_per_win[0]
+            delta = compute_delta_metrics(
+                rbp_name, wt_by_window.get(win_indices[0]), mut_by_window.get(win_indices[0]),
+                distance, threshold_config,
+            )
         else:
-            wt_metrics = _aggregate_across_windows(
-                wt_metrics_per_win, rbp_name, threshold_config,
+            delta = compute_window_delta(
+                rbp_name, wt_by_window, mut_by_window, len(win_indices),
+                distance, threshold_config,
             )
-            mut_metrics = _aggregate_across_windows(
-                mut_metrics_per_win, rbp_name, threshold_config,
-            )
-
-        delta = compute_delta_metrics(
-            rbp_name=rbp_name,
-            wt_metrics=wt_metrics, mut_metrics=mut_metrics,
-            distance_to_mutation=distance, config=threshold_config,
-        )
-        if len(win_indices) > 1:
-            delta.n_windows = len(win_indices)
+        msa_modes = {'provided' if value.af3_input.protein_msa else 'none'
+                     for value in inputs_by_winallele.values()}
+        delta.protein_msa = next(iter(msa_modes)) if len(msa_modes) == 1 else 'mixed'
         pkey_to_deltas[pkey].append(delta)
-
-        if first_wt_sites:
-            sites_rows.setdefault(gene, []).extend(format_sites_rows(
-                pkey, rbp_name, 'WT', first_wt_sites,
-                first_wt_freq_rna, first_wt_freq_prot,
-            ))
-        if first_mut_sites:
-            sites_rows.setdefault(gene, []).extend(format_sites_rows(
-                pkey, rbp_name, 'MUT', first_mut_sites,
-                first_mut_freq_rna, first_mut_freq_prot,
-            ))
 
     # Per-mutation summaries + events
     for pkey, deltas in pkey_to_deltas.items():
@@ -854,16 +899,7 @@ def cmd_ingest(args) -> int:
         summary = aggregate_mutation_summary(deltas)
         summary['pkey'] = pkey
         summary['Gene'] = gene
-        has_complete = any(d.wt_metrics is not None and d.mut_metrics is not None for d in deltas)
-        has_partial = any(d.wt_metrics is not None or d.mut_metrics is not None for d in deltas)
-        if not deltas:
-            summary['qc_flags'] = 'no_rbps_tested'
-        elif has_complete:
-            summary['qc_flags'] = 'PASS'
-        elif has_partial:
-            summary['qc_flags'] = 'PARTIAL'
-        else:
-            summary['qc_flags'] = 'ALL_FAILED'
+        summary['qc_flags'] = qc_flag_for_deltas(deltas)
         summary_rows.setdefault(gene, []).append(summary)
         events_rows.setdefault(gene, []).extend(format_events_rows(pkey, deltas))
 
@@ -907,11 +943,14 @@ def cmd_ingest(args) -> int:
             print(f"Wrote {len(sites_rows[gene])} sites rows to "
                   f"{out_dir / f'{gene}.sites.tsv'}", file=sys.stderr)
 
-    return 0
+    return int(any(row['qc_flags'] in ('ALL_FAILED', 'PARTIAL')
+                   or row['qc_flags'].startswith('FAILED:')
+                   for rows in summary_rows.values() for row in rows))
 
 
 def _parse_cache_entry(
     cache_dir: Optional[Path],
+    output_name: str,
     rbp_name: str,
     threshold_config: ThresholdConfig,
 ) -> Tuple[Optional[BindingMetrics], Optional[list], Optional[AggregatedBindingAnalysis]]:
@@ -920,15 +959,17 @@ def _parse_cache_entry(
     Returns (None, None, None) when the cache dir is missing or incomplete.
     Mirrors alphafold3_pipeline.py:_parse_af3_output:551-598.
     """
-    if cache_dir is None or not is_cache_complete(cache_dir):
+    if cache_dir is None or not is_cache_complete(cache_dir, output_name):
         return None, None, None
 
-    structures = parse_all_samples(str(cache_dir))
+    structures = parse_all_samples(str(cache_dir / output_name))
     if not structures:
         return None, None, None
 
     analyses = [analyze_binding(s, rna_chain="R", protein_chain="P") for s in structures]
-    sites = extract_interface_sites(structures[0]) if structures else None
+    ranked = AF3Parser(str(cache_dir / output_name)).parse()
+    aggregation = aggregate_binding_analyses(analyses) if len(structures) > 1 else None
+    sites = ensemble_interface_sites(structures, aggregation, ranked)
 
     if len(structures) == 1:
         binding = analyses[0]
@@ -944,7 +985,7 @@ def _parse_cache_entry(
         )
         return metrics, sites, None
 
-    agg = aggregate_binding_analyses(analyses)
+    agg = aggregation
     if not agg:
         return None, sites, None
 
@@ -1173,13 +1214,13 @@ def main() -> int:
     p_sub.add_argument('-st', '--slurm-time', default='01:00:00', help='SLURM --time per task')
     p_sub.add_argument('-sm', '--slurm-mem', default='64G', help='SLURM --mem per task')
     p_sub.add_argument('-sld', '--slurm-log-dir',
-                       help='Directory for SLURM logs (default: {output}/.burst/logs)')
+                       help='Directory for SLURM logs (default: current submission directory)')
     p_sub.add_argument('-at', '--array-throttle', type=int, default=256,
                        help='Concurrent array task limit (sbatch --array=...%%N)')
     p_sub.add_argument('-ns', '--no-submit', action='store_true', default=False,
                        help='Render manifest + script but skip sbatch')
     p_sub.add_argument('-cc', '--clear-cache', action='store_true', default=False,
-                       help='Delete {output}/.cache before submitting (forces re-run)')
+                       help='Clear completed AF3 cache entries and invalidate old workers; preserve active staging and JAX cache')
     p_sub.set_defaults(func=cmd_submit)
 
     p_ing = sub.add_parser('ingest', help='Read AF3 cache, compute deltas, write 3-tier TSVs')

@@ -1301,12 +1301,16 @@ def main():
                              "fastas/ are siblings under the same <GENE>/. Supply it only for a "
                              "genomic-mapping CSV outside that layout.")
     parser.add_argument("-g", "--genesplicer-dir", default=None,
-                        help="Directory containing GeneSplicer binary; "
-                             "omit to use genesplicer from PATH (e.g. after conda install)")
+                        help="Directory containing the GeneSplicer binary, normally "
+                             "<repo>/biofeaturefactory/genesplicer/GeneSplicer/sources (bootstrap.sh "
+                             "step 7 builds it there from the JHU tarball). Effectively REQUIRED: the "
+                             "bioconda build is a different binary that prints nothing and exits 0, so "
+                             "omitting this and picking one up from PATH reports every gene as "
+                             "site-free. See the note at the PATH fallback below.")
     parser.add_argument("--model-dir", default=None,
-                        help="Absolute path to a GeneSplicer model directory (one containing config_file). "
-                             "If omitted, resolved from --genesplicer-dir or the genesplicer binary location "
-                             "(conda ships it beside the binary as share/genesplicer-*/human).")
+                        help="Absolute path to a GeneSplicer model directory (one containing config_file), "
+                             "normally <repo>/biofeaturefactory/genesplicer/GeneSplicer/human. "
+                             "If omitted, resolved from --genesplicer-dir or the binary's location.")
     parser.add_argument("-o", "--output", required=True, help="Output base directory (writes {GENE}/GeneSplicer/{GENE}.tsv, .events.tsv, .sites.tsv)")
     parser.add_argument("-w", "--window", type=int, default=DEFAULT_WINDOW, help="Window/reporting size (default 151)")
     parser.add_argument("-rr", "--report-radius", type=int, default=DEFAULT_REPORT_RADIUS,
@@ -1347,8 +1351,19 @@ def main():
         if not os.access(bin_path, os.X_OK):
             parser.error(f"genesplicer executable not found or not executable at {bin_path}")
     elif not shutil.which("genesplicer"):
-        parser.error("genesplicer not found on PATH. Install via conda (conda install -c bioconda genesplicer) "
-                      "or provide --genesplicer-dir")
+        # NOT "conda install -c bioconda genesplicer", which is what this said. That
+        # is a DIFFERENT binary from the one JHU ships (md5 b2e2384f..., 70848 bytes
+        # vs 61a8648a..., 53448 bytes) and, measured on identical input and the
+        # identical human model, it writes NOTHING to stdout and exits 0 while the
+        # source build reports splice sites. _run_genesplicer_on_seq cannot tell an
+        # empty stdout with rc=0 from a sequence that genuinely has no splice sites,
+        # so following that advice reports every gene as site-free -- a null dressed
+        # as a measurement. bootstrap.sh:1024-1033 carries the full comparison.
+        parser.error(
+            "genesplicer not found on PATH, and --genesplicer-dir was not given.\n"
+            "  Build it with:  ./scripts/bootstrap.sh git-phase   (step 7, JHU source tarball)\n"
+            "  then pass:      -g <repo>/biofeaturefactory/genesplicer/GeneSplicer/sources \\\n"
+            "                  --model-dir <repo>/biofeaturefactory/genesplicer/GeneSplicer/human")
 
     # F29: resolve the human model to an absolute path (fail fast if absent) so the
     # PATH/conda default (no cd, model beside the binary) is not silently broken.

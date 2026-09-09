@@ -529,7 +529,8 @@ def _default_mmseqs_target_paths(target_db_base, db_root):
     Returns (target_db_base, merged_faa_path).
     """
     if target_db_base:
-        merged_faa = str(Path(target_db_base).parent / 'refseq_proteins_merged.faa')
+        source_dir = Path(db_root) if db_root else Path(target_db_base).parent
+        merged_faa = str(source_dir / 'refseq_proteins_merged.faa')
         return target_db_base, merged_faa
 
     if db_root:

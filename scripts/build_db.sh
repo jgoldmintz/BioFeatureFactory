@@ -19,7 +19,7 @@ set -euo pipefail
 
 # End-to-end database build for codon-aware and AF3 pipelines.
 #
-# Output root: nearest existing Bio_DBs at or above the repo, else <repo>/Bio_DBs.
+# Output root: <repo>/Bio_DBs.
 # Override with DB_ROOT=<path>.
 #
 # Outputs:
@@ -34,8 +34,7 @@ set -euo pipefail
 #   - AF3/RBP_db/* (POSTAR3 indexed if present)
 #
 # Optional env vars:
-#   DB_ROOT=<path>                         (default: nearest existing Bio_DBs at or
-#                                          above the repo, else <repo>/Bio_DBs)
+#   DB_ROOT=<path>                         (default: <repo>/Bio_DBs)
 #   TAXON_GROUP=vertebrate_mammalian      (RefSeq "group" column filter)
 #   ARIA_SPLIT=4
 #   ARIA_CONN=4
@@ -48,6 +47,8 @@ set -euo pipefail
 #   AF3_DOWNLOAD_RBP_MSAS=1               (1=download per-ID MSAs from rbp_uniprot_ids.txt)
 #   AF3_MSA_VERSION=v6                    (used in AF3_MSA_URL_TEMPLATE fallback)
 #   AF3_MSA_URL_TEMPLATE=...              (default: https://alphafold.ebi.ac.uk/files/AF-{ID}-F1-msa_{VERSION}.a3m)
+#   SKIP_IDMAPPING=1                      (skip downloading idmapping; reuse existing outputs)
+#   SKIP_UNIREF90=1                       (skip downloading UniRef90)
 
 TAXON_GROUP="${TAXON_GROUP:-vertebrate_mammalian}"
 EXTRA_TAXON_GROUPS="${EXTRA_TAXON_GROUPS:-vertebrate_other invertebrate}"
@@ -64,31 +65,30 @@ AF3_RBP_MSA_ARCHIVE_URL="${AF3_RBP_MSA_ARCHIVE_URL:-}"
 AF3_DOWNLOAD_RBP_MSAS="${AF3_DOWNLOAD_RBP_MSAS:-1}"
 AF3_MSA_VERSION="${AF3_MSA_VERSION:-v6}"
 AF3_MSA_URL_TEMPLATE="${AF3_MSA_URL_TEMPLATE:-https://alphafold.ebi.ac.uk/files/AF-{ID}-F1-msa_{VERSION}.a3m}"
+SKIP_IDMAPPING="${SKIP_IDMAPPING:-0}"
+SKIP_UNIREF90="${SKIP_UNIREF90:-0}"
+# Every step now has an off switch. Before this, 8 of the 11 steps had none, so
+# the only way to skip the RefSeq assembly download -- by far the largest thing
+# this script does -- was not to run the script. bootstrap.sh composes these from
+# its --<name>-only and --exclude-<name> flags.
+#   SKIP_REFSEQ   steps 1-4: assembly summary, ftp paths, assemblies, merged FASTA
+#   SKIP_MIRNA    step 8: mature_hsa.fasta
+#   SKIP_AF3RBP   step 9: POSTAR3 download, per-RBP MSAs, tabix indexes
+SKIP_REFSEQ="${SKIP_REFSEQ:-0}"
+SKIP_MIRNA="${SKIP_MIRNA:-0}"
+SKIP_AF3RBP="${SKIP_AF3RBP:-0}"
 
+INVOCATION_DIR="$(pwd -P)"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
-# Bio_DBs is not a fixed number of levels above this script. The old default,
-# $PROJECT_ROOT/../Bio_DBs, assumes the repo sits directly beside Bio_DBs; on a
-# checkout nested one deeper (<base>/BFF/BioFeatureFactory next to <base>/Bio_DBs)
-# it names a directory that does not exist, and the build silently creates a
-# second empty database root beside the real one. Search upward for an existing
-# Bio_DBs and use that. When none exists anywhere, create <repo>/Bio_DBs -- inside
-# the checkout, which is what the header documents and what mkdir -p below makes.
-# DB_ROOT= still overrides outright.
-_find_bio_dbs() {
-  local d="$SCRIPT_DIR"
-  local i
-  for i in 1 2 3 4 5; do
-    d="$(cd "$d/.." 2>/dev/null && pwd)" || return 1
-    [[ -d "$d/Bio_DBs" ]] && { echo "$d/Bio_DBs"; return 0; }
-    [[ "$d" == "/" ]] && break
-  done
-  return 1
-}
-DB_ROOT="${DB_ROOT:-$(_find_bio_dbs || echo "$PROJECT_ROOT/Bio_DBs")}"
+DB_ROOT="${DB_ROOT:-$PROJECT_ROOT/Bio_DBs}"
+if [[ "$DB_ROOT" != /* ]]; then
+  DB_ROOT="$INVOCATION_DIR/$DB_ROOT"
+fi
 AWK_SCRIPT="$SCRIPT_DIR/build_refseq_ftp_paths.awk"
 
 mkdir -p "$DB_ROOT"
+DB_ROOT="$(cd "$DB_ROOT" && pwd -P)"
 cd "$DB_ROOT"
 
 download_file() {
@@ -98,7 +98,8 @@ download_file() {
     echo "  EXISTS $out"
     return 0
   fi
-  aria2c --continue=true \
+  if command -v aria2c >/dev/null 2>&1; then
+    aria2c --continue=true \
     --max-connection-per-server="${ARIA_CONN}" \
     --split="${ARIA_SPLIT}" \
     --min-split-size=4M \
@@ -109,9 +110,27 @@ download_file() {
     --file-allocation=none \
     -d "$(dirname "$out")" \
     -o "$(basename "$out")" \
-    "$url"
+      "$url"
+  elif command -v curl >/dev/null 2>&1; then
+    mkdir -p "$(dirname "$out")"
+    local partial="${out}.part"
+    curl --fail --location --retry 20 --retry-delay 10 \
+      --connect-timeout 60 --speed-limit 51200 --speed-time 60 \
+      --output "$partial" "$url" || return $?
+    mv "$partial" "$out"
+  else
+    echo "ERROR: downloading $url requires aria2c or curl." >&2
+    return 1
+  fi
 }
 
+# Steps 1-4 are ONE group: [4] merges what [3] downloaded, and [3] needs the
+# ftp path list [2] builds from the summary [1] fetches. Skipping any one of
+# them alone leaves a half-built refseq_proteins_merged.faa, so they share a
+# single switch.
+if [[ "$SKIP_REFSEQ" == "1" ]]; then
+  echo "[1-4/10] RefSeq assemblies + merged protein FASTA... SKIP (SKIP_REFSEQ=1)"
+else
 echo "[1/10] Downloading RefSeq assembly summary..."
 if [[ -s assembly_summary_refseq.txt ]]; then
   echo "  EXISTS assembly_summary_refseq.txt"
@@ -284,8 +303,14 @@ else
   done < <(find refseq_assemblies -type f \( -name '*_protein.faa.gz' -o -name '*_protein.faa' \) | sort)
 fi
 
+fi
+
 echo "[5/10] Downloading UniProt idmapping.dat.gz (if missing)..."
-if [[ ! -s idmapping.dat.gz && ! -s idmapping.dat ]]; then
+if [[ -s idmapping.dat.gz || -s idmapping.dat ]]; then
+  echo "  EXISTS idmapping.dat.gz or idmapping.dat"
+elif [[ "$SKIP_IDMAPPING" == "1" ]]; then
+  echo "  SKIP (SKIP_IDMAPPING=1)"
+else
   if command -v aria2c &>/dev/null; then
     aria2c -x 16 -s 16 -k 1M -c \
       -o idmapping.dat.gz \
@@ -294,51 +319,59 @@ if [[ ! -s idmapping.dat.gz && ! -s idmapping.dat ]]; then
     curl -L -o idmapping.dat.gz \
       https://ftp.uniprot.org/pub/databases/uniprot/current_release/knowledgebase/idmapping/idmapping.dat.gz
   fi
-else
-  echo "  EXISTS idmapping.dat.gz or idmapping.dat"
 fi
 
 echo "[6/10] Building protein_id_to_refseq.tsv..."
-tmpdir="$(mktemp -d)"
-trap 'rm -rf "$tmpdir"' EXIT
-
 if [[ -s idmapping.dat.gz ]]; then
   IDMAP_READ_CMD=(gzip -dc idmapping.dat.gz)
 elif [[ -s idmapping.dat ]]; then
   IDMAP_READ_CMD=(cat idmapping.dat)
+elif [[ -s protein_id_to_refseq.tsv ]]; then
+  echo "  EXISTS protein_id_to_refseq.tsv (idmapping source absent)"
+  IDMAP_READ_CMD=()
+elif [[ "$SKIP_IDMAPPING" == "1" ]]; then
+  echo "  SKIP (idmapping source absent and SKIP_IDMAPPING=1)"
+  IDMAP_READ_CMD=()
 else
   echo "ERROR: Neither idmapping.dat.gz nor idmapping.dat is available." >&2
   exit 1
 fi
 
-# UniProt -> RefSeq
-"${IDMAP_READ_CMD[@]}" \
-  | awk -F $'\t' '$2=="RefSeq"{print $1"\t"$3}' \
-  | sort -u > "$tmpdir/uniprot_to_refseq.tsv"
+if [[ "${#IDMAP_READ_CMD[@]}" -gt 0 ]]; then
+  tmpdir="$(mktemp -d)"
+  trap 'rm -rf "$tmpdir"' EXIT
 
-# UniProt -> UniParc
-"${IDMAP_READ_CMD[@]}" \
-  | awk -F $'\t' '$2=="UniParc"{print $1"\t"$3}' \
-  | sort -u > "$tmpdir/uniprot_to_uniparc.tsv"
+  # UniProt -> RefSeq
+  "${IDMAP_READ_CMD[@]}" \
+    | awk -F $'\t' '$2=="RefSeq"{print $1"\t"$3}' \
+    | sort -u > "$tmpdir/uniprot_to_refseq.tsv"
 
-# UniParc -> UniProt
-awk -F $'\t' '{print $2"\t"$1}' "$tmpdir/uniprot_to_uniparc.tsv" \
-  | sort -u > "$tmpdir/uniparc_to_uniprot.tsv"
+  # UniProt -> UniParc
+  "${IDMAP_READ_CMD[@]}" \
+    | awk -F $'\t' '$2=="UniParc"{print $1"\t"$3}' \
+    | sort -u > "$tmpdir/uniprot_to_uniparc.tsv"
 
-# UniParc -> RefSeq via UniProt join
-join -t $'\t' -1 2 -2 1 \
-  <(sort -t $'\t' -k2,2 "$tmpdir/uniparc_to_uniprot.tsv") \
-  <(sort -t $'\t' -k1,1 "$tmpdir/uniprot_to_refseq.tsv") \
-  | awk -F $'\t' '{print $2"\t"$3}' \
-  | sort -u > "$tmpdir/uniparc_to_refseq.tsv"
+  # UniParc -> UniProt
+  awk -F $'\t' '{print $2"\t"$1}' "$tmpdir/uniprot_to_uniparc.tsv" \
+    | sort -u > "$tmpdir/uniparc_to_uniprot.tsv"
 
-# Combined lookup: (UniProt OR UniParc) -> RefSeq
-cat "$tmpdir/uniprot_to_refseq.tsv" "$tmpdir/uniparc_to_refseq.tsv" \
-  | sort -u > protein_id_to_refseq.tsv
+  # UniParc -> RefSeq via UniProt join
+  join -t $'\t' -1 2 -2 1 \
+    <(sort -t $'\t' -k2,2 "$tmpdir/uniparc_to_uniprot.tsv") \
+    <(sort -t $'\t' -k1,1 "$tmpdir/uniprot_to_refseq.tsv") \
+    | awk -F $'\t' '{print $2"\t"$3}' \
+    | sort -u > "$tmpdir/uniparc_to_refseq.tsv"
+
+  # Combined lookup: (UniProt OR UniParc) -> RefSeq
+  cat "$tmpdir/uniprot_to_refseq.tsv" "$tmpdir/uniparc_to_refseq.tsv" \
+    | sort -u > protein_id_to_refseq.tsv
+fi
 
 echo "[7/10] Downloading UniRef90 (jackhmmer MSA pipeline)..."
 if [[ -s uniref90.fasta.gz || -s uniref90.fasta ]]; then
   echo "  EXISTS uniref90.fasta.gz or uniref90.fasta"
+elif [[ "$SKIP_UNIREF90" == "1" ]]; then
+  echo "  SKIP (SKIP_UNIREF90=1)"
 else
   if command -v aria2c &>/dev/null; then
     aria2c -x 16 -s 16 -k 4M -c \
@@ -354,6 +387,9 @@ else
   fi
 fi
 
+if [[ "$SKIP_MIRNA" == "1" ]]; then
+  echo "[8/10] human mature miRNA... SKIP (SKIP_MIRNA=1)"
+else
 echo "[8/10] Downloading human mature miRNA sequences (mature_hsa.fasta)..."
 if [[ "$MIRBASE_REFRESH" -eq 1 ]] || [[ ! -s mature_hsa.fasta ]]; then
   if command -v aria2c &>/dev/null; then
@@ -379,9 +415,38 @@ fi
 _hsa_count="$(grep -c '^>' mature_hsa.fasta 2>/dev/null || echo 0)"
 echo "  WROTE mature_hsa.fasta (${_hsa_count} human mature miRNAs)"
 
+fi
+
+if [[ "$SKIP_AF3RBP" == "1" ]]; then
+  echo "[9/10] AF3 RBP DB setup... SKIP (SKIP_AF3RBP=1)"
+else
 echo "[9/10] AF3 RBP DB setup (POSTAR3 + tabix indexes)..."
 RBP_DB_DIR="AF3/RBP_db"
 mkdir -p "$RBP_DB_DIR"
+
+# Refuse rather than produce an empty directory and exit 0. Every fetch below is
+# gated on a URL that defaults to empty, and the per-RBP MSA loop needs a
+# rbp_uniprot_ids.txt this script never creates. With shipped defaults and a
+# fresh DB_ROOT the whole step was a no-op that still printed its output path in
+# the summary -- so `--af3-rbp-only` reported success having written nothing.
+_have_postar=0
+[[ -s "$RBP_DB_DIR/human-POSTAR3.txt" || -s "$RBP_DB_DIR/human-POSTAR3.bed.gz" ]] && _have_postar=1
+_can_get_postar=0
+[[ "$_have_postar" -eq 1 || -n "$POSTAR3_TXT_URL" ]] && _can_get_postar=1
+_can_get_msas=0
+[[ -d "$RBP_DB_DIR/msa" || -n "$AF3_RBP_MSA_ARCHIVE_URL" || -s "$RBP_DB_DIR/rbp_uniprot_ids.txt" ]] && _can_get_msas=1
+
+if [[ "$_can_get_postar" -eq 0 && "$_can_get_msas" -eq 0 ]]; then
+  echo "ERROR: step 9 has no source for anything it is supposed to build." >&2
+  echo "       POSTAR3 binding sites: $RBP_DB_DIR/human-POSTAR3.txt absent and" >&2
+  echo "         POSTAR3_TXT_URL is empty. Set it, or pass --postar3-url to bootstrap.sh." >&2
+  echo "       Per-RBP MSAs: $RBP_DB_DIR/msa absent, AF3_RBP_MSA_ARCHIVE_URL empty," >&2
+  echo "         and $RBP_DB_DIR/rbp_uniprot_ids.txt absent. Set the archive URL, or" >&2
+  echo "         pass --af3-msa-archive-url, or drop in rbp_uniprot_ids.txt to fetch" >&2
+  echo "         them one at a time from AlphaFold DB." >&2
+  echo "       Skip this step deliberately with --exclude-af3-rbp / SKIP_AF3RBP=1." >&2
+  exit 1
+fi
 
 if [[ ! -s "$RBP_DB_DIR/human-POSTAR3.txt" && -n "$POSTAR3_TXT_URL" ]]; then
   download_file "$POSTAR3_TXT_URL" "$RBP_DB_DIR/human-POSTAR3.txt"
@@ -473,6 +538,8 @@ if [[ -d "$RBP_DB_DIR/msa" ]]; then
   echo "  RBP MSA files: $msa_count"
 else
   echo "  WARN AF3/RBP_db/msa is missing. Set AF3_RBP_MSA_ARCHIVE_URL to auto-populate."
+fi
+
 fi
 
 # -- Step 9b: CoCoPUTs human codon usage table (rare_codon null model) ----

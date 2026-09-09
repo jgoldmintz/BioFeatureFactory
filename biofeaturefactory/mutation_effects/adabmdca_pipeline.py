@@ -25,7 +25,7 @@ native. This module then loads the resulting text-format params and produces
 per-mutation TSVs with the same routing logic as evmutation_pipeline.py:
 
   protein TSV  missense (and synonymous + stop when --skip-codon is set)
-  codon TSV    synonymous + stop variants only
+  codon TSV    synonymous + stop variants; all variants with --score-missense-codon
 
 Math per mutation (i = position, a = WT token, b = mutant token):
   DeltaH_independent = h_i(b) - h_i(a)
@@ -47,6 +47,7 @@ Concordance (per-position relative threshold, matches EVmutation convention):
 from __future__ import annotations
 
 import argparse
+import math
 import os
 import re
 import sys
@@ -59,12 +60,13 @@ import numpy as np
 _BIN_DIR = Path(__file__).resolve().parent / "bin"
 sys.path.insert(0, str(_BIN_DIR))
 try:
-    from codon_encoding import CHAR_TO_CODON, CODON_ALPHABET, encode_codon_msa
+    from codon_encoding import CHAR_TO_CODON, CODON_TO_CHAR, CODON_ALPHABET, encode_codon_msa
     _CODON_ENCODING_AVAILABLE = True
 except ImportError:
     _CODON_ENCODING_AVAILABLE = False
     CODON_ALPHABET = None
     CHAR_TO_CODON = {}
+    CODON_TO_CHAR = {}
 
 from biofeaturefactory.lib.utility import (
     derive_mutations_root,
@@ -139,6 +141,27 @@ CODON_FIELDNAMES_ADABM = [
 # sequence train.py:main() runs, minus the argparse + subprocess plumbing.
 # Exceptions propagate naturally.
 
+def _configure_task_resources(device):
+    import atexit
+    import json
+    import torch
+
+    threads = os.environ.get("BFF_TASK_THREADS")
+    if threads:
+        torch.set_num_threads(int(threads))
+    if device.type == "cuda":
+        torch.cuda.reset_peak_memory_stats(device)
+    report_path = os.environ.get("BFF_TASK_RESOURCE_REPORT")
+    if report_path:
+        def write_report():
+            values = {"device": str(device), "torch_threads": torch.get_num_threads()}
+            if device.type == "cuda":
+                values["peak_allocated_gib"] = torch.cuda.max_memory_allocated(device) / 1024 ** 3
+                values["peak_reserved_gib"] = torch.cuda.max_memory_reserved(device) / 1024 ** 3
+            Path(report_path).write_text(json.dumps(values) + "\n")
+        atexit.register(write_report)
+
+
 def train_adabmdca_in_process(
     msa_path: str,
     alphabet: str,
@@ -180,6 +203,7 @@ def train_adabmdca_in_process(
 
     device = get_device(device_str)
     dtype = get_dtype(dtype_str)
+    _configure_task_resources(device)
 
     if not quiet:
         alpha_label = "codon (65-char)" if len(alphabet) == 65 else alphabet
@@ -301,20 +325,10 @@ def train_adabmdca_in_process(
     except RuntimeError as e:
         if "out of memory" not in str(e).lower():
             raise  # not an OOM -- propagate the original error untouched
-        peak_low  = 4 * L * L * q * q * 4 / 1e9
-        peak_high = 5 * L * L * q * q * 4 / 1e9
-        pl_low    = 2 * L * L * q * q * 4 / 1e9
-        pl_high   = 3 * L * L * q * q * 4 / 1e9
         raise RuntimeError(
-            f"adabmDCA Boltzmann training OOM'd at L={L}, q={q}.\n"
-            f"  Peak memory for Boltzmann is ~4-5 x L^2q^2 x 4 bytes (float32) = "
-            f"~{peak_low:.1f}-{peak_high:.1f} GiB.\n"
-            f"  Pseudolikelihood mode roughly halves this (~{pl_low:.1f}-{pl_high:.1f} GiB)\n"
-            f"  by dropping the MCMC chains + fij_chains buffers. Re-run with:\n"
-            f"      --adabmdca-model pseudoDCA\n"
-            f"  For genes much larger than ~1200 codons at q=65, even pseudolikelihood\n"
-            f"  won't fit on a single GPU -- use the EVmutation/plmc codon backend\n"
-            f"  (pseudolikelihood on CPU, scales via system RAM).\n"
+            f"adabmDCA {model} training ran out of memory on {device} at L={L}, q={q}.\n"
+            f"  The controller's auto placement can retry a CUDA OOM on CPU when its RAM estimate fits.\n"
+            f"  CPU placement preserves the selected model; it does not guarantee sufficient memory.\n"
             f"  Original error: {e}"
         ) from e
 
@@ -385,9 +399,11 @@ def train_adabmdca_pseudolikelihood_in_process(
                   accumulator. Larger = faster but more peak intermediate
                   memory (4 x L x q x chunk x q x 4 bytes float32).
       tol, patience, check_every: convergence test. Every `check_every` epochs,
-                  ||grad|| is compared against its value at the first check;
-                  when the ratio stays below `tol` for `patience` consecutive
-                  checks the loop breaks. tol=0 disables the test.
+                  the relative decrease in ||grad|| is compared with `tol`.
+                  Nonnegative decreases below `tol` for `patience` consecutive
+                  checks stop training; increases reset patience. A zero norm
+                  remaining zero also counts as stable. Nonfinite checked norms
+                  fail without saving parameters. tol=0 disables early stopping.
 
     Convergence: the Boltzmann routines in adabmDCApy self-terminate at
     `target_pearson` (default 0.95), but this pseudolikelihood loop is BFF's own
@@ -396,16 +412,15 @@ def train_adabmdca_pseudolikelihood_in_process(
     the print site and thrown away, so "did 500 epochs converge?" was
     unanswerable by construction. It is now measured.
 
-    The test is RELATIVE to the first checked gradient norm, not absolute: the
-    norm scales with L, q and the sequence weights, so any fixed threshold would
-    mean something different for every gene. Ratio-to-initial is scale-free and
-    comparable across the panel.
+    The test uses relative change since the preceding check, not an absolute
+    norm threshold or a ratio to the initial norm. This is a plateau heuristic,
+    not proof of an optimum or biological validity.
 
-    This matters most on rented hardware. `--adabmdca-nepochs` defaults to 50000
-    (a Boltzmann-sized number; this function's own signature default is 500), and
-    at codon scale the per-epoch cost is the L^2q^2 gradient einsum below, so the
-    difference between stopping at convergence and running the ceiling is the
-    difference between a run and days of billed compute.
+    The CLI defaults to pseudoDCA with a 500-epoch ceiling and the convergence
+    checks above; explicitly selecting a Boltzmann model instead defaults to a
+    50000-epoch ceiling. An explicit `--adabmdca-nepochs` overrides either limit.
+    At codon scale the per-epoch cost is the L^2q^2 gradient einsum below, so
+    stopping at convergence can avoid substantial unnecessary computation.
 
     Writes the trained params to output_params_path in adabmDCApy text format.
     Returns that path.
@@ -418,6 +433,7 @@ def train_adabmdca_pseudolikelihood_in_process(
 
     device = get_device(device_str)
     dtype = get_dtype(dtype_str)
+    _configure_task_resources(device)
 
     if not quiet:
         alpha_label = "codon (65-char)" if len(alphabet) == 65 else alphabet
@@ -594,10 +610,12 @@ def train_adabmdca_pseudolikelihood_in_process(
                 grad_norm = None
                 if is_check or (not quiet and epoch % 25 == 0):
                     grad_norm = (grad_h.norm() + grad_J.norm()).item()
+                    if not math.isfinite(grad_norm):
+                        raise RuntimeError(f"Nonfinite pseudolikelihood gradient at epoch {epoch}")
                 if not quiet and (epoch % 25 == 0 or epoch == nepochs - 1):
                     if grad_norm is None:
                         grad_norm = (grad_h.norm() + grad_J.norm()).item()
-                    ratio = "" if grad_norm_0 is None else f", ||grad||/||grad||_0 = {grad_norm / grad_norm_0:.3e}"
+                    ratio = "" if not grad_norm_0 else f", ||grad||/||grad||_0 = {grad_norm / grad_norm_0:.3e}"
                     print(f"    epoch {epoch:4d}: PL = {PL.item():.4f}, "
                           f"||grad|| = {grad_norm:.4e}{ratio}")
                 if is_check:
@@ -616,16 +634,19 @@ def train_adabmdca_pseudolikelihood_in_process(
                         prev = history[-1][1]
                         if prev > 0:
                             rel_drop = (prev - grad_norm) / prev
+                        elif prev == grad_norm == 0:
+                            rel_drop = 0.0
                     history.append((epoch, grad_norm))
-                    if rel_drop is not None and rel_drop < tol:
+                    if rel_drop is not None and 0 <= rel_drop < tol:
                         below += 1
                         if below >= patience:
                             stopped_at = epoch
                             if not quiet:
+                                ratio = (f" (||grad||/||grad||_0 = {grad_norm / grad_norm_0:.3e})"
+                                         if grad_norm_0 else " (zero gradient)")
                                 print(f"    converged: ||grad|| improved <{tol:.1e} per "
                                       f"{check_every} epochs for {patience} consecutive "
-                                      f"checks; stopping at epoch {epoch} of {nepochs} "
-                                      f"(||grad||/||grad||_0 = {grad_norm / grad_norm_0:.3e})")
+                                      f"checks; stopping at epoch {epoch} of {nepochs}{ratio}")
                             del wdiff
                             break
                     else:
@@ -666,9 +687,9 @@ def train_adabmdca_pseudolikelihood_in_process(
                 last_drop = f", last decrease {d:.2e} per {check_every} epochs (tol={tol:.1e})"
             ratio = f", ||grad||/||grad||_0 = {history[-1][1] / grad_norm_0:.3e}" \
                     if history and grad_norm_0 else ""
-            print(f"    NOT converged: ran all {nepochs} epochs and ||grad|| was still "
-                  f"descending{ratio}{last_drop}. Raise --adabmdca-nepochs, or loosen "
-                  f"--adabmdca-tol if this decrease is small enough for your purpose.")
+            print(f"    NOT converged: ran all {nepochs} epochs without a stable gradient "
+                  f"plateau{ratio}{last_drop}. Inspect the gradient trend and learning rate "
+                  f"before adjusting --adabmdca-nepochs or --adabmdca-tol.")
         else:
             print(f"    epochs run: {stopped_at + 1} of {nepochs} "
                   f"({(nepochs - stopped_at - 1) / nepochs:.0%} of the ceiling saved)")
@@ -697,87 +718,64 @@ def load_adabmdca_params(path: str, alphabet: str,
       h: (L, q) array
       J: (L, q, L, q) array (symmetrized)
 
-    MEMORY. J is dense (L, L, q, q) and that is the whole cost of this function:
+    The first streaming pass validates records and determines L. The second
+    fills the dense arrays directly, mirroring each coupling without retaining
+    Python record lists or allocating a second coupling tensor. Duplicate and
+    reverse-direction records retain their last-write-wins behavior.
 
-        gene          L     q   one J    old peak   this peak
-        SMN2 codon   294    64   2.6 G      5.3 G       1.3 G
-        F9   codon   461    64   6.5 G     13.0 G       3.2 G
-        PAM  codon   974    64  29.0 G     57.9 G      14.5 G
-        BRCA1 codon 1863    64 105.9 G    211.8 G      53.0 G
-        BRCA1 aa    1863    21  11.4 G     22.8 G       5.7 G
-
-    Two changes get that 4x:
-
-    1. The symmetrization used to be `J = J + J.transpose(1, 0, 3, 2)`, which
-       allocates a SECOND full-size array before the first is released -- peak
-       2x, for an operation that writes each value exactly once. The mirrored
-       write below fills both halves in the record loop instead, so peak is 1x.
-       Exact for the documented format: entries are strictly upper-triangular
-       (i < j), so `J[i,j,a,b] = v; J[j,i,b,a] = v` and "assign upper, then add
-       the transpose" produce the same array -- the transpose contributes 0 to
-       the upper half and v to the lower.
-    2. float32 rather than float64. These are DCA couplings consumed by
-       _delta_hamiltonian_multi as a sum of differences; float64 was never a
-       precision requirement, and params.adabmdca_dtype in bin/main.nf already
-       defaults the TRAINING side to float32. Pass dtype=np.float64 to restore
-       the old precision.
-
-    NOT fixed here: J is still materialized in full. _delta_hamiltonian_multi
-    only ever touches rows for mutated positions, so streaming straight from
-    j_records would make this O(mutated sites) instead of O(L^2 q^2) and is what
-    a codon-alphabet BRCA1 actually needs. That is a change to the scoring path,
-    not to this loader.
+    Dense storage still requires L^2 q^2 elements. The default float32 matches
+    training precision; pass dtype=np.float64 for double precision. The final
+    transpose is a view of the (L, L, q, q) allocation.
     """
-    token_to_idx = {ch: i for i, ch in enumerate(alphabet)}
-    q = len(alphabet)
+    token_to_idx = {token: index for index, token in enumerate(alphabet)}
+    alphabet_size = len(alphabet)
+    max_index = None
+    has_fields = False
 
-    h_records: List[Tuple[int, int, float]] = []
-    j_records: List[Tuple[int, int, int, int, float]] = []
+    with open(path) as params_file:
+        for pass_index in range(2):
+            if pass_index == 1:
+                if not has_fields:
+                    raise RuntimeError(f"No 'h' entries found in {path}")
+                sequence_length = max_index + 1
+                fields = np.zeros((sequence_length, alphabet_size), dtype=dtype)
+                couplings = np.zeros(
+                    (sequence_length, sequence_length, alphabet_size, alphabet_size),
+                    dtype=dtype,
+                )
+                params_file.seek(0)
 
-    with open(path) as f:
-        for line in f:
-            parts = line.split()
-            if not parts:
-                continue
-            tag = parts[0]
-            if tag == "h":
-                # h idx aa value
-                idx = int(parts[1])
-                aa = parts[2]
-                val = float(parts[3])
-                h_records.append((idx, token_to_idx[aa], val))
-            elif tag == "J":
-                # J idx0 idx1 aa0 aa1 value
-                idx0 = int(parts[1])
-                idx1 = int(parts[2])
-                aa0 = parts[3]
-                aa1 = parts[4]
-                val = float(parts[5])
-                j_records.append((idx0, idx1, token_to_idx[aa0], token_to_idx[aa1], val))
+            for line in params_file:
+                parts = line.split()
+                if not parts:
+                    continue
+                tag = parts[0]
+                if tag == "h":
+                    index = int(parts[1])
+                    token = parts[2]
+                    value = float(parts[3])
+                    token_index = token_to_idx[token]
+                    if pass_index == 0:
+                        has_fields = True
+                        max_index = index if max_index is None else max(max_index, index)
+                    else:
+                        fields[index, token_index] = value
+                elif tag == "J":
+                    left_index = int(parts[1])
+                    right_index = int(parts[2])
+                    left_token = parts[3]
+                    right_token = parts[4]
+                    value = float(parts[5])
+                    left_state = token_to_idx[left_token]
+                    right_state = token_to_idx[right_token]
+                    if pass_index == 0:
+                        record_max = max(left_index, right_index)
+                        max_index = record_max if max_index is None else max(max_index, record_max)
+                    else:
+                        couplings[left_index, right_index, left_state, right_state] = value
+                        couplings[right_index, left_index, right_state, left_state] = value
 
-    if not h_records:
-        raise RuntimeError(f"No 'h' entries found in {path}")
-
-    L = max(rec[0] for rec in h_records) + 1
-    if j_records:
-        L = max(L, max(rec[0] for rec in j_records) + 1, max(rec[1] for rec in j_records) + 1)
-
-    h = np.zeros((L, q), dtype=dtype)
-    for idx, ai, val in h_records:
-        h[idx, ai] = val
-
-    # Mirrored write, not assign-then-add-transpose: see MEMORY in the docstring.
-    J = np.zeros((L, L, q, q), dtype=dtype)
-    for i, j, ai, bj, val in j_records:
-        J[i, j, ai, bj] = val
-        J[j, i, bj, ai] = val
-
-    # Reorganize to (L, q, L, q) -- matches EVmutation's J_ij[i, a, j, b] layout.
-    # transpose returns a VIEW, so this costs nothing; the copy happens later in
-    # apply_zero_sum_gauge, which is the other place peak memory is set.
-    J = J.transpose(0, 2, 1, 3)
-
-    return h, J
+    return fields, couplings.transpose(0, 2, 1, 3)
 
 
 # ---------------------------------------------------------------------------
@@ -786,22 +784,33 @@ def load_adabmdca_params(path: str, alphabet: str,
 
 def apply_zero_sum_gauge(h: np.ndarray, J: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
     """
-    Apply zero-sum gauge in place semantics (returns new arrays).
+    Apply zero-sum gauge, returning new arrays without changing the inputs.
 
     Convention (matches plmc / EVmutation / adabmDCA.dca.set_zerosum_gauge):
       h_i(a)    -= mean_a h_i(a)
       J_ij(a,b) -= row_mean_b + col_mean_a - global_mean   per (i,j)
 
     Resulting h satisfies sum_a h_i(a) ~= 0; coupling rows and columns sum to
-    zero per (i,j) block.
+    zero per (i,j) block. Position blocks bound reduction scratch space; all
+    coupling arithmetic writes directly into the single output allocation.
     """
     h_g = h - h.mean(axis=1, keepdims=True)
 
-    # J shape: (L, q, L, q) -> dim 1 = a (left), dim 3 = b (right)
-    row_mean = J.mean(axis=1, keepdims=True)
-    col_mean = J.mean(axis=3, keepdims=True)
-    global_mean = J.mean(axis=(1, 3), keepdims=True)
-    J_g = J - row_mean - col_mean + global_mean
+    coupling_dtype = np.float64 if J.dtype.kind in "biu" else J.dtype
+    J_g = np.empty_like(J, dtype=coupling_dtype)
+    position_chunk = 64
+    for left_start in range(0, J.shape[0], position_chunk):
+        left_stop = left_start + position_chunk
+        for right_start in range(0, J.shape[2], position_chunk):
+            right_stop = right_start + position_chunk
+            coupling_block = J[left_start:left_stop, :, right_start:right_stop, :]
+            output_block = J_g[left_start:left_stop, :, right_start:right_stop, :]
+            row_mean = coupling_block.mean(axis=1, keepdims=True)
+            col_mean = coupling_block.mean(axis=3, keepdims=True)
+            global_mean = coupling_block.mean(axis=(1, 3), keepdims=True)
+            np.subtract(coupling_block, row_mean, out=output_block)
+            np.subtract(output_block, col_mean, out=output_block)
+            np.add(output_block, global_mean, out=output_block)
 
     return h_g, J_g
 
@@ -1216,13 +1225,12 @@ def _substitution_plan(consequence: str, aa_pos: int, wt_aa: str, mut_aa: str):
 
 
 def _non_snv_rows_adabm(pkey, nt_mut, variant, orf_seq, skip_codon,
-                        aa_ctx=None, codon_ctx=None):
+                        aa_ctx=None, codon_ctx=None, score_missense_codon=False):
     """Build the row for one non-SNV token. Returns (protein_row, codon_row).
 
-    Exactly one is not None -- the routing mirrors the SNV path: synonymous and stop
-    variants belong to the codon table unless --skip-codon sends them to the protein
-    table. Metric columns are always EMPTY (see the module note above); qc_flags
-    carries NON_SNV:<kind>, AA:<consequence> and the reason no score exists.
+    Exactly one is not None. Synonymous and stop variants normally belong to the
+    codon table; score_missense_codon also routes other classes there. Represented
+    substitutions receive scores and other shapes retain explicit QC reasons.
     """
     qc = [f"NON_SNV:{variant.kind}"]
 
@@ -1270,7 +1278,7 @@ def _non_snv_rows_adabm(pkey, nt_mut, variant, orf_seq, skip_codon,
     }
 
     # ---- codon-table classes: synonymous and stop, exactly as for an SNV ----
-    if consequence in ("synonymous", "stop_gained", "stop_lost"):
+    if consequence in ("synonymous", "stop_gained", "stop_lost") or score_missense_codon:
         if skip_codon:
             prow = _blank_row(PROTEIN_FIELDNAMES_ADABM, pkey, nt_mut, qc)
             prow.update(shared)
@@ -1291,8 +1299,12 @@ def _non_snv_rows_adabm(pkey, nt_mut, variant, orf_seq, skip_codon,
 
         crow = _blank_row(CODON_FIELDNAMES_ADABM, pkey, nt_mut, qc)
         crow.update({k: v for k, v in shared.items() if k in CODON_FIELDNAMES_ADABM})
-        if consequence != "synonymous":
+        if score_missense_codon and shared["mutation_class"] == "MISSENSE":
+            qc.append("MISSENSE_CODON_LEVEL")
+        if consequence in ("stop_gained", "stop_lost"):
             qc.append(_AA_CONSEQUENCE_TO_CLASS[consequence])
+        elif delta:
+            qc.append("FRAMESHIFT_NOT_REPRESENTABLE_FIXED_L" if delta % 3 else "CODON_LENGTH_CHANGE_UNSCORED")
         else:
             codon_plan = [c for c in range(first_codon, last_codon + 1)
                           if orf_seq[c * 3:c * 3 + 3] != mut_orf[c * 3:c * 3 + 3]]
@@ -1307,7 +1319,11 @@ def _non_snv_rows_adabm(pkey, nt_mut, variant, orf_seq, skip_codon,
                 # lookup; for several it is the only route.
                 plan = [(c + 1, orf_seq[c * 3:c * 3 + 3], mut_orf[c * 3:c * 3 + 3])
                         for c in codon_plan]
-                cols, reason = _score_plan_adabm(codon_ctx, plan)
+                encoded_plan = [
+                    (position, CODON_TO_CHAR.get(wild_type, ""), CODON_TO_CHAR.get(mutant, ""))
+                    for position, wild_type, mutant in plan
+                ]
+                cols, reason = _score_plan_adabm(codon_ctx, encoded_plan)
                 if cols:
                     crow.update({
                         "prediction_codon_independent_adabm": cols["independent"],
@@ -1318,11 +1334,11 @@ def _non_snv_rows_adabm(pkey, nt_mut, variant, orf_seq, skip_codon,
                             ("CONCORDANT" if (cols["epistatic"] >= 0) == (cols["independent"] >= 0)
                              else "DISCORDANT"),
                     })
-                    qc.append("SYNONYMOUS_SCORED")
+                    qc.append(f"{shared['mutation_class']}_SCORED")
                     if len(plan) > 1:
                         qc.append("CONCORDANCE_UNDEFINED_MULTICODON")
                 else:
-                    qc.append(f"SYNONYMOUS_{reason}")
+                    qc.append(f"{shared['mutation_class']}_{reason}")
         crow["qc_flags"] = ";".join(qc)
         return None, crow
 
@@ -1384,6 +1400,7 @@ def score_nt_mutations_adabm(
     skip_codon: bool = False,
     aa_ctx: Optional["ModelContext"] = None,
     codon_ctx: Optional["ModelContext"] = None,
+    score_missense_codon: bool = False,
 ) -> Tuple[List[Dict], List[Dict]]:
     """
     Map and score NT mutations through the adabmDCA backend.
@@ -1397,11 +1414,16 @@ def score_nt_mutations_adabm(
       synonymous (skip_codon=True)  -> protein TSV with score 0 (trivial: M->M)
       stop_gain/loss (skip_codon=False) -> codon TSV (annotation only)
       stop_gain/loss (skip_codon=True)  -> protein TSV with empty scores
+      score_missense_codon=True -> missense scores and unscored QC rows in codon TSV
     """
+    if score_missense_codon and skip_codon:
+        raise ValueError("Codon missense scoring cannot be combined with skip_codon")
     failure_map = failure_map or {}
     nt_re = re.compile(r"^([ACGT])(\d+)([ACGT])$")
     protein_rows: List[Dict] = []
     codon_rows: List[Dict] = []
+    unscored_fields = CODON_FIELDNAMES_ADABM if score_missense_codon else PROTEIN_FIELDNAMES_ADABM
+    unscored_rows = codon_rows if score_missense_codon else protein_rows
 
     for nt_mut in nt_mutations:
         if should_skip_mutation(gene, nt_mut, failure_map):
@@ -1433,24 +1455,25 @@ def score_nt_mutations_adabm(
             variant = parse_variant(nt_mut, is_nt=True)
             if variant is not None and not variant.is_snv:
                 prow, crow = _non_snv_rows_adabm(pkey, nt_mut, variant, orf_seq, skip_codon,
-                                                 aa_ctx=aa_ctx, codon_ctx=codon_ctx)
+                                                 aa_ctx=aa_ctx, codon_ctx=codon_ctx,
+                                                 score_missense_codon=score_missense_codon)
                 if prow is not None:
-                    protein_rows.append(prow)
+                    unscored_rows.append({field: prow.get(field, "") for field in unscored_fields})
                 else:
                     codon_rows.append(crow)
                 continue
-            prow = {f: "" for f in PROTEIN_FIELDNAMES_ADABM}
+            prow = {field: "" for field in unscored_fields}
             prow.update({"pkey": pkey, "nt_mutant": nt_mut, "qc_flags": "INVALID_MUTATION"})
-            protein_rows.append(prow)
+            unscored_rows.append(prow)
             continue
 
         ref_nt, pos_str, alt_nt = m.groups()
         nt_pos = int(pos_str)
         idx = nt_pos - 1
         if idx < 0 or idx >= len(orf_seq):
-            prow = {f: "" for f in PROTEIN_FIELDNAMES_ADABM}
+            prow = {field: "" for field in unscored_fields}
             prow.update({"pkey": pkey, "nt_mutant": nt_mut, "qc_flags": "OUT_OF_RANGE"})
-            protein_rows.append(prow)
+            unscored_rows.append(prow)
             continue
 
         if orf_seq[idx] != ref_nt:
@@ -1458,9 +1481,9 @@ def score_nt_mutations_adabm(
 
         codon_start = (idx // 3) * 3
         if codon_start + 3 > len(orf_seq):
-            prow = {f: "" for f in PROTEIN_FIELDNAMES_ADABM}
+            prow = {field: "" for field in unscored_fields}
             prow.update({"pkey": pkey, "nt_mutant": nt_mut, "qc_flags": "PARTIAL_CODON"})
-            protein_rows.append(prow)
+            unscored_rows.append(prow)
             continue
 
         wt_codon = orf_seq[codon_start:codon_start + 3]
@@ -1480,7 +1503,9 @@ def score_nt_mutations_adabm(
             "mutation_class": mclass,
         }
 
-        if mclass == "SYNONYMOUS":
+        if mclass == "SYNONYMOUS" or (score_missense_codon and mclass == "MISSENSE"):
+            if mclass == "MISSENSE":
+                qc_flags.append("MISSENSE_CODON_LEVEL")
             if skip_codon:
                 # Route to protein TSV: synonymous AA score is trivially 0.
                 prow = {f: "" for f in PROTEIN_FIELDNAMES_ADABM}
@@ -1503,7 +1528,7 @@ def score_nt_mutations_adabm(
                 if codon_lookup is not None:
                     scored = codon_lookup.get((aa_pos, mut_codon))
                     if scored is None:
-                        qc_flags.append("SYNONYMOUS_NOT_IN_CODON_MODEL")
+                        qc_flags.append(f"{mclass}_NOT_IN_CODON_MODEL")
                     else:
                         crow.update({
                             "prediction_codon_independent_adabm": scored["indep"],
@@ -1512,9 +1537,9 @@ def score_nt_mutations_adabm(
                             "codon_concordance_adabm":            scored["concordance"],
                             "codon_frequency_adabm":              scored["frequency"],
                         })
-                        qc_flags.append("SYNONYMOUS_SCORED")
+                        qc_flags.append(f"{mclass}_SCORED")
                 else:
-                    qc_flags.append("SYNONYMOUS_UNSCORED")
+                    qc_flags.append(f"{mclass}_UNSCORED")
                 crow["qc_flags"] = ";".join(qc_flags)
                 codon_rows.append(crow)
 
@@ -1558,7 +1583,7 @@ def score_nt_mutations_adabm(
                     })
                     qc_flags.append("PASS")
             prow["qc_flags"] = ";".join(qc_flags) if qc_flags else "PASS"
-            protein_rows.append(prow)
+            unscored_rows.append({field: prow.get(field, "") for field in unscored_fields})
 
     return protein_rows, codon_rows
 
@@ -1648,6 +1673,7 @@ def _process_gene(
     output_dir: Path,
     args: argparse.Namespace,
 ) -> Tuple[int, int]:
+    score_missense_codon = getattr(args, "score_missense_codon", False)
     _, orf_seq = _read_orf_sequence(fasta_file)
     nt_mutations = trim_muts(mutations_file, log=args.validation_log, gene_name=gene)
     if not nt_mutations:
@@ -1676,7 +1702,7 @@ def _process_gene(
     # indistinguishable from a mutation that was never submitted. Every metric column
     # stays EMPTY -- there is no site index to evaluate.
     intronic_rows = [
-        _blank_row(PROTEIN_FIELDNAMES_ADABM, mint_pkey(gene, tok), tok,
+        _blank_row(CODON_FIELDNAMES_ADABM if score_missense_codon else PROTEIN_FIELDNAMES_ADABM, mint_pkey(gene, tok), tok,
                    ["NON_ORF_TOKEN:no_residue_or_codon_site_in_potts_model"])
         for tok in intronic
     ]
@@ -1684,12 +1710,12 @@ def _process_gene(
         print("  (every mutation was intronic)")
         gene_dir = output_dir / gene / "adabmDCA"
         gene_dir.mkdir(parents=True, exist_ok=True)
-        write_tsv(intronic_rows, str(gene_dir / f"{gene}.protein.tsv"),
+        write_tsv([] if score_missense_codon else intronic_rows, str(gene_dir / f"{gene}.protein.tsv"),
                   PROTEIN_FIELDNAMES_ADABM, extrasaction="ignore")
         if not args.skip_codon:
-            write_tsv([], str(gene_dir / f"{gene}.codon.tsv"),
+            write_tsv(intronic_rows if score_missense_codon else [], str(gene_dir / f"{gene}.codon.tsv"),
                       CODON_FIELDNAMES_ADABM, extrasaction="ignore")
-        return len(intronic_rows), 0
+        return (0, len(intronic_rows)) if score_missense_codon else (len(intronic_rows), 0)
 
     # Resolve params (training if needed) + the MSA paths the scorer reads.
     protein_params_path, codon_params_path, protein_msa_path, codon_msa_path = \
@@ -1697,7 +1723,7 @@ def _process_gene(
 
     aa_lookup = None
     aa_ctx = None
-    if protein_params_path and protein_msa_path:
+    if protein_params_path and protein_msa_path and not score_missense_codon:
         if not args.quiet:
             print(f"  Loading protein adabmDCA params: {protein_params_path}")
         aa_lookup, aa_ctx = _build_protein_lookup_from_params(
@@ -1719,9 +1745,13 @@ def _process_gene(
         aa_lookup=aa_lookup, codon_lookup=codon_lookup,
         failure_map=failure_map, skip_codon=args.skip_codon,
         aa_ctx=aa_ctx, codon_ctx=codon_ctx,
+        score_missense_codon=score_missense_codon,
     )
     # Excluded tokens keep their row so a pkey join across pipelines has no hole.
-    protein_rows = intronic_rows + protein_rows
+    if score_missense_codon:
+        codon_rows = intronic_rows + codon_rows
+    else:
+        protein_rows = intronic_rows + protein_rows
 
     gene_dir = output_dir / gene / "adabmDCA"
     gene_dir.mkdir(parents=True, exist_ok=True)
@@ -1865,7 +1895,7 @@ def _resolve_per_gene_adabm_params(gene: str, args: argparse.Namespace) -> Tuple
     # -- Protein --
     protein_params: Optional[str] = None
     protein_msa: Optional[str] = None
-    if args.msa:
+    if args.msa and not getattr(args, "score_missense_codon", False):
         protein_msa = _find_file_for_gene(
             gene, args.msa, ["*.a2m", "*.msa.fasta", "*.msa.a2m", "*.fasta", "*.fa", "*.fas"]
         )
@@ -1880,7 +1910,7 @@ def _resolve_per_gene_adabm_params(gene: str, args: argparse.Namespace) -> Tuple
             protein_params = target if os.path.exists(target) else None
         elif not args.quiet:
             print(f"  Warning: no protein MSA found for {gene} in {args.msa}")
-    elif args.protein_params:
+    elif args.protein_params and not getattr(args, "score_missense_codon", False):
         protein_params = _resolve_params_file(gene, args.protein_params, ".protein_adabm_params")
 
     # -- Codon --
@@ -1949,12 +1979,14 @@ def main() -> None:
     parser.add_argument("-g", "--gene", help="Gene name override (single-gene mode)")
     parser.add_argument("-sc", "--skip-codon", action="store_true",
                         help="Route synonymous + stop to the protein TSV; do not produce codon TSV")
+    parser.add_argument("--score-missense-codon", action="store_true",
+                        help="Use only the codon model, including missense scores and unscored QC rows")
     parser.add_argument("-st", "--skip-train", action="store_true",
                         help="Skip adabmDCA train invocation (encoding still runs for codon MSAs)")
     # adabmDCA training tunables (consumed by train_adabmdca_in_process when training fires)
-    parser.add_argument("-am", "--adabmdca-model", default="bmDCA",
+    parser.add_argument("-am", "--adabmdca-model", default="pseudoDCA",
                         choices=["bmDCA", "eaDCA", "edDCA", "pseudoDCA"],
-                        help="Training algorithm. bmDCA/eaDCA/edDCA are Boltzmann-learning "
+                        help="Training algorithm (default: pseudoDCA). bmDCA/eaDCA/edDCA are Boltzmann-learning "
                              "variants (high memory); pseudoDCA is pseudolikelihood maximization "
                              "(~2x less peak memory, no MCMC).")
     # Backend-aware: None resolves in _build_adabmdca_params to 50000 for the
@@ -1975,8 +2007,10 @@ def main() -> None:
                         help="Epochs between convergence checks (default: 10)")
     parser.add_argument("-ata", "--adabmdca-target", type=float, default=0.95)
     parser.add_argument("-al", "--adabmdca-lr", type=float, default=0.01)
-    parser.add_argument("-anc", "--adabmdca-nchains", type=int, default=10000)
-    parser.add_argument("-ans", "--adabmdca-nsweeps", type=int, default=10)
+    parser.add_argument("-anc", "--adabmdca-nchains", type=int, default=10000,
+                        help="MCMC chains for Boltzmann models; unused by pseudoDCA (default: 10000)")
+    parser.add_argument("-ans", "--adabmdca-nsweeps", type=int, default=10,
+                        help="MCMC sweeps for Boltzmann models; unused by pseudoDCA (default: 10)")
     parser.add_argument("-ad", "--adabmdca-device", default="cuda")
     parser.add_argument("-adt", "--adabmdca-dtype", default="float32",
                         choices=["float32", "float64"])
@@ -1987,6 +2021,8 @@ def main() -> None:
     parser.add_argument("--quiet", "-q", action="store_true")
 
     args = parser.parse_args()
+    if args.score_missense_codon and args.skip_codon:
+        parser.error("--score-missense-codon cannot be combined with --skip-codon")
 
 
     # Directory mode: <root>/<GENE>/mappings/mutations/ sits beside the input,

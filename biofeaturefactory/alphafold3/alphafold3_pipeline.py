@@ -42,12 +42,12 @@ from biofeaturefactory.alphafold3.bin.af3_runner import AF3Runner, AF3RunnerConf
 from biofeaturefactory.alphafold3.bin.af3_parser import (
     AF3Parser, AF3Structure, analyze_binding, BindingAnalysis,
     parse_all_samples, aggregate_binding_analyses, AggregatedBindingAnalysis,
-    extract_interface_sites
+    extract_interface_sites, ensemble_interface_sites
 )
 from biofeaturefactory.alphafold3.bin.binding_metrics import (
     BindingMetrics, DeltaMetrics, ThresholdConfig, RnaEditSpan,
-    compute_delta_metrics, aggregate_mutation_summary,
-    format_events_rows, format_sites_rows
+    compute_delta_metrics, aggregate_mutation_summary, qc_flag_for_deltas,
+    format_events_rows, format_sites_rows, compute_window_delta
 )
 
 from biofeaturefactory.lib.utility import (
@@ -56,6 +56,7 @@ from biofeaturefactory.lib.utility import (
     discover_fasta_files,
     discover_mapping_files,
     discover_mutation_files,
+    find_gene_file,
     mint_pkey,
     read_fasta, trim_muts, get_mutation_data_bioAccurate,
     extract_gene_from_filename, subseq, load_mapping,
@@ -83,6 +84,18 @@ def parse_vcf_chrom(vcf_path: str) -> Optional[str]:
             if len(fields) >= 1:
                 return fields[0]
     return None
+
+
+def _resolve_gene_vcf(vcf_input: Path, gene_name: str) -> Optional[Path]:
+    """Resolve a canonical per-gene VCF from nested or flat input layouts."""
+    if vcf_input.is_file():
+        return vcf_input
+    if not vcf_input.is_dir():
+        return None
+    resolved = find_gene_file(
+        str(vcf_input), gene_name, (f"{gene_name}.vcf",)
+    )
+    return Path(resolved) if resolved else None
 
 
 @dataclass
@@ -141,6 +154,32 @@ class _ParsedResult:
     metrics: Optional[BindingMetrics]
     structures: List[AF3Structure]
     aggregation: Optional[AggregatedBindingAnalysis]
+    # AF3's own top-ranked model, written at the output root beside the
+    # seed-N_sample-N directories. structures[] is the sample ensemble in
+    # parse_all_samples' sorted() order, so structures[0] is sample-0, an
+    # arbitrary draw. Geometry for sites.tsv comes from here instead.
+    ranked: Optional[AF3Structure] = None
+
+    def sites_structure(self) -> Optional[AF3Structure]:
+        """Structure to take residue geometry from: ranked, else first sample."""
+        if self.ranked is not None:
+            return self.ranked
+        return self.structures[0] if self.structures else None
+
+    def ensemble_contact_union(self, rna_chain: str = "R",
+                               protein_chain: str = "P") -> Dict[str, Set[int]]:
+        """Residues contacting in ANY sample, per chain.
+
+        Passed to extract_interface_sites so a residue that contacts in some
+        samples but sits beyond the 12 A cutoff in the ranked model still gets a
+        row. Its frequency was already computed; without this it was discarded.
+        """
+        if not self.aggregation:
+            return {}
+        return {
+            rna_chain: set(self.aggregation.contact_frequency_rna or {}),
+            protein_chain: set(self.aggregation.contact_frequency_protein or {}),
+        }
 
 
 class AlphaFold3Pipeline:
@@ -164,7 +203,12 @@ class AlphaFold3Pipeline:
         validation_log: Optional[str] = None,
         multi_window: bool = False,
         multi_window_offsets: Optional[List[float]] = None,
-        max_gpus: Optional[int] = None
+        max_gpus: Optional[int] = None,
+        af3_batch_size: int = 16,
+        af3_timeout_per_job: int = 7200,
+        resume: bool = True,
+        adopt_legacy_results: bool = False,
+        jax_cache_dir: Optional[str] = None
     ):
         """
         Initialize pipeline.
@@ -175,13 +219,19 @@ class AlphaFold3Pipeline:
             output_dir: Output directory
             rbp_sequences: Path to protein sequences FASTA (optional if msa_dir provided)
             msa_dir: Directory containing A3M MSA files (preferred over rbp_sequences)
-            execution_mode: 'local', 'batch', or 'cloud'
+            execution_mode: only 'local' works. BATCH and CLOUD are still
+                members of the ExecutionMode enum but both raise in af3_runner
+                (:285, :292); no CLI exposes them.
             af3_binary: Path to AF3 executable
             docker_image: Docker image name for AF3
             model_dir: Path to AF3 model weights directory
             window_size: RNA window size around mutation (odd number)
             rbp_window: Window to search for RBP binding sites (+/-bp)
             validation_log: Optional validation log for filtering mutations
+            af3_batch_size: Inputs to process in each local AF3 container
+            resume: Reuse exact complete local AF3 results
+            adopt_legacy_results: Trust matching results made before provenance
+            jax_cache_dir: Optional persistent JAX compilation cache directory
         """
         self.output_dir = Path(output_dir)
         self.output_dir.mkdir(parents=True, exist_ok=True)
@@ -210,7 +260,12 @@ class AlphaFold3Pipeline:
             execution_mode=ExecutionMode(execution_mode),
             docker_image=docker_image,
             model_dir=model_dir,
-            max_gpus=max_gpus
+            max_gpus=max_gpus,
+            batch_size=af3_batch_size,
+            timeout_per_job=af3_timeout_per_job,
+            resume=resume,
+            adopt_legacy_results=adopt_legacy_results,
+            jax_cache_dir=jax_cache_dir
         )
         self.af3_runner = AF3Runner(af3_config)
 
@@ -219,6 +274,8 @@ class AlphaFold3Pipeline:
 
         # Results storage
         self.summary_rows: List[dict] = []
+        # Survives flush_gene, unlike summary_rows. main()'s exit status reads it.
+        self.n_failed_mutations: int = 0
         self.events_rows: List[dict] = []
         self.sites_rows: List[dict] = []
 
@@ -472,14 +529,15 @@ class AlphaFold3Pipeline:
         # Phase 1: Submit all RBP jobs (non-blocking)
         pending_list = []
         skipped_rbps: List[str] = []
-        for rbp_name, sites in rbps_to_test.items():
-            pending = self._submit_rbp_jobs(
-                context, rbp_name, sites,
-                windows=windows if len(windows) > 1 else None,
-                skipped=skipped_rbps
-            )
-            if pending:
-                pending_list.append(pending)
+        with self.af3_runner.batch_submissions():
+            for rbp_name, sites in rbps_to_test.items():
+                pending = self._submit_rbp_jobs(
+                    context, rbp_name, sites,
+                    windows=windows if len(windows) > 1 else None,
+                    skipped=skipped_rbps
+                )
+                if pending:
+                    pending_list.append(pending)
 
         # Phase 2: Collect all results (blocks on futures as they complete)
         delta_list = []
@@ -588,6 +646,7 @@ class AlphaFold3Pipeline:
         # time to project each window's sites back into its own WT frame; the
         # futures alone do not say which window they came from.
         windows: Optional[List[Tuple[str, str, int]]] = None
+        protein_msa: str = 'unknown'
 
     def _submit_rbp_jobs(
         self,
@@ -636,7 +695,8 @@ class AlphaFold3Pipeline:
             rbp_name=rbp_name,
             sites=sites,
             distance=distance,
-            windows=windows
+            windows=windows,
+            protein_msa='provided' if protein_msa else 'none',
         )
 
         if windows and len(windows) > 1:
@@ -686,6 +746,8 @@ class AlphaFold3Pipeline:
         distance = pending.distance
 
         if pending.n_windows > 1:
+            if pending.windows is None or len(pending.windows) != pending.n_windows:
+                raise ValueError('Multi-window result collection requires every exact window span')
             # Keyed by window index, not appended to a flat list: an incomplete
             # job used to shift every later result's position, and the sites
             # block below needs to know WHICH window a result came from to
@@ -701,31 +763,30 @@ class AlphaFold3Pipeline:
                 if mut_job.status == "completed" and mut_job.result_path:
                     mut_by_win[i] = self._parse_af3_output(mut_job.result_path, rbp_name)
 
-            wt_metrics = self._aggregate_parsed_results(list(wt_by_win.values()), rbp_name)
-            mut_metrics = self._aggregate_parsed_results(list(mut_by_win.values()), rbp_name)
-
             for allele, by_win in (('WT', wt_by_win), ('MUT', mut_by_win)):
                 for i in sorted(by_win):
                     r = by_win[i]
                     if r and r.structures:
-                        sites_data = extract_interface_sites(r.structures[0])
+                        sites_data = ensemble_interface_sites(r.structures, r.aggregation, r.ranked)
                         freq_rna = r.aggregation.contact_frequency_rna if r.aggregation else None
                         freq_prot = r.aggregation.contact_frequency_protein if r.aggregation else None
-                        window = pending.windows[i] if pending.windows else None
+                        window = pending.windows[i]
                         self.sites_rows.extend(format_sites_rows(
                             context.pkey, rbp_name, allele, sites_data,
                             freq_rna, freq_prot,
-                            edit_span=_window_edit_span(context, window)))
-                        break
+                            edit_span=_window_edit_span(context, window), window_idx=i))
 
-            delta = compute_delta_metrics(
+            delta = compute_window_delta(
                 rbp_name=rbp_name,
-                wt_metrics=wt_metrics,
-                mut_metrics=mut_metrics,
+                wt_by_window={index: parsed.metrics for index, parsed in wt_by_win.items()
+                              if parsed is not None and parsed.metrics is not None},
+                mut_by_window={index: parsed.metrics for index, parsed in mut_by_win.items()
+                               if parsed is not None and parsed.metrics is not None},
+                n_windows=pending.n_windows,
                 distance_to_mutation=distance,
                 config=self.threshold_config
             )
-            delta.n_windows = pending.n_windows
+            delta.protein_msa = pending.protein_msa
             return delta
 
         # Single-window
@@ -740,27 +801,29 @@ class AlphaFold3Pipeline:
 
         edit_span = _window_edit_span(context)
         if wt_parsed and wt_parsed.structures:
-            sites_data = extract_interface_sites(wt_parsed.structures[0])
+            sites_data = ensemble_interface_sites(wt_parsed.structures, wt_parsed.aggregation, wt_parsed.ranked)
             freq_rna = wt_parsed.aggregation.contact_frequency_rna if wt_parsed.aggregation else None
             freq_prot = wt_parsed.aggregation.contact_frequency_protein if wt_parsed.aggregation else None
             self.sites_rows.extend(format_sites_rows(
                 context.pkey, rbp_name, 'WT', sites_data, freq_rna, freq_prot,
                 edit_span=edit_span))
         if mut_parsed and mut_parsed.structures:
-            sites_data = extract_interface_sites(mut_parsed.structures[0])
+            sites_data = ensemble_interface_sites(mut_parsed.structures, mut_parsed.aggregation, mut_parsed.ranked)
             freq_rna = mut_parsed.aggregation.contact_frequency_rna if mut_parsed.aggregation else None
             freq_prot = mut_parsed.aggregation.contact_frequency_protein if mut_parsed.aggregation else None
             self.sites_rows.extend(format_sites_rows(
                 context.pkey, rbp_name, 'MUT', sites_data, freq_rna, freq_prot,
                 edit_span=edit_span))
 
-        return compute_delta_metrics(
+        delta = compute_delta_metrics(
             rbp_name=rbp_name,
             wt_metrics=wt_metrics,
             mut_metrics=mut_metrics,
             distance_to_mutation=distance,
             config=self.threshold_config
         )
+        delta.protein_msa = pending.protein_msa
+        return delta
 
     def _parse_af3_output(
         self,
@@ -775,12 +838,17 @@ class AlphaFold3Pipeline:
         if not structures:
             return None
 
+        # AF3's top-ranked model, parsed separately. AF3Parser prefers the
+        # top-level *_model.cif over the per-sample ones, which is exactly the
+        # ranked structure. None when only sample dirs exist.
+        ranked = AF3Parser(str(output_dir)).parse()
+
         analyses = [analyze_binding(s, rna_chain="R", protein_chain="P") for s in structures]
 
         if len(structures) == 1:
             binding = analyses[0]
             if not binding:
-                return _ParsedResult(metrics=None, structures=structures, aggregation=None)
+                return _ParsedResult(metrics=None, structures=structures, aggregation=None, ranked=ranked)
             metrics = BindingMetrics(
                 rbp_name=rbp_name,
                 chain_pair_pae_min=binding.chain_pair_pae_min,
@@ -789,12 +857,12 @@ class AlphaFold3Pipeline:
                 interface_plddt_protein=binding.interface_plddt_protein,
                 has_binding=binding.n_contacts >= self.threshold_config.min_contacts
             )
-            return _ParsedResult(metrics=metrics, structures=structures, aggregation=None)
+            return _ParsedResult(metrics=metrics, structures=structures, aggregation=None, ranked=ranked)
 
         # Multi-sample aggregation
         agg = aggregate_binding_analyses(analyses)
         if not agg:
-            return _ParsedResult(metrics=None, structures=structures, aggregation=None)
+            return _ParsedResult(metrics=None, structures=structures, aggregation=None, ranked=ranked)
 
         metrics = BindingMetrics(
             rbp_name=rbp_name,
@@ -809,7 +877,7 @@ class AlphaFold3Pipeline:
             std_plddt_rna=agg.std_interface_plddt_rna,
             std_plddt_protein=agg.std_interface_plddt_protein
         )
-        return _ParsedResult(metrics=metrics, structures=structures, aggregation=agg)
+        return _ParsedResult(metrics=metrics, structures=structures, aggregation=agg, ranked=ranked)
 
     def _aggregate_parsed_results(
         self,
@@ -883,17 +951,9 @@ class AlphaFold3Pipeline:
         summary['pkey'] = context.pkey
         summary['Gene'] = context.gene
 
-        # QC flags: check whether AF3 predictions actually succeeded
-        has_complete = any(d.wt_metrics is not None and d.mut_metrics is not None for d in delta_list)
-        has_partial = any(d.wt_metrics is not None or d.mut_metrics is not None for d in delta_list)
-        if not delta_list:
-            summary['qc_flags'] = 'no_rbps_tested'
-        elif has_complete:
-            summary['qc_flags'] = 'PASS'
-        elif has_partial:
-            summary['qc_flags'] = 'PARTIAL'
-        else:
-            summary['qc_flags'] = 'ALL_FAILED'
+        summary['qc_flags'] = qc_flag_for_deltas(delta_list)
+        if summary['qc_flags'] in ('ALL_FAILED', 'PARTIAL'):
+            self._record_failed_mutation(context.pkey)
 
         summary.update(self._variant_columns(context, skipped_rbps or []))
         self.summary_rows.append(summary)
@@ -957,10 +1017,25 @@ class AlphaFold3Pipeline:
         )
 
     def _add_failed_mutation(self, gene: str, mutation: str, error: str):
-        """Add result for failed mutation."""
+        """Add result for failed mutation.
+
+        Also counted. summary_rows is cleared by flush_gene, so the FAILED rows
+        themselves cannot answer "did this run lose anything" once the next gene
+        starts. Without a persistent count main() had no basis for a non-zero
+        exit, and a run whose every mutation failed reported success.
+        """
+        self._record_failed_mutation(mint_pkey(gene, mutation))
         self.summary_rows.append(
             self._summary_stub(gene, mutation, f'FAILED:{error[:50]}')
         )
+
+    def _record_failed_mutation(self, pkey: str) -> None:
+        """Count a failed or partially failed mutation once across gene flushes."""
+        if not hasattr(self, '_failed_mutation_keys'):
+            self._failed_mutation_keys = set()
+        if pkey not in self._failed_mutation_keys:
+            self._failed_mutation_keys.add(pkey)
+            self.n_failed_mutations = getattr(self, 'n_failed_mutations', 0) + 1
 
     def _write_rows(self, rows, path):
         """Write a list of row dicts to a TSV file.
@@ -1028,11 +1103,11 @@ def main():
     parser.add_argument('--output', '-o', required=True,
                        help='Output base directory')
 
-    # Execution
-    parser.add_argument('-em', '--execution-mode', default='local',
-                       choices=['local'],
-                       help='AF3 execution mode (only local is supported here; '
-                            'for SLURM use `python -m biofeaturefactory.alphafold3.burst submit`)')
+    # Execution. There is no --execution-mode flag: this entry point runs AF3
+    # locally and only locally. ExecutionMode.BATCH and ExecutionMode.CLOUD
+    # still exist in af3_runner but both raise (af3_runner.py:285, :292), so a
+    # flag offering them would only be a way to reach an exception. For SLURM
+    # use `python -m biofeaturefactory.alphafold3.burst submit`.
     parser.add_argument('-ab', '--af3-binary', default='alphafold3',
                        help='Path to AF3 executable')
     parser.add_argument('-di', '--docker-image', default='alphafold3',
@@ -1053,8 +1128,23 @@ def main():
                        help='Run multiple windows per mutation (multiplies AF3 runs)')
     parser.add_argument('-mwo', '--multi-window-offsets', type=str, default='0.3,0.5,0.7',
                        help='Mutation position as fraction of window (default: 0.3,0.5,0.7)')
+    # The container timeout is timeout_per_job * batch_size (af3_runner.py:1214),
+    # so at the shipped 7200 x 16 one hung input blocks 32 hours before
+    # TimeoutExpired, then up to 32 more across the isolated retries. The
+    # multiplication is deliberate; having no way to lower it from here was not.
+    parser.add_argument('-tpj', '--af3-timeout-per-job', type=int, default=7200,
+                       help='Per-input AF3 container timeout in seconds. The batch '
+                            'timeout is this value times --af3-batch-size.')
     parser.add_argument('-mg', '--max-gpus', type=int, default=None,
                        help='Max GPUs for parallel AF3 execution (default: auto-detect)')
+    parser.add_argument('--af3-batch-size', type=int, default=16,
+                       help='AF3 inputs per persistent Docker invocation (default: 16; use 1 for legacy behavior)')
+    parser.add_argument('--no-resume', action='store_false', dest='resume',
+                       help='Rerun jobs even when an exact complete result already exists')
+    parser.add_argument('--adopt-legacy-results', action='store_true',
+                       help='One-time trust of matching complete AF3 outputs created before provenance sidecars')
+    parser.add_argument('--jax-cache-dir',
+                       help='Persistent JAX compilation cache directory (default: OUTPUT/.cache/af3-jax)')
 
     args = parser.parse_args()
 
@@ -1091,9 +1181,17 @@ def main():
     if not args.msa_dir and not args.rbp_sequences:
         parser.error("Provide either --msa-dir or --rbp-sequences")
 
-    # Model weights required for local execution
-    if args.execution_mode == 'local' and not args.model_dir:
-        parser.error("--model-dir is required for local execution mode")
+    # Model weights are always required: execution is always local here.
+    if not args.model_dir:
+        parser.error("--model-dir is required (the directory holding af3.bin; "
+                     "it is mounted at /root/models)")
+    if not Path(args.model_dir).expanduser().is_dir():
+        parser.error(
+            "--model-dir must name the directory containing the AF3 weights, "
+            "not the .bin file itself"
+        )
+    if args.af3_batch_size < 1:
+        parser.error("--af3-batch-size must be at least 1")
 
     # Initialize pipeline
     pipeline = AlphaFold3Pipeline(
@@ -1102,7 +1200,6 @@ def main():
         output_dir=args.output,
         rbp_sequences=args.rbp_sequences,
         msa_dir=args.msa_dir,
-        execution_mode=args.execution_mode,
         af3_binary=args.af3_binary,
         docker_image=args.docker_image,
         model_dir=args.model_dir,
@@ -1111,7 +1208,12 @@ def main():
         validation_log=args.validation_log,
         multi_window=args.multi_window,
         multi_window_offsets=[float(x) for x in args.multi_window_offsets.split(',')] if args.multi_window_offsets else None,
-        max_gpus=args.max_gpus
+        max_gpus=args.max_gpus,
+        af3_batch_size=args.af3_batch_size,
+        af3_timeout_per_job=args.af3_timeout_per_job,
+        resume=args.resume,
+        adopt_legacy_results=args.adopt_legacy_results,
+        jax_cache_dir=args.jax_cache_dir
     )
 
     # Resolve inputs
@@ -1185,11 +1287,7 @@ def main():
             # Resolve chromosome from VCF
             chrom = args.chrom
             if vcf_input:
-                vcf_search = vcf_input if vcf_input.is_file() else None
-                if vcf_input.is_dir():
-                    vcf_candidates = list(vcf_input.glob(f'{gene_name}.vcf'))
-                    if vcf_candidates:
-                        vcf_search = vcf_candidates[0]
+                vcf_search = _resolve_gene_vcf(vcf_input, gene_name)
                 if vcf_search:
                     chrom = parse_vcf_chrom(str(vcf_search))
 
@@ -1257,6 +1355,17 @@ def main():
 
     pipeline.af3_runner.shutdown()
 
+    # Exit status. Handled per-mutation failures used to be invisible to the
+    # caller: they became FAILED rows and the process still ended 0, so a run in
+    # which every mutation failed was indistinguishable from a clean one. Note
+    # that `sys.exit(main())` alone would not have fixed this -- main() had no
+    # return statement of its own and returned None, which exits 0.
+    if pipeline.n_failed_mutations:
+        print(f"{pipeline.n_failed_mutations} mutation(s) failed or partially failed; "
+              f"see FAILED:, ALL_FAILED and PARTIAL in qc_flags.", file=sys.stderr)
+        return 1
+    return 0
+
 
 if __name__ == '__main__':
-    main()
+    sys.exit(main())

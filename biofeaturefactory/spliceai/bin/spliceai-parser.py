@@ -772,10 +772,43 @@ def parse_spliceai_vcf(
             print(f"[WARN] {vcf_file}: {unannotated} of {processed_count} records carry no SpliceAI "
                   f"INFO field at all ({dropped_non_snv.get('no_spliceai_annotation', 0)} of them "
                   f"non-SNV) -- SpliceAI scored no transcript for them", file=sys.stderr)
-        if processed_count and not predictions and dropped_unmapped:
-            print(f"[ERROR] {vcf_file}: {processed_count} variants processed but ZERO rows written and "
-                  f"{dropped_unmapped} unmapped -- the mapping file almost certainly does not match this VCF.",
-                  file=sys.stderr)
+        # BACKSTOP, not the primary gate. bin/check_vcf_mapping.py asks the same
+        # join question BEFORE run_spliceai, so a mapping that does not describe the
+        # VCF is caught there in seconds instead of after the model has scored every
+        # variant. This exists because that gate cannot see everything: it runs on
+        # the pre-annotation VCF, so it says nothing about whether SpliceAI actually
+        # scored anything, about a missing ##gene_context header, or about a VCF that
+        # changed between the two points. It also covers the parser being run
+        # standalone, which is how the component is documented in the README.
+        #
+        # Without it the condition was detected, printed as [ERROR], and then thrown
+        # away: this function returned True regardless, main() printed
+        # "[OK] Successfully parsed" and exited 0, and main.nf -- whose only signal
+        # is this exit code -- recorded the gene as complete with a header-only TSV.
+        #
+        # Only MAPPING-side drops are fatal. Zero rows because SpliceAI DECLINED to
+        # score is a measurement, not a failure: it refuses any record whose REF and
+        # ALT are both multi-base (true delins / MNV -- see the README's Limitations),
+        # so a gene made entirely of those legitimately yields an empty table. Those
+        # land in no_spliceai_annotation / spliceai_blocks_all_refused and keep their
+        # [WARN] with a success return. skip_listed is excluded for the same reason:
+        # the validation log ASKED for those to be dropped.
+        fatal = None
+        if processed_count == 0:
+            fatal = (f"{vcf_file}: no data records at all -- nothing was scored. Check that this "
+                     f"is a SpliceAI-annotated VCF and that it carries variants.")
+        elif not predictions:
+            no_chrom = dropped.get('no_chromosome_match', 0)
+            no_gene = dropped.get('no_gene_context', 0)
+            if no_chrom or no_gene:
+                fatal = (f"{vcf_file}: {processed_count} variants processed but ZERO rows written "
+                         f"(no_chromosome_match={no_chrom}, no_gene_context={no_gene}). The mapping "
+                         f"files do not describe this VCF. If it was supplied with "
+                         f"--input_vcf_path, it was built against different coordinates than the "
+                         f"mappings resolved for this gene; bin/check_vcf_mapping.py reports the "
+                         f"same join up front.")
+        if fatal:
+            print(f"[ERROR] {fatal}", file=sys.stderr)
 
         if match_modes.get('left_aligned'):
             print(f"[INFO] {vcf_file}: {match_modes['left_aligned']} (record x block) pairs joined "
@@ -786,7 +819,7 @@ def parse_spliceai_vcf(
                   f"left-alignment tier did not run", file=sys.stderr)
 
         print(f"Processed {processed_count} variants, found {len(predictions)} predictions above threshold {threshold}")
-        return True, processed_count, len(predictions)
+        return fatal is None, processed_count, len(predictions)
 
     except FileNotFoundError:
         error_msg = f"Error: VCF file not found at '{vcf_file}'"

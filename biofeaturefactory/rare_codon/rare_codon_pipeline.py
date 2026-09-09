@@ -51,6 +51,7 @@ CG_DIR = SCRIPT_DIR / "cg_cotrans"
 from biofeaturefactory.lib.utility import (
     derive_mutations_root,
     discover_msa_files,
+    discover_mutation_files,
     read_fasta,
     mint_pkey,
     trim_muts,
@@ -346,6 +347,19 @@ FIELDNAMES = [
 ]
 
 
+def cg_centre_to_codon(cg_centre):
+    """cg_cotrans 0-based window centre -> this repo's 1-based codon number.
+
+    The single conversion between the vendored frame and ours. cg_cotrans keys
+    every window by `center = i + L // 2` with `i` from 0, so its centres are
+    zero-based codon indices; _centre_codon and the codon_position column are
+    one-based. calc_rare_enrichment.py is GPL code we do not own and the copy of
+    its analysis body in this module is deliberately verbatim, so the translation
+    lives here, on our side of the boundary.
+    """
+    return cg_centre + 1
+
+
 def run_rare_codon_analysis(gene, msa_path, usage_path, wt_gi, window_size=15,
                             rare_model='no_norm', rare_threshold=0.1,
                             null_model='genome', max_len_diff=0.2, min_aa_iden=0.5,
@@ -478,10 +492,28 @@ def run_rare_codon_analysis(gene, msa_path, usage_path, wt_gi, window_size=15,
         L=window_size
     )
 
-    # Extract per-position data
+    # Extract per-position data, translating out of the cg_cotrans frame.
+    #
+    # THE SEAM. cg_cotrans keys every window by `center = i + L // 2` with `i`
+    # running from 0 (the verbatim block above, and calc_rare_enrichment.py:158-249
+    # upstream), so its centres are ZERO-based codon indices. Everything on this
+    # side of the boundary is one-based: _centre_codon returns "1-based codon
+    # holding the MIDPOINT of the REF span", the codon_position column is written
+    # from that value, and every other pipeline in this repo counts codons from 1.
+    #
+    # Handing a one-based codon straight to a zero-based dict read the window
+    # centred one codon DOWNSTREAM of the mutation for every populated row. It was
+    # silent: the neighbouring window is a perfectly plausible number.
+    #
+    # Translate here rather than upstream. calc_rare_enrichment.py is vendored
+    # GPL code we do not own, and the block above is a deliberate verbatim copy
+    # of it, so the conversion belongs at OUR boundary with it -- the one place
+    # that already exists to move data between the two frames.
+    # The translator is module-level (cg_centre_to_codon) so it can be tested
+    # without standing up an MSA, a null model and the whole vendored analysis.
     results = {}
     for pos in rc_analysis['p_nseq_enriched'].keys():
-        results[pos] = {
+        results[cg_centre_to_codon(pos)] = {
             'p_enriched': rc_analysis['p_nseq_enriched'][pos],
             'p_depleted': rc_analysis['p_nseq_depleted'][pos],
             'f_enriched_wt': rc_analysis['f_enriched'][wt_gi].get(pos),
@@ -1029,9 +1061,10 @@ def _run_single_gene(gene, msa_file, mut_file, args, wt_gi, output_dir):
         return
 
     # Intronic gate. Every column here is indexed by CODON position: _centre_codon
-    # converts an nt position to a codon, and rc_results is keyed by window-centre
-    # codon of the MSA's WT record. An intron has no codon, so there is no key to
-    # look up and no defensible value to report.
+    # converts an nt position to a 1-based codon, and rc_results is keyed by the
+    # 1-based window-centre codon of the MSA's WT record -- translated out of
+    # cg_cotrans's 0-based frame at the seam in run_rare_codon_analysis. An intron
+    # has no codon, so there is no key to look up and no defensible value.
     #
     # Unguarded these tokens do not crash -- parse_variant returns None -- but
     # they produce a ROW flagged 'INVALID_MUTATION' with every window column
@@ -1191,10 +1224,24 @@ Copyright notice:
         if not msa_files:
             print(f"Error: No MSA files found in {args.msa}", file=sys.stderr)
             sys.exit(1)
+        # Mutation files come from the SHARED discovery helper, not from
+        # _resolve_per_gene. A variant_mapping root holds seven CSVs per gene and
+        # _resolve_per_gene's loose branch takes the alphabetically first one whose
+        # stem contains the gene name -- which is <GENE>/mappings/aa/<GENE>_aa_mapping.csv,
+        # not <GENE>/mappings/mutations/<GENE>_mutations.csv. Every line of that file
+        # then became a "mutation" token, parse_variant returned None, and the run
+        # emitted a full table of INVALID_MUTATION rows describing tokens the user
+        # never supplied. discover_mutation_files selects by DIRECTORY, which is what
+        # keeps the other six CSV types out; netMHC and AlphaFold3 already use it.
+        # Only meaningful when --mutations is a directory; an explicit file still wins.
+        discovered = {}
+        if args.mutations and Path(args.mutations).is_dir():
+            discovered = discover_mutation_files(str(args.mutations))
+
         failed_genes = []
         for msa_file in msa_files:
             gene = extract_gene_from_filename(str(msa_file))
-            mut_file = _resolve_per_gene(args.mutations, gene, ('.csv',))
+            mut_file = discovered.get(gene) or _resolve_per_gene(args.mutations, gene, ('.csv',))
             if not mut_file:
                 print(f"  Skipping {gene}: missing mutations")
                 continue

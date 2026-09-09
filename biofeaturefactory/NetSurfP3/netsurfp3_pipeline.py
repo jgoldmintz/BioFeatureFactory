@@ -50,6 +50,7 @@ import os
 import csv
 import tempfile
 from pathlib import Path
+from types import MethodType
 import sys
 from typing import Optional, Dict, List, Tuple
 # Import utility functions
@@ -98,6 +99,18 @@ if str(_nsp3_package_dir) not in sys.path:
 from nsp3 import main as nsp3_main
 from nsp3.cli import load_config
 
+
+def _bounded_esm_forward(self, batch_tokens, padding_length=None):
+    """Embed pre-chunked tokens without residue-length trimming or upstream stitching."""
+    if batch_tokens.shape[1] > self.max_embedding:
+        raise ValueError(
+            f"ESM token batch exceeds model capacity: {batch_tokens.shape[1]} > {self.max_embedding}")
+    embeddings = self.model(batch_tokens, repr_layers=[33])['representations'][33]
+    if embeddings.shape[:2] != batch_tokens.shape:
+        raise RuntimeError("ESM embedding dimensions do not match input tokens")
+    return embeddings[:, 1:-1, :]
+
+
 # Patch nsp3's BasePredict to use strict=False when loading state_dict.
 # The ESM-1b checkpoint may contain extra keys (e.g., emb_layer_norm_before)
 # not present in the model constructed from config.
@@ -118,6 +131,10 @@ try:
         data = _torch.load(model_data, map_location=_device)
         self.model.load_state_dict(data['state_dict'], strict=False)
         self.model.eval()
+        from nsp3.embeddings.esm1b import ESM1bEmbedding
+        for module in self.model.modules():
+            if isinstance(module, ESM1bEmbedding):
+                module.forward = MethodType(_bounded_esm_forward, module)
 
     _base_predict.BasePredict.__init__ = _patched_base_init
 except Exception:
@@ -237,11 +254,17 @@ def run_nsp3_prediction(fasta_file, model_path, config_path, batch_size=100, ver
         config_path: Path to NSP3 config YAML file
         batch_size: Number of sequences to process per batch (default: 100)
         verbose: Print batch progress
-        max_seq_length: Maximum sequence length before chunking (default: 1500)
+        max_seq_length: Requested ceiling; capped at 1021 to avoid upstream ESM window stitching.
 
     Returns:
         dict: {sequence_id: {pos: {residue, q8_probs, q3_probs, disorder_pf, disorder_pt, rsa, asa, phi, psi, q8_class, q3_class}}}
     """
+    if batch_size < 1:
+        raise ValueError("batch_size must be positive")
+    if max_seq_length <= 50:
+        raise ValueError("max_seq_length must exceed the 50-residue overlap")
+    max_seq_length = min(max_seq_length, 1021)
+
     # Read all sequences from FASTA
     sequences_dict = read_fasta(fasta_file)
 
@@ -382,7 +405,7 @@ def run_nsp3_prediction(fasta_file, model_path, config_path, batch_size=100, ver
                                         all_predictions_raw[chunk_id] = per_residue_predictions
 
                             except Exception as e2:
-                                print(f"      Skipping {chunk_id}: {e2}")
+                                raise RuntimeError(f"Prediction failed for {chunk_id}: {e2}") from e2
 
                         finally:
                             if os.path.exists(single_fasta.name):
@@ -397,6 +420,7 @@ def run_nsp3_prediction(fasta_file, model_path, config_path, batch_size=100, ver
 
     # Reassemble chunked predictions
     all_predictions = {}
+    prediction_context = {}
 
     for chunk_id, chunk_predictions in all_predictions_raw.items():
         original_id, start_pos, end_pos = chunk_mapping[chunk_id]
@@ -408,13 +432,19 @@ def run_nsp3_prediction(fasta_file, model_path, config_path, batch_size=100, ver
         for chunk_pos, pred_data in chunk_predictions.items():
             original_pos = start_pos + chunk_pos + 1  # 1-indexed
 
-            # For overlapping regions, prefer the prediction from the middle of a chunk
-            if original_pos not in all_predictions[original_id]:
+            context_distance = min(chunk_pos, end_pos - start_pos - chunk_pos - 1)
+            coordinate = (original_id, original_pos)
+            if context_distance > prediction_context.get(coordinate, -1):
                 all_predictions[original_id][original_pos] = pred_data
-            else:
-                # Already have a prediction for this position from another chunk
-                # Keep the one that's further from chunk boundaries
-                pass
+                prediction_context[coordinate] = context_distance
+
+    for sequence_id, sequence in sequences_dict.items():
+        observed = all_predictions.get(sequence_id, {})
+        expected = set(range(1, len(sequence) + 1))
+        if set(observed) != expected:
+            raise RuntimeError(
+                f"Incomplete prediction coverage for {sequence_id}: "
+                f"{len(observed)}/{len(sequence)} residues")
 
     return all_predictions
 
@@ -1097,6 +1127,25 @@ def write_local_tsv(local_rows, output_file):
     print(f"Wrote {len(local_rows)} local change entries to {output_file}")
 
 
+def _publish_gene_outputs(output_root, gene, summary_rows, residues_rows, local_rows):
+    """Stage all three tables before atomically replacing each published file."""
+    output_dir = Path(output_root) / gene / "NetSurfP3"
+    output_dir.mkdir(parents=True, exist_ok=True)
+    tables = (
+        ("summary", summary_rows, write_summary_tsv),
+        ("residues", residues_rows, write_residues_tsv),
+        ("local", local_rows, write_local_tsv),
+    )
+    with tempfile.TemporaryDirectory(prefix=".publish-", dir=output_dir) as staging:
+        for suffix, rows, writer in tables:
+            writer(rows, str(Path(staging) / f"{gene}.netsurfp3.{suffix}.tsv"))
+        for suffix, rows, writer in tables:
+            filename = f"{gene}.netsurfp3.{suffix}.tsv"
+            os.replace(Path(staging) / filename, output_dir / filename)
+    print(f"{gene}: wrote {len(summary_rows)} summary, {len(residues_rows)} residue, "
+          f"{len(local_rows)} local entries -> {output_dir}")
+
+
 def main():
     import argparse
 
@@ -1141,7 +1190,7 @@ def main():
     parser.add_argument('-bs', '--batch-size', type=int, default=100,
                         help='Number of sequences to process per NSP3 batch (default: 100)')
     parser.add_argument('--max-seq-length', type=int, default=1500,
-                        help='Maximum sequence length before chunking (default: 1500)')
+                        help='Requested chunk ceiling (default: 1500); capped at 1021 to avoid upstream ESM stitching')
     parser.add_argument('-v', '--verbose', action='store_true',
                         help='Enable verbose output')
 
@@ -1192,13 +1241,14 @@ def main():
                                               label="netsurfp3")
     mutation_files = discover_mutation_files(args.mutation_dir) if args.mutation_dir else {}
 
-    # Collect all results
-    summary_rows = []
-    residues_rows = []
-    local_rows = []
+    failures = []
+    completed_genes = 0
 
     # Process each gene
     for gene_name, fasta_path in fasta_files.items():
+        summary_rows = []
+        residues_rows = []
+        local_rows = []
         if args.verbose:
             print(f"\nProcessing gene: {gene_name}")
 
@@ -1325,6 +1375,8 @@ def main():
 
         if not mutant_seqs:
             print(f"Warning: No valid mutants for {gene_name}, skipping")
+            _publish_gene_outputs(args.output, gene_name, summary_rows, residues_rows, local_rows)
+            completed_genes += 1
             continue
 
         # Create combined FASTA with WT + all mutants
@@ -1356,6 +1408,7 @@ def main():
             # Extract WT predictions
             wt_key = f"{gene_name}-WT"
             if wt_key not in all_predictions:
+                failures.append(f"{gene_name}: NO_WT_PREDICTION")
                 print(f"Warning: WT predictions not found for {gene_name}, skipping")
                 # Contract D is per token, not per gene. Without the WT allele
                 # nothing can be compared, but every mutant that WAS built is a
@@ -1386,6 +1439,7 @@ def main():
                 edit = _aa_edit_record(mutation_str, wt_nt_seq, wt_aa_seq, mut_seq)
 
                 if mut_id not in all_predictions:
+                    failures.append(f"{mut_id}: NO_PREDICTION")
                     print(f"Warning: Predictions not found for {mut_id}, skipping")
                     summary_rows.append(_rejected_summary_row(
                         gene_name, mutation_str, 'NO_PREDICTION', edit, is_nt_input))
@@ -1406,68 +1460,34 @@ def main():
                 residues_rows.extend(residue_block)
                 local_rows.extend(local_block)
 
+        except Exception as error:
+            failures.append(f"{gene_name}: {error}")
+            recorded = {row['pkey'] for row in summary_rows}
+            for mut_id, mut_seq in mutant_seqs.items():
+                if mut_id in recorded:
+                    continue
+                token = token_from_name(mut_id, gene_name, pkey_map)
+                summary_rows.append(_rejected_summary_row(
+                    gene_name, token, 'PREDICTION_FAILED',
+                    _aa_edit_record(token, wt_nt_seq, wt_aa_seq, mut_seq),
+                    is_nt=wt_nt_seq is not None))
         finally:
             # Clean up temp file
             if os.path.exists(combined_fasta.name):
                 os.unlink(combined_fasta.name)
+            _publish_gene_outputs(args.output, gene_name, summary_rows, residues_rows, local_rows)
+            completed_genes += 1
 
-    # Write output TSVs, ONE SET PER GENE, matching every other pipeline:
-    #   <output>/<GENE>/NetSurfP3/<GENE>.netsurfp3.{summary,residues,local}.tsv
-    #
-    # This used to key the whole run on `input_path.stem`, so a directory input
-    # produced one combined set named after the DIRECTORY -- `-i out` wrote
-    # out/NetSurfP3/out.netsurfp3.summary.tsv holding NPM1 and PAM together, under
-    # a gene called "out". Every row already carries a `gene` column (all three
-    # writers emit it), so the split needs no extra bookkeeping: group on that.
-    def _by_gene(rows):
-        grouped = {}
-        for row in rows:
-            grouped.setdefault(row.get("gene") or "unknown", []).append(row)
-        return grouped
-
-    summary_by = _by_gene(summary_rows)
-    residues_by = _by_gene(residues_rows)
-    local_by = _by_gene(local_rows)
-
-    # A gene that produced residue or local rows but no summary row still gets its
-    # directory; dropping it would lose output with no message.
-    genes = sorted(set(summary_by) | set(residues_by) | set(local_by))
-    if not genes:
-        # Nothing scored at all. Name the run after the input so the empty tables
-        # still land somewhere predictable rather than vanishing.
-        input_path = Path(args.input)
-        genes = [extract_gene_from_filename(args.input) or input_path.stem
-                 if input_path.is_file() else input_path.stem]
-
-    written = []
-    for gene in genes:
-        out_dir = Path(args.output) / gene / "NetSurfP3"
-        out_dir.mkdir(parents=True, exist_ok=True)
-        summary_path  = out_dir / f"{gene}.netsurfp3.summary.tsv"
-        residues_path = out_dir / f"{gene}.netsurfp3.residues.tsv"
-        local_path    = out_dir / f"{gene}.netsurfp3.local.tsv"
-
-        write_summary_tsv(summary_by.get(gene, []), str(summary_path))
-        write_residues_tsv(residues_by.get(gene, []), str(residues_path))
-        write_local_tsv(local_by.get(gene, []), str(local_path))
-        written.append((gene, summary_path, residues_path, local_path,
-                        len(summary_by.get(gene, [])),
-                        len(residues_by.get(gene, [])),
-                        len(local_by.get(gene, []))))
-
-    for gene, s_p, r_p, l_p, n_s, n_r, n_l in written:
-        print(f"{gene}: wrote {n_s} summary, {n_r} residue, {n_l} local entries "
-              f"-> {s_p.parent}")
+    if completed_genes == 0:
+        gene = (extract_gene_from_filename(args.input) or input_path.stem
+                if input_path.is_file() else input_path.stem)
+        _publish_gene_outputs(args.output, gene, [], [], [])
 
     if args.verbose:
-        print(f"\nPipeline complete! {len(written)} gene(s)")
-        for gene, s_p, r_p, l_p, _, _, _ in written:
-            print(f"  {gene}")
-            print(f"    Summary: {s_p}")
-            print(f"    Residues: {r_p}")
-            print(f"    Local: {l_p}")
-
-    return 0
+        print(f"\nPipeline complete! {completed_genes} gene(s)")
+    for failure in failures:
+        print(f"[ERROR] {failure}", file=sys.stderr)
+    return 1 if failures else 0
 
 
 if __name__ == '__main__':

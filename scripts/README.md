@@ -7,6 +7,14 @@ Setup and database build scripts. Run these once before using the pipelines.
 Installs pipeline dependencies into the current Python environment and clones/builds
 third-party tools.
 
+Pip-bearing phases accept Python 3.10–3.13, matching `pyproject.toml`'s
+`>=3.10,<3.14` package policy. This gate is not an end-to-end guarantee for every
+optional external tool. SpliceAI and licensed SignalP retain their separate
+environment requirements; database-only phases do not require the pip range.
+The shared database download helper uses aria2c when available and curl otherwise.
+Curl writes a `.part` file and publishes the destination only after success;
+HTTP and transfer failures remain errors rather than reusable completed files.
+
 ```bash
 cd scripts/
 ./bootstrap.sh                            # everything
@@ -25,7 +33,7 @@ They are deliberately not called `-only`. `env`, `git`, and `db` are accepted as
 |-------|-------|
 | `env-phase` | pip install, conda installs, Nextflow/OpenJDK, and editable installs of repos already cloned (steps 2, 6-6d, 7b, 8b-8c). No clones, no source builds, no downloads |
 | `git-phase` | Clones, source builds, conda installs, editable installs (steps 1b, 3-8c, 10-12) |
-| `db-phase` | FTP downloads and `build_db.sh` (steps 9, 9b, 12) |
+| `db-phase` | Prepared-database downloads/builds through `build_db.sh` (steps 9, 9b, 12) |
 | _(none)_ | Every phase |
 
 ### Steps
@@ -50,11 +58,12 @@ They are deliberately not called `-only`. `env`, `git`, and `db` are accepted as
 | 8 | AlphaFold3 clone into `alphafold3/alphafold3/` |
 | 8b | `pip install -e` of cloned python repos (nsp3, adabmDCApy) |
 | 8c | Verify the installed package layout |
-| 9 | FTP datasets (UniRef90, UniProt idmapping) |
+| 9 | Report the selected database root; downloads are delegated to `build_db.sh` |
 | 9b | No-op -- the CoCoPUTs table moved to `build_db.sh` |
 | 10 | Nextflow check |
 | 11 | Licensed/manual dependency checklist |
-| 12 | Summary probes; calls `build_db.sh` if present and executable |
+| 12 | Summary probes (git phase only) |
+| 12b | Runs `build_db.sh`. Absent or unreadable is a recorded FAILURE, not a warning |
 
 SpliceAI gets a dedicated conda env because sharing one reintroduces the
 pyarrow/TensorFlow Abseil deadlock. It is therefore not on the active env's PATH.
@@ -84,11 +93,40 @@ pyarrow/TensorFlow Abseil deadlock. It is therefore not on the active env's PATH
 | `--exclude-editable-repos` | Skip `pip install -e` of cloned python repos |
 | `--exclude-genesplicer` | Skip building GeneSplicer |
 | `--exclude-clone-af3` | Skip cloning AlphaFold3 |
-| `--exclude-uniref90` | Skip the UniRef90 download |
-| `--exclude-idmapping` | Skip the UniProt idmapping download |
+| `--exclude-uniref90` | Skip the UniRef90 download in `build_db.sh` |
+| `--exclude-idmapping` | Skip the UniProt idmapping download and dependent map build when no source exists |
 | `--exclude-cocoputs` | Skip the CoCoPUTs codon-usage table; forwarded to `build_db.sh` as `SKIP_COCOPUTS` |
-| `--exclude-build-db` | Skip calling `build_db.sh` |
-| `--bio-dbs DIR` | Prepared-database root. Default: nearest `Bio_DBs` above the repo, else `BFF_BIO_DBS`, else `scripts/_downloads` |
+| `--exclude-refseq` | Skip the RefSeq assembly download and merged protein FASTA (`SKIP_REFSEQ`) |
+| `--exclude-mirna` | Skip the mirBase `mature_hsa.fasta` download (`SKIP_MIRNA`) |
+| `--exclude-af3-rbp` | Skip the AF3 RBP database: POSTAR3, per-RBP MSAs, tabix indexes (`SKIP_AF3RBP`) |
+| `--exclude-build-db` | **Retired.** Still accepted. Skipping the db work is now "do not select `db-phase`"; narrowing it is `--<name>-only` |
+
+### Database selectors
+
+Build one prepared database and nothing else. Each implies `db-phase`, and they
+compose, so two flags build two databases. The `--exclude-*` flags above are
+applied **after** these, so an exclude always wins.
+
+| flag | build_db.sh steps | artifact |
+| --- | --- | --- |
+| `--refseq-only` | 1-4 | `refseq_assemblies/`, `refseq_proteins_merged.faa` |
+| `--idmapping-only` | 5-6 | `idmapping.dat.gz`, `protein_id_to_refseq.tsv` |
+| `--uniref90-only` | 7 | `uniref90.fasta.gz` |
+| `--mirna-only` | 8 | `mature_hsa.fasta` |
+| `--af3-rbp-only` | 9 | `AF3/RBP_db/` |
+| `--cocoputs-only` | 9b | `cocoputs/human_GRCh38_codon_usage.tsv` |
+
+```bash
+./bootstrap.sh --cocoputs-only              # ~11 MB, seconds
+./bootstrap.sh --af3-rbp-only --mirna-only  # two artifacts, nothing else
+```
+
+Steps 1-4 share one switch because step 4 merges what step 3 downloaded; skipping
+any one of them alone leaves a half-built `refseq_proteins_merged.faa`. Excluding
+every database is not an error at the `build_db.sh` boundary -- bootstrap turns the
+step off and the generic "nothing to do" guard fires instead.
+
+| `--bio-dbs DIR` | Prepared-database root. Default: `BFF_BIO_DBS`, `DB_ROOT`, or `<repo>/Bio_DBs` |
 | `--fix-python` | Let conda move the env's interpreter into the supported range. **Destructive** -- packages installed under the current interpreter are orphaned |
 
 Contradictory combinations produce an error.
@@ -132,8 +170,7 @@ AlphaFold3 pipelines.
 DB_ROOT=/data/Bio_DBs ./build_db.sh
 ```
 
-`DB_ROOT` defaults to the nearest `Bio_DBs` directory found by walking up to five levels above
-`scripts/`, falling back to `<project_root>/Bio_DBs`.
+`DB_ROOT` defaults to `<project_root>/Bio_DBs`. Set it explicitly to reuse a shared database root.
 
 ### Output
 
@@ -162,7 +199,7 @@ set of 4 -- it called GCC rare at 9.5% when GCC is 39.9% of all human alanine co
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `DB_ROOT` | nearest `Bio_DBs`, else `<project_root>/Bio_DBs` | Output directory |
+| `DB_ROOT` | `<project_root>/Bio_DBs` | Output directory |
 | `TAXON_GROUP` | `vertebrate_mammalian` | Primary RefSeq taxon group |
 | `EXTRA_TAXON_GROUPS` | `vertebrate_other invertebrate` | Additional groups |
 | `PARALLEL_JOBS` | `8` | Concurrent assembly downloads |
@@ -176,6 +213,8 @@ set of 4 -- it called GCC rare at 9.5% when GCC is 39.9% of all human alanine co
 | `AF3_DOWNLOAD_RBP_MSAS` | `1` | Download per-RBP AF MSAs from `rbp_uniprot_ids.txt` |
 | `AF3_MSA_VERSION` | `v6` | AF MSA version string |
 | `AF3_MSA_URL_TEMPLATE` | `https://alphafold.ebi.ac.uk/files/AF-{ID}-F1-msa_{VERSION}.a3m` | Per-RBP MSA URL template |
+| `SKIP_IDMAPPING` | `0` | Skip the idmapping download; reuse an existing source or derived map |
+| `SKIP_UNIREF90` | `0` | Skip the UniRef90 download |
 | `SKIP_COCOPUTS` | `0` | Skip the codon-usage table |
 
 Requires `aria2c` (preferred) or `curl`, plus `bgzip`/`tabix` for POSTAR3 indexing.
@@ -198,6 +237,5 @@ awk -F '\t' -v taxon_group="vertebrate_mammalian|vertebrate_other" \
 ## Typical setup order
 
 ```bash
-./scripts/bootstrap.sh --exclude-uniref90 --exclude-idmapping
-./scripts/build_db.sh
+./scripts/bootstrap.sh db-phase
 ```

@@ -50,6 +50,7 @@ import json
 import re
 import concurrent.futures
 import multiprocessing
+import tempfile
 from pathlib import Path
 from typing import Dict, List, Tuple, Optional, Iterable
 
@@ -237,6 +238,25 @@ def load_transcript_mappings(mapping_dir: str, map_type: str = "transcript") -> 
 # -------------------------------------------------------------------------
 # MIRANDA EXECUTION
 # -------------------------------------------------------------------------
+def _run_miranda(seq_id, sequence, miranda_dir, mirna_db, strict, timeout):
+    import shutil
+    from subprocess import run
+
+    executable = (os.path.join(miranda_dir, "miranda") if miranda_dir
+                  else shutil.which("miranda"))
+    if not executable:
+        raise FileNotFoundError("miranda not found on PATH")
+    executable = os.path.abspath(executable)
+    database = os.path.abspath(mirna_db)
+    with tempfile.TemporaryDirectory(prefix="bff-miranda-task-") as workdir:
+        fasta = Path(workdir) / "sequence.fasta"
+        fasta.write_text(f">{seq_id}\n{sequence}\n")
+        command = [executable, database, str(fasta)]
+        if strict:
+            command.append("-strict")
+        return run(command, cwd=workdir, capture_output=True, text=True, timeout=timeout)
+
+
 def _run_single_miranda_task(args: Tuple[str, str, str, str, str, bool]) -> Tuple[str, str]:
     """
     args = (seq_id, seq_string, miranda_dir, outdir, mirna_db_abs, strict)
@@ -249,26 +269,18 @@ def _run_single_miranda_task(args: Tuple[str, str, str, str, str, bool]) -> Tupl
     a large low-confidence hit set there.
     """
     import shutil as _shutil
-    import tempfile as _tempfile
-    from subprocess import run, TimeoutExpired
+    from subprocess import TimeoutExpired
     seq_id, seq_str, miranda_dir, outdir, mirna_db_abs, strict = args
 
-    # Resolve binary and working directory
     if miranda_dir:
         if not os.path.isdir(miranda_dir):
             return (seq_id, "error:miranda_dir_missing")
         bin_path = os.path.join(miranda_dir, "miranda")
         if not (os.path.isfile(bin_path) and os.access(bin_path, os.X_OK)):
             return (seq_id, "error:miranda_binary_not_exec")
-        cmd_binary = "./miranda"
-        cwd = miranda_dir
-        tmp_base = miranda_dir
     else:
         if not _shutil.which("miranda"):
             return (seq_id, "error:miranda_not_on_PATH")
-        cmd_binary = "miranda"
-        cwd = None
-        tmp_base = _tempfile.gettempdir()
 
     if not os.path.isfile(mirna_db_abs):
         return (seq_id, "error:mirna_db_missing")
@@ -278,21 +290,8 @@ def _run_single_miranda_task(args: Tuple[str, str, str, str, str, bool]) -> Tupl
     if os.path.exists(out_file) and os.path.getsize(out_file) > 0:
         return (seq_id, "already")
 
-    # F40: atomically-unique temp path. The prior tmp_{pid}_{hash&0xFFFFF} scheme
-    # collided across ThreadPoolExecutor threads (constant pid) on any 20-bit hash
-    # clash, racing open/run/unlink between two concurrent mutations.
-    fd, tmp_file = _tempfile.mkstemp(prefix="tmp_", suffix=".fasta", dir=tmp_base)
-    os.close(fd)
     try:
-        with open(tmp_file, "w") as f:
-            f.write(f">{seq_id}\n{seq_str}")
-
-        # When using cwd, miranda expects basename; when on PATH, use absolute path
-        fasta_arg = os.path.basename(tmp_file) if miranda_dir else tmp_file
-        cmd = [cmd_binary, mirna_db_abs, fasta_arg]
-        if strict:
-            cmd.append("-strict")
-        result = run(cmd, cwd=cwd, capture_output=True, text=True, timeout=1200)
+        result = _run_miranda(seq_id, seq_str, miranda_dir, mirna_db_abs, strict, 1200)
 
         # Always write stdout for inspection
         try:
@@ -312,13 +311,6 @@ def _run_single_miranda_task(args: Tuple[str, str, str, str, str, bool]) -> Tupl
         status = "timeout"
     except Exception as e:
         status = f"error:{e}"
-    finally:
-        try:
-            if os.path.exists(tmp_file):
-                os.remove(tmp_file)
-        except Exception:
-            pass
-
     return (seq_id, status)
 
 def run_wt_phase(wt_sequences: Dict[str, str],
@@ -330,7 +322,6 @@ def run_wt_phase(wt_sequences: Dict[str, str],
     One WT file per gene: {GENE}-wt-miranda.out
     miranda_dir may be empty string/None to use miranda from PATH.
     """
-    import tempfile as _tempfile
     os.makedirs(outdir, exist_ok=True)
     print("[WT] Starting WT MirandA phase...")
 
@@ -338,18 +329,7 @@ def run_wt_phase(wt_sequences: Dict[str, str],
     total_genes = len(genes)
     print(f"[WT] Loaded {total_genes} WT transcripts")
 
-    from subprocess import run
-
     db_abs = os.path.abspath(mirna_db)
-
-    if miranda_dir:
-        cmd_binary = "./miranda"
-        cwd = miranda_dir
-        tmp_base = miranda_dir
-    else:
-        cmd_binary = "miranda"
-        cwd = None
-        tmp_base = _tempfile.gettempdir()
 
     for idx, gene in enumerate(genes, 1):
         gene_upper = gene.upper()
@@ -366,23 +346,11 @@ def run_wt_phase(wt_sequences: Dict[str, str],
             print(f"[WT]   Missing WT sequence for {gene_upper}, skip")
             continue
 
-        wt_tmp_file = os.path.join(tmp_base, f"tmp_{gene_upper}_WT.fasta")
-        with open(wt_tmp_file, "w") as f:
-            f.write(f">transcript\n{wt_seq}")
-
-        fasta_arg = os.path.basename(wt_tmp_file) if miranda_dir else wt_tmp_file
-        cmd = [cmd_binary, db_abs, fasta_arg]
         # WT and MUT must be scanned under IDENTICAL settings, or every delta is
         # partly an artefact of the two runs using different seed models.
-        if _substrate_of(gene_upper) in (strict_substrates or set()):
-            cmd.append("-strict")
-        result = run(cmd, cwd=cwd, capture_output=True, text=True, timeout=3000)
+        strict = _substrate_of(gene_upper) in (strict_substrates or set())
+        result = _run_miranda("transcript", wt_seq, miranda_dir, db_abs, strict, 3000)
         miranda_output = result.stdout
-
-        try:
-            os.remove(wt_tmp_file)
-        except Exception:
-            pass
 
         with open(out_file, "w") as f:
             f.write(miranda_output)
@@ -1025,9 +993,9 @@ def build_sites_table_from_outputs(outdir: str,
             # None, not 0: with no variant record there is no inserted region at
             # all, and 0 would read as a real coordinate at the 5' end.
             ins_lo = ins_hi = None
-            if variant is not None:
-                ins_lo = variant.pos0 + min(ref_len, alt_len)
-                ins_hi = variant.pos0 + alt_len
+            if fields is not None:
+                ins_lo = tx_pos_1 - 1 + min(ref_len, alt_len)
+                ins_hi = tx_pos_1 - 1 + alt_len
 
             for h in mut_hits:
                 site_pos = h["site_pos"]
@@ -1035,7 +1003,7 @@ def build_sites_table_from_outputs(outdir: str,
                 # the ALT allele: the two frames agree 5' of the edit, so the span
                 # still starts at tx_pos_1, but its length is len(ALT) here.
                 dist = distance_to_variant(site_pos, tx_pos_1, alt_len)
-                if variant is None:
+                if fields is None:
                     align_status = "unprojected"
                 elif site_pos is not None and ins_lo <= site_pos - 1 < ins_hi:
                     align_status = "inserted"
@@ -1200,12 +1168,20 @@ def build_events(sites_df: pd.DataFrame) -> pd.DataFrame:
     # pre-mRNA record.
     key = (["pkey","substrate","mirna_id","locus_id"] if "substrate" in sites_df.columns
            else ["pkey","mirna_id","locus_id"])
-    wt_top = (sites_df[sites_df["allele"]=="WT"]
-              .sort_values("tot_score", ascending=False)
-              .groupby(key, dropna=False).head(1))
-    mut_top = (sites_df[sites_df["allele"]=="MUT"]
-               .sort_values("tot_score", ascending=False)
-               .groupby(key, dropna=False).head(1))
+    tie_order = [
+        ("tot_score", False), ("join_pos", True), ("tot_energy", True),
+        ("max_score", False), ("max_energy", True), ("align_status", True),
+        ("strand", True), ("parser_confidence", False), ("site_pos", True),
+    ]
+    tie_order = [(column, ascending) for column, ascending in tie_order
+                 if column in sites_df.columns]
+    ordered = sites_df.sort_values(
+        key + [column for column, _ in tie_order],
+        ascending=[True] * len(key) + [ascending for _, ascending in tie_order],
+        kind="stable", na_position="last",
+    )
+    wt_top = ordered[ordered["allele"] == "WT"].groupby(key, dropna=False).head(1)
+    mut_top = ordered[ordered["allele"] == "MUT"].groupby(key, dropna=False).head(1)
     merged = pd.merge(wt_top, mut_top, on=key, how="outer", suffixes=("_wt","_mut"))
 
     out = []
@@ -1779,20 +1755,20 @@ def main():
 
     os.makedirs(args.output, exist_ok=True)
 
-    # 1) WT
+    run_dir = tempfile.mkdtemp(prefix=".miranda-", dir=args.output)
+    print(f"[miranda] Invocation working directory: {run_dir}")
     run_wt_phase(
         wt_sequences=wt_sequences,
-        outdir=args.output,
+        outdir=run_dir,
         miranda_dir=args.miranda_dir,
         mirna_db=args.mirna_db,
         strict_substrates=strict_substrates,
     )
 
-    # 2) MUT
     mut_summary = run_mut_phase(
         wt_sequences=wt_sequences,
         mapping_dict=mapping_dict,
-        outdir=args.output,
+        outdir=run_dir,
         miranda_dir=args.miranda_dir,
         mirna_db=args.mirna_db,
         use_parallel=not args.no_parallel,
@@ -1801,9 +1777,8 @@ def main():
         strict_substrates=strict_substrates,
     )
 
-    # 3) PARSE
     print("\n[PARSE] Starting ...")
-    sites_df, parse_rejected = build_sites_table_from_outputs(args.output, mapping_dict, failure_map)
+    sites_df, parse_rejected = build_sites_table_from_outputs(run_dir, mapping_dict, failure_map)
     sites_df = assign_loci(sites_df)
     sites_df = assign_segments(sites_df)
 

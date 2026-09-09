@@ -150,10 +150,12 @@ class RBPSequenceMapper:
 
         self._load_mapping()
 
-        # Index MSA directory first (preferred source)
+        # Index MSAs first, then load one sequence-only fallback source. An MSA
+        # remains preferred per RBP, while RBPs missing an MSA can still use the
+        # supplied FASTA or sequence directory.
         if self.msa_dir and self.msa_dir.exists():
             self._index_msa_dir()
-        elif self.sequence_fasta and self.sequence_fasta.exists():
+        if self.sequence_fasta and self.sequence_fasta.exists():
             self._load_sequences_from_fasta()
         elif self.sequence_dir and self.sequence_dir.exists():
             self._index_sequence_dir()

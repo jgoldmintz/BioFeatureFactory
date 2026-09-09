@@ -49,6 +49,14 @@ the intron record and the pre-mRNA record.
 
 ## Output
 
+Each invocation keeps intermediate predictions and progress files in a unique
+`.miranda-*` directory under the output root, printed when processing starts.
+That directory persists for debugging after failure; successfully parsed `.out`
+files are removed as before. Each predictor has a private temporary working
+directory; the executable and miRNA database remain read-only. Intermediate files
+are not reused across invocations.
+Use separate output roots when retaining results from different concurrent runs.
+
 ```
 {output}/{GENE}/Miranda/
     {GENE}.tsv          -- per-mutation summary
@@ -92,8 +100,8 @@ the intron record and the pre-mRNA record.
 | `mirna_id` | miRNA identifier |
 | `locus_id` | Per-miRNA cluster ID (`m1`, `m2`, ...) |
 | `segment_id` | Cross-miRNA segment ID (`s1`, `s2`, ...) |
-| `wt_pos`, `mut_pos` | Highest-scoring site position per allele (bp) |
-| `dpos` | `mut_pos - wt_pos` (bp) |
+| `wt_pos`, `mut_pos` | Highest-scoring site position per allele; score ties use projected coordinate, then energy and stable site attributes |
+| `dpos` | MUT position minus the WT position projected into the MUT frame (bp); excludes indel renumbering |
 | `wt_tot_score`, `mut_tot_score`, `delta_tot_score` | miRanda scores and MUT - WT |
 | `pct_delta` | `delta / max(mut, wt)` |
 | `wt_tot_energy`, `mut_tot_energy`, `delta_energy` | Binding energies (kcal/mol) and MUT - WT |

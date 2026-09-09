@@ -47,6 +47,14 @@ params.max_isoforms_per_gene      = 50
 // See the note above the spliceai invocation in run_spliceai for why it has one.
 params.spliceai_env               = 'bff-spliceai'
 
+// ---- check_vcf_mapping preflight ----------------------------------------
+// 0.0 means "fail only when NOTHING joins". A healthy gene is not necessarily
+// 100%: MEASURED on SMN2, 39 of 40 records join (34 exact, 3 canonical, 2
+// left-aligned) and spliceai-parser.py independently reports the same single
+// no_chromosome_match, so any floor above 97.5% would refuse a working gene.
+// Raise it only against a corpus you have already measured.
+params.min_vcf_mapping_fraction   = 0.0
+
 // ---- GPU bounds for run_spliceai ----------------------------------------
 // spliceai is a Keras model and TensorFlow claims the WHOLE device by default,
 // so on a machine with a visible GPU every concurrent run_spliceai task tries to
@@ -282,7 +290,27 @@ params.spliceai_mem_growth        = true
           vcf_source = generate_vcfs(mutation_files_ch)
       }
 
-      compress_and_index(vcf_source)
+      // Preflight, BEFORE the model runs. The VCF<->mapping join is the same
+      // question spliceai-parser.py asks at the END of the pipeline, so a mapping
+      // that does not describe the VCF is otherwise discovered only after SpliceAI
+      // has scored every variant -- minutes to hours of GPU per gene, discarded,
+      // and then reported as a successful run with a header-only table.
+      //
+      // With generate_vcfs in the loop this CANNOT fire: :266 and :299 resolve the
+      // same chromosome mapping through the same resolveMap call, so a VCF this
+      // pipeline built cannot disagree with the mapping it was built from. It
+      // exists for --input_vcf_path / --skip_vcf_generation, where the VCF has
+      // independent provenance -- a different reference build, a different
+      // chromosome naming convention, or mappings regenerated after it was written.
+      def vcf_with_map = vcf_source.map { gene_id, vcf ->
+          def (c_map, c_ok) = resolveMap(params.chromosome_mapping_path, gene_id, false, 'chromosome')
+          if (!c_ok)
+              throw new RuntimeException("ERROR: chromosome mapping not resolved for ${gene_id}")
+          tuple(gene_id, vcf, file(c_map))
+      }
+      check_vcf_mapping(vcf_with_map)
+
+      compress_and_index(check_vcf_mapping.out)
     run_spliceai(
         compress_and_index.out,
         file(params.reference_genome),
@@ -339,6 +367,39 @@ params.spliceai_mem_growth        = true
         -r "${params.reference_genome}" \\
         -a "${params.annotation_file}" \\
         ${extras}
+      """
+  }
+
+  // Cheap gate in front of the expensive process.
+  //
+  // NO errorStrategy: the default ('terminate') is what is wanted, and 'ignore' is
+  // actively wrong here. MEASURED on a 30-core box, maxForks 1, failing task first,
+  // 5 good tasks behind it:
+  //     terminate -> workflow exit 1, 5 of 5 good tasks published
+  //     ignore    -> workflow exit 0, 5 of 5 good tasks published
+  // The good genes complete either way -- 'terminate' does NOT cancel the queue --
+  // so 'ignore' buys no continuation and costs the only signal the caller gets.
+  // spliceai_pipeline_controller.py ends in sys.exit(nf_proc.wait()), so exit 0
+  // would report a run that skipped a gene as a clean run: the same silent success
+  // this gate exists to remove, moved up one level.
+  process check_vcf_mapping {
+      tag { gene_id }
+
+      input:
+      tuple val(gene_id), path(vcf), path(chrom_map)
+
+      output:
+      tuple val(gene_id), path(vcf)
+
+      script:
+      """
+      set -euo pipefail
+      python3 ${projectDir}/check_vcf_mapping.py \\
+        --vcf "${vcf}" \\
+        --chromosome-mapping "${chrom_map}" \\
+        --reference "${params.reference_genome}" \\
+        --gene "${gene_id}" \\
+        --min-match-fraction ${params.min_vcf_mapping_fraction}
       """
   }
 
@@ -401,7 +462,7 @@ process run_spliceai {
     fi
 
     # Check isoform count and apply filtering if needed
-    ISOFORM_COUNT=\$(grep -c "^${gene_id}\t" "${annotation_file}" || echo 0)
+    ISOFORM_COUNT=\$(awk -F '\t' -v gene="${gene_id}" '\$1 == gene { count++ } END { print count+0 }' "${annotation_file}")
     echo "[run_spliceai] ${gene_id}: \$ISOFORM_COUNT isoforms detected"
 
     if [[ "${forceAll_isoforms}" == "false" ]] && [[ \$ISOFORM_COUNT -gt ${max_isoforms_per_gene} ]]; then

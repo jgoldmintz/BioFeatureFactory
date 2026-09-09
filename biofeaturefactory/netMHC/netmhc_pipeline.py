@@ -123,6 +123,35 @@ def is_linux_host():
     return platform.system().lower() == "linux"
 
 
+def is_netmhcpan(path):
+    """True when this executable is netMHCpan rather than netMHC-4.0.
+
+    Decided on the basename, which is what distinguishes the two installs
+    ('netMHCpan' vs 'netMHC'). The distinction drives three things that are all
+    silent when wrong: the -BA flag, the allele syntax, and which env var the
+    wrapper reads.
+    """
+    return 'netmhcpan' in os.path.basename(str(path)).lower()
+
+
+def _netmhcpan_home(netmhc_path):
+    """NMHOME for a netMHCpan install: the directory holding the wrapper script.
+
+    The wrapper derives $NMHOME/<uname -s>_<uname -m>/bin/netMHCpan-<ver> from it,
+    so NMHOME is the UNPACK ROOT (the one containing Linux_x86_64/ and data/), not
+    the platform dir and not bin/. Handles being handed either the wrapper itself
+    or the real binary several levels down.
+    """
+    p = Path(os.path.abspath(netmhc_path))
+    # <root>/<PLATFORM>/bin/netMHCpan-4.2  ->  <root>
+    if p.parent.name == 'bin' and p.parent.parent.parent.is_dir():
+        candidate = p.parent.parent.parent
+        if (candidate / 'data').is_dir():
+            return str(candidate)
+    # <root>/netMHCpan  ->  <root>
+    return str(p.parent)
+
+
 def resolve_native_netmhc_path(user_path=None, tool_version="netMHC"):
     """
     Resolve a usable native NetMHC executable when available.
@@ -138,11 +167,15 @@ def resolve_native_netmhc_path(user_path=None, tool_version="netMHC"):
 
     Args:
         user_path: User-specified path to NetMHC binary
-        tool_version: Which NetMHC tool to use. Only netMHC-4.0 is supported --
-            the invocation and the 15-column/'HLA'-header parser are hardcoded to
-            it (see --netmhc-tool, choices=['netMHC']). The default is 'netMHC' so
-            a programmatic caller that omits it cannot silently resolve netMHCpan,
-            whose output this parser reads as zero predictions (F5).
+        tool_version: 'netMHC' or 'netMHCpan'. Both are supported now: the parser
+            resolves its columns from each table's own header, so the two layouts
+            (and netMHCpan with and without -BA) read through one path.
+
+            This used to be netMHC-4.0 only, and the restriction was real rather
+            than cautious -- the old parser gated its prediction section on the
+            literal 'HLA', which is netMHC-4.0's column header. netMHCpan heads
+            that column 'MHC', so the section never opened and every run returned
+            zero predictions with no error.
     """
     candidates = []
 
@@ -151,6 +184,18 @@ def resolve_native_netmhc_path(user_path=None, tool_version="netMHC"):
             candidates.append(os.path.expanduser(path))
 
     _add(user_path)
+
+    # Tool-specific env vars first, then the shared ones. NETMHCPAN_PATH used to
+    # be deliberately ignored so a pan install could not be picked up by accident;
+    # with a header-driven parser that hazard is gone and the variable is honoured.
+    if 'pan' in tool_version.lower():
+        _add(os.environ.get("NETMHCPAN_PATH"))
+        # The wrapper's own variable. Pointing at an unpack root is the documented
+        # way to place a netMHCpan install, so accept it as a root and probe below.
+        nmhome = os.environ.get("NMHOME")
+        if nmhome:
+            _add(os.path.join(nmhome, tool_version))
+            _add(nmhome)
     _add(os.environ.get("NETMHC_PATH"))
 
     netmhc_home = os.environ.get("NETMHC_HOME")
@@ -158,9 +203,6 @@ def resolve_native_netmhc_path(user_path=None, tool_version="netMHC"):
         _add(os.path.join(netmhc_home, tool_version))
 
     home = Path.home()
-    # netMHC-4.0 only (see --netmhc-tool): do NOT auto-discover netMHCpan -- its
-    # output format is unreadable by this parser and would silently yield zero
-    # predictions.
     common_roots = [
         home / "netMHC" / tool_version,
         Path(f"/opt/netMHC/{tool_version}"),
@@ -226,8 +268,15 @@ def _run_native_netmhc(fasta_file, output_file, timeout, netmhc_path, alleles=No
     Returns:
         tuple: (success, output_content, error_message)
     """
+    is_pan = is_netmhcpan(netmhc_path)
+
     if not alleles:
-        alleles = ["HLA-A0201"]  # Default allele (netMHC-4.0 format)
+        # Allele SYNTAX differs between the two tools and the wrong one is not a
+        # parse error -- netMHCpan rejects the 4.0 spelling outright, and 4.0 does
+        # not understand the colon form. netMHCpan echoes the allele back a THIRD
+        # way ('HLA-A*02:01', with the star) in its MHC column, so the value here
+        # is not what appears in the output.
+        alleles = ["HLA-A02:01"] if is_pan else ["HLA-A0201"]
 
     all_outputs = []
 
@@ -238,11 +287,33 @@ def _run_native_netmhc(fasta_file, output_file, timeout, netmhc_path, alleles=No
             # Format: netMHC -a HLA-A*02:01 -f input.fasta
             cmd = [netmhc_path, "-a", allele, "-f", fasta_file]
 
-            # netMHC binary expects $NETMHC pointing to the platform dir
-            # (the parent of bin/), e.g. netMHC-4.0/Darwin_x86_64/
+            # -BA is REQUIRED for netMHCpan, not optional. Without it the output
+            # carries no affinity column at all -- only Score_EL/%Rank_EL -- and
+            # every downstream metric in this pipeline is affinity-based. The
+            # eluted-ligand score is a different quantity on a different scale and
+            # is not a substitute. Verified against the shipped reference outputs:
+            # netMHCpan-4.2/test/test.pep.out has 13 columns and no Aff(nM);
+            # test.pep_wBA.out has 17 and does.
+            if is_pan:
+                cmd.append("-BA")
+
             env = os.environ.copy()
             netmhc_bin_dir = os.path.dirname(os.path.abspath(netmhc_path))
-            env["NETMHC"] = os.path.dirname(netmhc_bin_dir) if os.path.basename(netmhc_bin_dir) == "bin" else netmhc_bin_dir
+            platform_dir = (os.path.dirname(netmhc_bin_dir)
+                            if os.path.basename(netmhc_bin_dir) == "bin" else netmhc_bin_dir)
+            if is_pan:
+                # The shipped netMHCpan wrapper hardcodes `setenv NMHOME
+                # /tools/src/netMHCpan-4.2` -- an absolute path on DTU's own build
+                # host that exists nowhere else. It then derives
+                # $NMHOME/`uname -s`_`uname -m`/bin/netMHCpan-4.2 from it, so an
+                # unedited install resolves to a binary that is not there and
+                # prints "no binaries found for ...". Overriding NMHOME here means
+                # the install works unedited, from wherever it was unpacked.
+                env["NMHOME"] = _netmhcpan_home(netmhc_path)
+            else:
+                # netMHC-4.0 expects $NETMHC pointing at the platform dir
+                # (the parent of bin/), e.g. netMHC-4.0/Darwin_x86_64/
+                env["NETMHC"] = platform_dir
 
             result = subprocess.run(
                 cmd,
@@ -276,89 +347,187 @@ def _run_native_netmhc(fasta_file, output_file, timeout, netmhc_path, alleles=No
         return False, "", str(e)
 
 
+# Column header aliases, in PREFERENCE order. The parser reads the table's own
+# header line and resolves indices by NAME rather than by position, because the
+# three layouts this tool family emits differ in both width and meaning:
+#
+#   netMHC-4.0                 (15) ... iCore Identity 1-log50k(aff) Affinity(nM) %Rank BindLevel
+#   netMHCpan-4.2, no -BA      (13) ... Icore Identity Score_EL %Rank_EL BindLevel
+#   netMHCpan-4.2, with -BA    (17) ... Icore Identity Score_EL %Rank_EL Score_BA %Rank_BA Aff(nM) Exp BindLevel
+#
+# Positional indexing across those is not merely fragile, it fails SILENTLY.
+# fields[12] is Affinity(nM) in 4.0 and %Rank_EL in pan+BA; fields[13] is %Rank in
+# 4.0 and Score_BA in pan+BA. Both alternatives parse as float, so the old parser
+# handed a rank percentage downstream labelled as an affinity in nM and raised
+# nothing. Measured against the shipped reference output netMHCpan-4.2/test/
+# test.pep_wBA.out, row 1: Aff(nM)=8.76 while fields[12]=0.680 (%Rank_EL).
+_AFFINITY_COLS = ('Aff(nM)', 'Affinity(nM)', 'nM')
+_RANK_COLS_BA = ('%Rank_BA',)            # affinity-derived rank, needs -BA
+_RANK_COLS_EL = ('%Rank_EL', '%Rank')    # eluted-ligand rank; 4.0's plain %Rank
+_IDENTITY_COLS = ('Identity',)
+_PEPTIDE_COLS = ('Peptide', 'peptide')
+_CORE_COLS = ('Core', 'core')
+_POS_COLS = ('Pos', 'pos')
+_MHC_COLS = ('MHC', 'HLA')
+
+
+def _looks_like_header(fields):
+    """True when this line is the column header of a prediction table.
+
+    Matches on Pos + Peptide + (MHC or HLA). The old gate required the literal
+    'HLA', which netMHC-4.0 emits and netMHCpan does NOT -- pan's column is
+    headed 'MHC'. Against pan output the section therefore never opened and the
+    parser returned zero predictions with no error, for every gene.
+    """
+    lower = {f.lower() for f in fields}
+    has_pos = any(c.lower() in lower for c in _POS_COLS)
+    has_pep = any(c.lower() in lower for c in _PEPTIDE_COLS)
+    has_mhc = any(c.lower() in lower for c in _MHC_COLS)
+    return has_pos and has_pep and has_mhc
+
+
+def _resolve_columns(fields):
+    """Map the header line to {role: index}, or None when a required role is absent.
+
+    Returns (colmap, rank_kind). rank_kind is 'BA' when the rank column is
+    affinity-derived (%Rank_BA, only present with -BA) and 'EL' otherwise, so a
+    caller can tell which quantity it is comparing across alleles rather than
+    assuming. The two are NOT interchangeable: on test.pep_wBA.out row 1 the same
+    peptide is %Rank_EL 0.680 and %Rank_BA 0.060.
+    """
+    index = {name: i for i, name in enumerate(fields)}
+
+    def first(names):
+        for n in names:
+            if n in index:
+                return index[n]
+        return None
+
+    colmap = {
+        'pos': first(_POS_COLS),
+        'mhc_allele': first(_MHC_COLS),
+        'peptide': first(_PEPTIDE_COLS),
+        'core': first(_CORE_COLS),
+        'identity': first(_IDENTITY_COLS),
+        'affinity': first(_AFFINITY_COLS),
+    }
+    rank_ba = first(_RANK_COLS_BA)
+    rank_kind = 'BA' if rank_ba is not None else 'EL'
+    colmap['rank'] = rank_ba if rank_ba is not None else first(_RANK_COLS_EL)
+
+    # affinity is REQUIRED, not optional, and that is a decision about this
+    # pipeline rather than about the file format. netMHCpan without -BA emits a
+    # perfectly valid 13-column table that simply has no Aff(nM) -- but every
+    # metric downstream is affinity-based, and compute_binding_metrics does
+    # `mut_pred['affinity'] - wt_pred['affinity']` unguarded. Returning rows with
+    # affinity=None from here turns that into a bare
+    # `TypeError: unsupported operand type(s) for -: 'NoneType' and 'NoneType'`
+    # several hundred lines away from the cause. Refusing the table at the header,
+    # with the reason named, keeps the failure where the information is.
+    #
+    # The eluted-ligand score is NOT a stand-in: Score_EL and Aff(nM) are
+    # different quantities on different scales, so substituting one would produce
+    # a number that looks like an affinity and is not one.
+    for role in ('pos', 'mhc_allele', 'peptide', 'identity', 'rank', 'affinity'):
+        if colmap[role] is None:
+            return None, rank_kind
+    return colmap, rank_kind
+
+
 def parse_netmhc_output(output_file):
     """
-    Parse NetMHC output file and extract binding predictions.
+    Parse netMHC-4.0 or netMHCpan-4.2 output and extract binding predictions.
 
-    NetMHC output format (space-separated):
-    pos HLA peptide Core Offset I_pos I_len D_pos D_len iCore Identity 1-log50k(aff) Affinity(nM) %Rank BindLevel
+    Column positions are read from each table's own header line (see
+    _resolve_columns), so all three shipped layouts parse through one path and a
+    future column insertion shifts nothing.
 
     Returns:
-        list: List of prediction dictionaries with keys:
-              pos, mhc_allele, peptide, core, affinity, rank, bind_level, identity
+        list: prediction dicts with keys
+              pos, mhc_allele, peptide, core, affinity, rank, rank_kind,
+              bind_level, identity
+        `affinity` is None when the run carried no affinity column (netMHCpan
+        without -BA). `rank_kind` is 'BA' or 'EL'.
     """
     predictions = []
 
     try:
         with open(output_file, 'r') as f:
-            in_prediction_section = False
-            current_identity = ""
+            colmap = None
+            rank_kind = 'EL'
 
             for line in f:
-                original_line = line
                 line = line.strip()
 
-                # Skip empty lines and comment lines
-                if not line or line.startswith('#'):
+                if not line or line.startswith('#') or line.startswith('---'):
                     continue
 
-                # Skip separator lines (all dashes)
-                if line.startswith('---'):
+                fields = line.split()
+
+                # A single output file can hold SEVERAL tables -- _run_native_netmhc
+                # concatenates one run per allele -- so the header is re-read every
+                # time it appears rather than latched once.
+                if _looks_like_header(fields):
+                    colmap, rank_kind = _resolve_columns(fields)
+                    if colmap is None:
+                        missing_aff = not any(c in fields for c in _AFFINITY_COLS)
+                        why = ("no affinity column -- netMHCpan was run WITHOUT -BA, so it "
+                               "emitted Score_EL/%Rank_EL only. Re-run with -BA."
+                               if missing_aff else
+                               "no recognisable Pos/MHC/Peptide/Identity/%Rank columns.")
+                        print(f"ERROR: {output_file}: {why} Rows under this header are "
+                              f"skipped. Header was: {' '.join(fields)}", file=sys.stderr)
                     continue
 
-                # Detect prediction section header
-                if 'pos' in line.lower() and 'peptide' in line.lower() and 'HLA' in line:
-                    in_prediction_section = True
-                    continue
-
-                # Stop at summary line
                 if line.startswith('Protein ') and 'Allele' in line:
-                    in_prediction_section = False
+                    colmap = None
                     continue
 
-                if in_prediction_section:
-                    # Parse prediction line
-                    # Format: "  0  HLA-A0201  TMDKSELVQ  ...  28676.59  43.00"
-                    # Or:     "219  HLA-A0201  QLLRDNLTL  ...   167.10   1.50 <= WB"
+                if colmap is None:
+                    continue
 
-                    fields = line.split()
+                # Every mapped column must actually be present on this row.
+                needed = max(i for i in colmap.values() if i is not None)
+                if len(fields) <= needed:
+                    continue
 
-                    # Need at least 14 fields for valid prediction
-                    if len(fields) < 14:
-                        continue
-
-                    try:
-                        # Extract identity (sequence name) from field 10
-                        identity = fields[10] if len(fields) > 10 else ""
-
-                        # BindLevel is optional and appears as "<= WB" or "<= SB" (2 tokens)
-                        bind_level = ""
-                        if len(fields) >= 16 and fields[14] == "<=":
-                            bind_level = fields[15]  # WB or SB
-                        elif len(fields) == 15 and fields[14] not in ["<=", ""]:
-                            # Sometimes just "WB" or "SB" without <=
-                            bind_level = fields[14]
-
-                        prediction = {
-                            'pos': int(fields[0]),
-                            'mhc_allele': fields[1],
-                            'peptide': fields[2],
-                            'core': fields[3],
-                            'affinity': float(fields[12]),  # Affinity(nM)
-                            'rank': float(fields[13]),      # %Rank
-                            'bind_level': bind_level,
-                            'identity': identity,
-                        }
-                        predictions.append(prediction)
-                    except (ValueError, IndexError) as e:
-                        # Skip malformed lines
-                        continue
+                try:
+                    aff_idx = colmap['affinity']
+                    prediction = {
+                        'pos': int(fields[colmap['pos']]),
+                        'mhc_allele': fields[colmap['mhc_allele']],
+                        'peptide': fields[colmap['peptide']],
+                        'core': fields[colmap['core']] if colmap['core'] is not None else "",
+                        'affinity': float(fields[aff_idx]) if aff_idx is not None else None,
+                        'rank': float(fields[colmap['rank']]),
+                        'rank_kind': rank_kind,
+                        'bind_level': _bind_level(fields),
+                        'identity': fields[colmap['identity']],
+                    }
+                    predictions.append(prediction)
+                except (ValueError, IndexError):
+                    # Malformed row. Skipped, as before.
+                    continue
 
     except Exception as e:
         print(f"Error parsing NetMHC output {output_file}: {e}")
         return []
 
     return predictions
+
+
+def _bind_level(fields):
+    """'WB' / 'SB' / '' for one data row.
+
+    Found by scanning for the literal '<=' rather than by index. BindLevel is the
+    last column and it is OPTIONAL per row, so its position differs between
+    layouts (14 in netMHC-4.0, 13 in netMHCpan without -BA, 17 with it) and the
+    token itself is two words, '<= WB'. Scanning is layout-independent.
+    """
+    for i, tok in enumerate(fields):
+        if tok == '<=' and i + 1 < len(fields):
+            return fields[i + 1]
+    return ""
 
 
 def infer_pos_base(predictions, sequence, sample=25):
@@ -1081,17 +1250,27 @@ def main():
 
     # MHC-specific options
     parser.add_argument('-a', '--alleles', nargs='+',
-                       help='HLA alleles to predict (e.g., HLA-A*02:01 HLA-B*07:02). If not specified, uses default set.')
+                       help='Alleles to predict. SYNTAX DIFFERS BY TOOL and neither accepts '
+                            'the other: netMHCpan takes HLA-A02:01, netMHC-4.0 takes '
+                            'HLA-A0201. Omit this and the correct default for --netmhc-tool '
+                            'is used. (netMHCpan echoes the allele back a third way, '
+                            'HLA-A*02:01, in its MHC column; that form is output, not input.)')
     # Only netMHC-4.0 is supported: the invocation (allele format, `-a`/`-f`) and
     # the parser (15-column layout, 'HLA' header) are hardcoded to it. netMHCpan /
     # netMHCII use different output layouts the parser cannot read and would
     # silently yield zero predictions, so they are not offered.
-    parser.add_argument('-nt', '--netmhc-tool', choices=['netMHC'],
+    parser.add_argument('-nt', '--netmhc-tool', choices=['netMHC', 'netMHCpan'],
                        default='netMHC',
-                       help='NetMHC tool to use (only netMHC-4.0 is supported)')
+                       help='Which tool to resolve and run. netMHCpan is run with -BA '
+                            '(its affinity columns are absent without it) and takes the '
+                            'colon allele syntax, HLA-A02:01; netMHC-4.0 takes HLA-A0201. '
+                            'The output parser reads either layout from the table header.')
     # Execution backend
     parser.add_argument('-nnp', '--native-netmhc-path',
-                       help='Path to native NetMHC executable')
+                       help='Path to the native netMHC or netMHCpan executable. For a '
+                            'netMHCpan install this is the wrapper script at the unpack '
+                            'root (e.g. <dir>/netMHCpan); NMHOME is set from it, so the '
+                            'wrapper does not need its hardcoded /tools/src path edited.')
 
     # Processing options
     parser.add_argument('--mutations', '-m',

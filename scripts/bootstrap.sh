@@ -36,7 +36,7 @@ set -euo pipefail
 #                  8b-8c). No clones, no source builds, no dataset downloads.
 #   git-phase      Clones, source builds, the conda installs, and editable installs
 #                  (steps 1b, 3-8c, 10-12).
-#   db-phase       FTP dataset downloads, CoCoPUTs codon table, build_db (steps 9, 9b, 12).
+#   db-phase       Prepared-database downloads/builds through build_db.sh (steps 9, 9b, 12).
 #   (none)         Run every phase.
 #
 #   Each phase may be written bare: `env`, `git`, `db` are accepted for
@@ -71,10 +71,37 @@ set -euo pipefail
 #   --exclude-clone-af3       Skip cloning AlphaFold3.
 #   --exclude-uniref90        Skip UniRef90 FTP download.
 #   --exclude-cocoputs        Skip the CoCoPUTs codon-usage table build (rare_codon).
-#   --bio-dbs DIR             Prepared-database root (default: nearest Bio_DBs above the
-#                             repo, else BFF_BIO_DBS, else scripts/_downloads).
+#   --exclude-refseq          Skip the RefSeq assembly download + merged protein FASTA.
+#   --exclude-mirna           Skip the mirBase mature_hsa.fasta download.
+#   --exclude-af3-rbp         Skip the AF3 RBP database (POSTAR3 + per-RBP MSAs + tabix).
+#
+#   Database selectors -- build ONE artifact and nothing else. Each implies
+#   db-phase, and they compose, so two flags build two databases. The excludes
+#   above still apply on top of them.
+#
+#   --refseq-only             steps 1-4: assemblies + refseq_proteins_merged.faa
+#   --idmapping-only          steps 5-6: idmapping.dat.gz + protein_id_to_refseq.tsv
+#   --uniref90-only           step 7:    uniref90.fasta.gz
+#   --mirna-only              step 8:    mature_hsa.fasta
+#   --af3-rbp-only            step 9:    AF3/RBP_db (POSTAR3, MSAs, tabix indexes)
+#                             NEEDS a source: --postar3-url and/or
+#                             --af3-msa-archive-url, or an existing
+#                             rbp_uniprot_ids.txt under AF3/RBP_db/.
+#                             With none of them step 9 now FAILS instead of
+#                             leaving an empty directory and exiting 0.
+#   --cocoputs-only           step 9b:   cocoputs/human_GRCh38_codon_usage.tsv
+#
+#   e.g.  ./bootstrap.sh --cocoputs-only        # ~11 MB, seconds
+#         ./bootstrap.sh --af3-rbp-only --mirna-only
+#   --postar3-url URL         Source for AF3/RBP_db/human-POSTAR3.txt.
+#   --af3-msa-archive-url URL Source archive for AF3/RBP_db/msa/.
+#   --bio-dbs DIR             Prepared-database root (default: BFF_BIO_DBS, DB_ROOT,
+#                             or <repo>/Bio_DBs, in that order).
 #   --exclude-idmapping       Skip UniProt idmapping FTP download.
-#   --exclude-build-db        Skip calling build_db.sh.
+#   --exclude-build-db        RETIRED. Still accepted, but no longer needed: the
+#                             db work only runs when db-phase is selected (or on
+#                             a full run), so simply not selecting it is the way
+#                             to skip it, and --<name>-only is the way to narrow it.
 #
 # Repair flags:
 #   --fix-python              Let conda move the env's interpreter to $PY_TARGET when it
@@ -100,14 +127,29 @@ INSTALL_HTSLIB=1
 BUILD_GENESPLICER=1
 INSTALL_NEXTFLOW=1
 CLONE_AF3=1
-DOWNLOAD_UNIREF90=1
-DOWNLOAD_IDMAPPING=1
-BUILD_COCOPUTS_CUT=1
+# One variable per prepared-database artifact, all default 1. build_db.sh has a
+# SKIP_ switch for each of these and they are exported at step [12b]. The three
+# older names are kept as-is so existing --exclude-* flags and PHASE_DB_FLAGS
+# entries keep working.
+DOWNLOAD_UNIREF90=1     # -> SKIP_UNIREF90    step 7
+DOWNLOAD_IDMAPPING=1    # -> SKIP_IDMAPPING   steps 5, 6
+BUILD_COCOPUTS_CUT=1    # -> SKIP_COCOPUTS    step 9b
+DOWNLOAD_REFSEQ=1       # -> SKIP_REFSEQ      steps 1-4, the large one
+DOWNLOAD_MIRNA=1        # -> SKIP_MIRNA       step 8
+DOWNLOAD_AF3RBP=1       # -> SKIP_AF3RBP      step 9
 SPLICEAI_OWN_ENV=1
 SPLICEAI_ENV_NAME="${SPLICEAI_ENV_NAME:-bff-spliceai}"
 RUN_BUILD_DB=1
 INSTALL_EDITABLE_REPOS=1
 FIX_PYTHON=0
+DB_ONLY=""      # accumulated by the --<name>-only flags; empty means "every artifact"
+# Source URLs for the AF3 RBP database. build_db.sh defaults both to empty and
+# gates its downloads on them, so without a value step 9 can only fail. Honour
+# an existing environment value; --postar3-url / --af3-msa-archive-url override.
+POSTAR3_TXT_URL="${POSTAR3_TXT_URL:-}"
+AF3_RBP_MSA_ARCHIVE_URL="${AF3_RBP_MSA_ARCHIVE_URL:-}"
+DB_EXCLUDE=""   # accumulated by the database --exclude-* flags; re-applied last
+INVOCATION_DIR="$(pwd -P)"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)"
 
 # apply_plmc_patch <patch_file> <human_label>
@@ -232,6 +274,16 @@ for arg in "$@"; do
     env-phase|env) PHASE_ENV=1; PHASE_SELECTORS="$PHASE_SELECTORS $arg" ;;
     git-phase|git) PHASE_GIT=1; PHASE_SELECTORS="$PHASE_SELECTORS $arg" ;;
     db-phase|db)   PHASE_DB=1;  PHASE_SELECTORS="$PHASE_SELECTORS $arg" ;;
+    # --<name>-only selects the db phase here, in the FIRST pass, because the
+    # phase flags are resolved between the two argument loops. Recognised again
+    # in the second pass, which is where the artifact name is recorded.
+    --refseq-only|--idmapping-only|--uniref90-only|--mirna-only|--af3-rbp-only|--cocoputs-only)
+      if [[ "$PHASE_DB" -ne 1 ]]; then
+        PHASE_DB=1
+        PHASE_SELECTORS="$PHASE_SELECTORS db-phase"
+      fi
+      ARGS+=("$arg")
+      ;;
     env-only|git-only|db-only)
       echo "ERROR: '$arg' no longer exists. Phases are additive, so '-only' would be a lie." >&2
       echo "       Use '${arg%%-*}-phase' (or bare '${arg%%-*}'), and combine freely:" >&2
@@ -295,10 +347,30 @@ while [[ $# -gt 0 ]]; do
     --exclude-editable-repos) INSTALL_EDITABLE_REPOS=0 ;;
     --exclude-genesplicer)   BUILD_GENESPLICER=0 ;;
     --exclude-clone-af3)     CLONE_AF3=0 ;;
-    --exclude-uniref90)      DOWNLOAD_UNIREF90=0 ;;
-    --exclude-cocoputs)      BUILD_COCOPUTS_CUT=0 ;;
+    # Each database exclude records its name as well as zeroing the variable.
+    # The name is what gets re-applied after --<name>-only resolution, which
+    # otherwise re-enables an artifact the user had just excluded.
+    --exclude-uniref90)      DOWNLOAD_UNIREF90=0;  DB_EXCLUDE="$DB_EXCLUDE uniref90" ;;
+    --exclude-cocoputs)      BUILD_COCOPUTS_CUT=0; DB_EXCLUDE="$DB_EXCLUDE cocoputs" ;;
+    --exclude-refseq)        DOWNLOAD_REFSEQ=0;    DB_EXCLUDE="$DB_EXCLUDE refseq" ;;
+    --exclude-mirna)         DOWNLOAD_MIRNA=0;     DB_EXCLUDE="$DB_EXCLUDE mirna" ;;
+    --exclude-af3-rbp)       DOWNLOAD_AF3RBP=0;    DB_EXCLUDE="$DB_EXCLUDE af3rbp" ;;
     --bio-dbs)               BIO_DBS_DIR="${2:?--bio-dbs needs a directory}"; shift ;;
-    --exclude-idmapping)     DOWNLOAD_IDMAPPING=0 ;;
+    --postar3-url)           POSTAR3_TXT_URL="${2:?--postar3-url needs a URL}"; shift ;;
+    --af3-msa-archive-url)   AF3_RBP_MSA_ARCHIVE_URL="${2:?--af3-msa-archive-url needs a URL}"; shift ;;
+    --exclude-idmapping)     DOWNLOAD_IDMAPPING=0; DB_EXCLUDE="$DB_EXCLUDE idmapping" ;;
+    # --<name>-only: build ONE artifact and nothing else. Composable -- give two
+    # and you get both. Implies db-phase, because asking for a single database is
+    # unambiguous about which phase you meant. The excludes still apply on top,
+    # so "--refseq-only --exclude-refseq" correctly lands on "nothing to do".
+    --refseq-only)           DB_ONLY="$DB_ONLY refseq" ;;
+    --idmapping-only)        DB_ONLY="$DB_ONLY idmapping" ;;
+    --uniref90-only)         DB_ONLY="$DB_ONLY uniref90" ;;
+    --mirna-only)            DB_ONLY="$DB_ONLY mirna" ;;
+    --af3-rbp-only)          DB_ONLY="$DB_ONLY af3rbp" ;;
+    --cocoputs-only)         DB_ONLY="$DB_ONLY cocoputs" ;;
+    # Retired: db work is now addressed by NOT selecting db-phase, or by an
+    # --<name>-only flag. Still accepted so existing scripts do not break.
     --exclude-build-db)      RUN_BUILD_DB=0 ;;
     --fix-python)            FIX_PYTHON=1 ;;
     --pip-install|--build-plmc|--download-uniref90|--download-idmapping|--clone-alphafold3)
@@ -314,6 +386,63 @@ while [[ $# -gt 0 ]]; do
   esac
   shift
 done
+
+# Dataset controls have no independent step now that build_db.sh owns every
+# prepared-database download.
+if [[ "$RUN_BUILD_DB" -eq 0 ]]; then
+  DOWNLOAD_UNIREF90=0
+  DOWNLOAD_IDMAPPING=0
+  BUILD_COCOPUTS_CUT=0
+  DOWNLOAD_REFSEQ=0
+  DOWNLOAD_MIRNA=0
+  DOWNLOAD_AF3RBP=0
+fi
+
+# --- Resolve --<name>-only -------------------------------------------------
+# Zero every artifact, then re-enable the named ones. Applied BEFORE the
+# excludes take effect below, so an exclude can still veto a named artifact.
+if [[ -n "$DB_ONLY" ]]; then
+  DOWNLOAD_UNIREF90=0; DOWNLOAD_IDMAPPING=0; BUILD_COCOPUTS_CUT=0
+  DOWNLOAD_REFSEQ=0;   DOWNLOAD_MIRNA=0;     DOWNLOAD_AF3RBP=0
+  for _only in $DB_ONLY; do
+    case "$_only" in
+      refseq)    DOWNLOAD_REFSEQ=1 ;;
+      idmapping) DOWNLOAD_IDMAPPING=1 ;;
+      uniref90)  DOWNLOAD_UNIREF90=1 ;;
+      mirna)     DOWNLOAD_MIRNA=1 ;;
+      af3rbp)    DOWNLOAD_AF3RBP=1 ;;
+      cocoputs)  BUILD_COCOPUTS_CUT=1 ;;
+    esac
+  done
+  # PHASE_DB was already set in the first argument pass, which is what let the
+  # phase-flag resolution above enable PHASE_DB_FLAGS. Here we only need to make
+  # sure the db step itself is on.
+  RUN_BUILD_DB=1
+  echo "Databases selected:$DB_ONLY"
+fi
+
+# Excludes are applied LAST so they win over --<name>-only. Without this,
+# "--cocoputs-only --exclude-cocoputs" re-enabled cocoputs inside the only-block
+# and the run proceeded instead of landing on "nothing to do".
+for _ex in $DB_EXCLUDE; do
+  case "$_ex" in
+    refseq)    DOWNLOAD_REFSEQ=0 ;;
+    idmapping) DOWNLOAD_IDMAPPING=0 ;;
+    uniref90)  DOWNLOAD_UNIREF90=0 ;;
+    mirna)     DOWNLOAD_MIRNA=0 ;;
+    af3rbp)    DOWNLOAD_AF3RBP=0 ;;
+    cocoputs)  BUILD_COCOPUTS_CUT=0 ;;
+  esac
+done
+
+# Nothing left to build -> nothing for build_db.sh to do. Turning the step off
+# here is what makes the generic "every step is excluded" guard below fire,
+# instead of launching build_db.sh to print six SKIPs and exit 0.
+if [[ "$DOWNLOAD_REFSEQ" -eq 0 && "$DOWNLOAD_IDMAPPING" -eq 0 \
+   && "$DOWNLOAD_UNIREF90" -eq 0 && "$DOWNLOAD_MIRNA" -eq 0 \
+   && "$DOWNLOAD_AF3RBP" -eq 0 && "$BUILD_COCOPUTS_CUT" -eq 0 ]]; then
+  RUN_BUILD_DB=0
+fi
 
 # --- Validate: something must remain to do ---
 # One generic check replaces the three per-subcommand ones. Those had to be
@@ -331,14 +460,12 @@ if [[ "$PHASE_ENV" -eq 1 && "$PHASE_GIT" -eq 0 && "$PHASE_DB" -eq 0 && "$PIP_INS
   echo "WARN: env-phase with --exclude-pip-install; only the conda and editable-install steps will run." >&2
 fi
 # -- Preflight: interpreter must be in the supported range ---------------
-# Ceiling 3.12: pyproject pins numpy>=1.20,<2, and numpy 1.26.4 (the last 1.x) ships
-#   no wheel past cp312. Above it pip falls back to an sdist and compiles numpy.
 # Floor 3.10: adabmDCA requires it (see pyproject [project.optional-dependencies]).
 # 3.11 is the version this stack has actually been run on.
 # This gate is a REFUSAL, not a repair. Replacing the interpreter of a populated env
 # orphans everything installed under the old one, so the downgrade is opt-in via
 # --fix-python rather than automatic.
-PY_MIN="3.10"; PY_MAX="3.12"; PY_TARGET="3.11"
+PY_MIN="3.10"; PY_MAX="3.13"; PY_TARGET="3.11"
 py_in_range() {
   local v="$1"
   [[ -n "$v" ]] || return 1
@@ -346,8 +473,40 @@ py_in_range() {
   [[ "$(printf '%s\n%s\n' "$v" "$PY_MAX" | sort -V | head -n1)" == "$v" ]] || return 1
   return 0
 }
+# True when PY_BIN belongs to the ACTIVE conda env, or when no env is active at all
+# (a bare system/venv install is a legitimate way to run this script).
+#
+# resolve_py_bin's 2nd and 3rd branches fall through to `python3`/`python` on PATH.
+# That is correct with no env active and WRONG with one active but empty: it adopts
+# the host interpreter while every conda step still writes to $CONDA_PREFIX. Both
+# consequences are silent. `$PY_BIN -m pip` fails once per pip step with "No module
+# named pip", and conda_install_pinned then pins the env to `python=$PY_VER` -- the
+# HOST python's version rather than a chosen one.
+#
+# MEASURED on a fresh GPU box, bff created empty: PY_BIN=/usr/bin/python3,
+# PY_VER=3.12, the [0/12] gate PASSED (Ubuntu's 3.12 is inside 3.10-3.12), 4 pip
+# steps failed, and `conda install ... python=3.12` was issued against an env that
+# was meant to hold $PY_TARGET. The gate validated an interpreter the run never used.
+py_bin_in_env() {
+  [[ -z "${CONDA_PREFIX:-}" ]] && return 0
+  [[ -n "$PY_BIN" && "$PY_BIN" == "$CONDA_PREFIX/bin/"* ]]
+}
 
-if [[ "$PHASE_ENV" -eq 1 || "$PHASE_GIT" -eq 1 ]]; then
+# The db phase needs a validated interpreter only when it will actually use one,
+# so the gate names the two steps rather than the whole phase:
+#   INSTALL_HTSLIB      step [6c2] calls conda_install_pinned, which pins
+#                       python=$PY_VER into the env -- a wrong PY_BIN propagates.
+#   BUILD_COCOPUTS_CUT  build_db.sh:504 runs "${PYTHON:-python3}" for the codon
+#                       usage table, and PYTHON is exported from PY_BIN below.
+# Excluding both (--exclude-htslib --exclude-cocoputs) leaves a db run that only
+# downloads and indexes, which needs no interpreter and is not blocked here.
+DB_NEEDS_INTERP=0
+if [[ "$PHASE_DB" -eq 1 ]] \
+   && { [[ "$INSTALL_HTSLIB" -eq 1 ]] || [[ "$BUILD_COCOPUTS_CUT" -eq 1 ]]; }; then
+  DB_NEEDS_INTERP=1
+fi
+
+if [[ "$PHASE_ENV" -eq 1 || "$PHASE_GIT" -eq 1 || "$DB_NEEDS_INTERP" -eq 1 ]]; then
   if [[ -z "$PY_BIN" ]]; then
     echo "ERROR: no python interpreter found (looked at \$CONDA_PREFIX/bin/python, python3, python)." >&2
     echo "       Activate the project environment first:  conda activate bff" >&2
@@ -356,8 +515,15 @@ if [[ "$PHASE_ENV" -eq 1 || "$PHASE_GIT" -eq 1 ]]; then
 
   # --fix-python is attempted BEFORE any failure is reported: a repair that succeeds
   # is not an error, and printing the refusal first made a successful run look broken.
-  if ! py_in_range "$PY_VER" && [[ "$FIX_PYTHON" -eq 1 ]]; then
-    echo "[0/12] python $PY_VER is outside $PY_MIN-$PY_MAX; --fix-python given, repairing."
+  # Repair covers BOTH faults: an out-of-range interpreter, and an active conda env
+  # with no interpreter of its own. The second used to slip past because the version
+  # it reported came from the host python and was perfectly in range.
+  if { ! py_in_range "$PY_VER" || ! py_bin_in_env; } && [[ "$FIX_PYTHON" -eq 1 ]]; then
+    if ! py_bin_in_env; then
+      echo "[0/12] conda env $CONDA_PREFIX has no interpreter (resolved ${PY_BIN:-<none>}); --fix-python given, repairing."
+    else
+      echo "[0/12] python $PY_VER is outside $PY_MIN-$PY_MAX; --fix-python given, repairing."
+    fi
     if ! command -v conda >/dev/null 2>&1; then
       echo "ERROR: --fix-python given but conda is not on PATH." >&2
       exit 1
@@ -382,12 +548,37 @@ if [[ "$PHASE_ENV" -eq 1 || "$PHASE_GIT" -eq 1 ]]; then
     if [[ -n "$PY_BIN" ]]; then PY_VER="$(py_ver_of "$PY_BIN")"; fi
   fi
 
+  # Checked BEFORE the range gate: the range gate reads $PY_VER, and when the env is
+  # empty that version describes the host python, not anything this run will install
+  # into. Passing it is meaningless, so refuse first.
+  if ! py_bin_in_env; then
+    echo "ERROR: a conda env is ACTIVE but has no interpreter of its own." >&2
+    echo "         CONDA_PREFIX: $CONDA_PREFIX" >&2
+    echo "         resolved to : ${PY_BIN:-<none found>}  <- host python, NOT the env" >&2
+    echo "       Refusing to continue. Every pip step would fail with 'No module named pip'," >&2
+    echo "       and the conda steps would pin this env to python=${PY_VER:-?} taken from the host." >&2
+    echo "       Fix it in ONE of these ways, then re-run:" >&2
+    echo "         conda install -y -p \"\$CONDA_PREFIX\" python=$PY_TARGET" >&2
+    echo "         ./bootstrap.sh$PHASE_SELECTORS --fix-python   # let this script do it" >&2
+    echo "         conda deactivate && conda create -n bff python=$PY_TARGET && conda activate bff" >&2
+    exit 1
+  fi
+
+  PY_RANGE_REQUIRED=0
+  if [[ "$PIP_INSTALL" -eq 1 || "$INSTALL_EDITABLE_REPOS" -eq 1 ]]; then
+    PY_RANGE_REQUIRED=1
+  fi
+
   if py_in_range "$PY_VER"; then
     echo "[0/12] python $PY_VER at $PY_BIN is within the supported range ($PY_MIN-$PY_MAX)."
+  elif [[ "$PY_RANGE_REQUIRED" -eq 0 ]]; then
+    echo "[0/12] python $PY_VER at $PY_BIN is outside $PY_MIN-$PY_MAX, which is allowed"
+    echo "       here: no pip install runs in this selection, and the ceiling is a"
+    echo "       numpy wheel constraint on pip alone."
   else
     echo "ERROR: python ${PY_VER:-unknown} is outside the supported range ($PY_MIN-$PY_MAX)." >&2
     echo "       interpreter: ${PY_BIN:-<none found>}" >&2
-    echo "       numpy<2 (pyproject) has no wheel above cp312; pip would try to COMPILE numpy." >&2
+    echo "       The package declares requires-python >=3.10,<3.14 in pyproject.toml." >&2
     if [[ "$FIX_PYTHON" -eq 1 ]]; then
       echo "       --fix-python ran but the interpreter is still out of range." >&2
     else
@@ -404,39 +595,16 @@ fi
 # arg parser runs); ROOT_DIR is the same directory, so reuse rather than recompute.
 ROOT_DIR="$SCRIPT_DIR"
 
-# Prepared-database root. The CoCoPUTs codon-usage table belongs here with every
-# other built database, NOT in the repo: it is derived data (~11 MB of upstream
-# zips plus the table), it is shared across checkouts, and rare_codon reads it by
-# path rather than importing it.
-#
-# Bio_DBs is NOT a fixed number of levels above this script. ROOT_DIR is the
-# `scripts/` directory, so the pre-existing `$ROOT_DIR/../Bio_DBs` at the legacy
-# build_db.sh call resolves to <repo>/Bio_DBs, which is not where it lives on any
-# machine checked -- this repo sits at <base>/BFF/BioFeatureFactory while Bio_DBs
-# sits at <base>/Bio_DBs, three levels up. Searching upward finds it wherever the
-# checkout is nested, and --bio-dbs / BFF_BIO_DBS override when it is elsewhere
-# entirely. Falls back to scripts/_downloads so a machine with no Bio_DBs still
-# bootstraps rather than aborting.
-find_bio_dbs() {
-  local d="$ROOT_DIR"
-  local i
-  for i in 1 2 3 4 5; do
-    d="$(cd "$d/.." 2>/dev/null && pwd)" || return 1
-    [[ -d "$d/Bio_DBs" ]] && { echo "$d/Bio_DBs"; return 0; }
-    [[ "$d" == "/" ]] && break
-  done
-  return 1
-}
-BIO_DBS_DIR="${BIO_DBS_DIR:-${BFF_BIO_DBS:-}}"
 REPO_ROOT="$(cd "$ROOT_DIR/.." && pwd)"
+# Prepared databases default to this checkout. Explicit overrides remain
+# available for shared installations, but ancestor directories are never selected
+# implicitly: that made the same command write to different roots by machine.
+BIO_DBS_DIR="${BIO_DBS_DIR:-${BFF_BIO_DBS:-${DB_ROOT:-$REPO_ROOT/Bio_DBs}}}"
+if [[ "$BIO_DBS_DIR" != /* ]]; then
+  BIO_DBS_DIR="$INVOCATION_DIR/$BIO_DBS_DIR"
+fi
 BFF_DIR="$REPO_ROOT/biofeaturefactory"
 cd "$ROOT_DIR"
-
-# Only materialise the download cache when a step will actually write to it.
-# (GeneSplicer is excluded: step 7 downloads into $GS_DIR, not _downloads.)
-if [[ "$DOWNLOAD_UNIREF90" -eq 1 || "$DOWNLOAD_IDMAPPING" -eq 1 ]]; then
-  mkdir -p _downloads
-fi
 
 # -- Failure collection --------------------------------------------------
 # `set -e` makes ANY unguarded failure abort the run, so a single step that
@@ -577,8 +745,8 @@ pkg_install() {
 # Required for compiling plmc and (potentially) GeneSplicer + native Python
 # extensions during pip install. Skipped unless the git phase is selected.
 # Policy: verify presence; do NOT change/upgrade if already installed.
-echo "[1b/12] Build toolchain..."
 if [[ "$INSTALL_BUILD_TOOLS" -eq 1 ]]; then
+  echo "[1b/12] Build toolchain..."
   have_gcc=0; have_gxx=0; have_make=0
   command -v gcc  >/dev/null 2>&1 && have_gcc=1
   command -v g++  >/dev/null 2>&1 && have_gxx=1
@@ -610,8 +778,8 @@ fi
 # and netNglyc reports "No sites predicted in this sequence" for CBG_HUMAN, a
 # protein with six known N-glycosylation sites. A clean exit, an empty mask, and
 # a wrong answer.
-echo "[1c/12] tcsh (netNglyc / netphos / netMHC launchers)..."
 if [[ "$INSTALL_TCSH" -eq 1 ]]; then
+  echo "[1c/12] tcsh (netNglyc / netphos / netMHC launchers)..."
   if [[ -x /bin/tcsh || -x /usr/bin/tcsh ]]; then
     echo "  OK tcsh at $(command -v /bin/tcsh /usr/bin/tcsh 2>/dev/null | head -n1)"
   else
@@ -641,8 +809,8 @@ fi
 # predictions and 0 predictions for PAM, the only difference being that one shell
 # had PERL5LIB set. cron, systemd and any non-interactive run land in the empty
 # case. Do NOT replace this with a --local-lib install.
-echo "[1d/12] Array::Base (netNglyc Template/test)..."
 if [[ "$INSTALL_PERL_MODS" -eq 1 ]]; then
+  echo "[1d/12] Array::Base (netNglyc Template/test)..."
   if perl -e 'use Array::Base +1;' >/dev/null 2>&1; then
     echo "  OK Array::Base already available to the system perl"
   else
@@ -669,8 +837,8 @@ if [[ "$INSTALL_PERL_MODS" -eq 1 ]]; then
 fi
 
 # -- Step 2: Pip install --------------------------------------------------
-echo "[2/12] Core Python requirements..."
 if [[ "$PIP_INSTALL" -eq 1 ]]; then
+  echo "[2/12] Core Python requirements..."
   echo "  PIP install -e .[all] (editable install with all optional deps)"
   "$PY_BIN" -m pip install -e "${REPO_ROOT}[all]" \
     || record_failure "step 2: pip install -e .[all]"
@@ -680,8 +848,8 @@ if [[ "$PIP_INSTALL" -eq 1 ]]; then
 fi
 
 # -- Step 3: mutation_effects (EVmutation + plmc) + adabmDCApy + cg_cotrans --
-echo "[3/12] mutation_effects module dependencies..."
 if [[ "$CLONE_EVMUTATION" -eq 1 ]]; then
+  echo "[3/12] mutation_effects module dependencies..."
   clone_or_update "https://github.com/debbiemarkslab/EVmutation.git" "$BFF_DIR/mutation_effects/EVmutation" \
     || record_failure "step 3: clone EVmutation"
   clone_or_update "https://github.com/debbiemarkslab/plmc.git" "$BFF_DIR/mutation_effects/plmc" \
@@ -736,8 +904,8 @@ if [[ "$DOWNLOAD_CG_COTRANS" -eq 1 ]]; then
 fi
 
 # -- Step 4: NetSurfP3 ---------------------------------------------------
-echo "[4/12] NetSurfP3 module dependency..."
 if [[ "$CLONE_NETSURFP3" -eq 1 ]]; then
+  echo "[4/12] NetSurfP3 module dependency..."
   clone_or_update "https://github.com/Eryk96/NetSurfP-3.0.git" "$BFF_DIR/NetSurfP3/nsp3" \
     || record_failure "step 4: clone NetSurfP-3.0"
   # Editable install (pip install -e nsp3/nsp3) is handled centrally in step [8b].
@@ -759,8 +927,8 @@ fi
 # the probe below checks the env directly as well. netnglyc_pipeline.py's
 # resolve_signalp6_path does the same and needs no flag when the env is named
 # `signalp6`; -snp/--signalp6-bin overrides it for any other layout.
-echo "[5/12] SignalP 6.0 (netNglyc dependency, licensed manual install)..."
 if [[ "$INSTALL_SIGNALP" -eq 1 ]]; then
+  echo "[5/12] SignalP 6.0 (netNglyc dependency, licensed manual install)..."
   if command -v signalp6 >/dev/null 2>&1; then
     echo "  OK signalp6 on PATH: $(command -v signalp6)"
   else
@@ -770,8 +938,8 @@ if [[ "$INSTALL_SIGNALP" -eq 1 ]]; then
 fi
 
 # -- Step 6: Miranda -----------------------------------------------------
-echo "[6/12] Miranda (conda)..."
 if [[ "$INSTALL_MIRANDA" -eq 1 ]]; then
+  echo "[6/12] Miranda (conda)..."
   if command -v miranda >/dev/null 2>&1; then
     echo "  OK miranda already on PATH"
   else
@@ -780,8 +948,8 @@ if [[ "$INSTALL_MIRANDA" -eq 1 ]]; then
 fi
 
 # -- Step 6b: mmseqs2 (EVmutation codon MSA) -----------------------------
-echo "[6b/12] mmseqs2..."
 if [[ "$INSTALL_MMSEQS2" -eq 1 ]]; then
+  echo "[6b/12] mmseqs2..."
   if command -v mmseqs >/dev/null 2>&1; then
     echo "  OK mmseqs2 already on PATH"
   else
@@ -790,8 +958,8 @@ if [[ "$INSTALL_MMSEQS2" -eq 1 ]]; then
 fi
 
 # -- Step 6c: HMMER / jackhmmer (EVmutation protein MSA) ----------------
-echo "[6c/12] HMMER (jackhmmer)..."
 if [[ "$INSTALL_HMMER" -eq 1 ]]; then
+  echo "[6c/12] HMMER (jackhmmer)..."
   if command -v jackhmmer >/dev/null 2>&1; then
     echo "  OK jackhmmer already on PATH"
   else
@@ -821,8 +989,8 @@ fi
 # exists as a package name but is an older split that provides tabix alone,
 # leaving bgzip missing -- the half-installed state is worse than none, because
 # the process then fails on line 2 of 2 with a partial output already written.
-echo "[6c2/12] HTSlib (bgzip + tabix)..."
 if [[ "$INSTALL_HTSLIB" -eq 1 ]]; then
+  echo "[6c2/12] HTSlib (bgzip + tabix)..."
   if command -v bgzip >/dev/null 2>&1 && command -v tabix >/dev/null 2>&1; then
     echo "  OK bgzip and tabix already on PATH"
   else
@@ -845,7 +1013,6 @@ fi
 # block where the spliceai CHECK lives: that block is skipped unless the git phase runs,
 # and the env phase is documented as pip/conda installs. A conda
 # package belongs in the phase that installs conda packages.
-echo "[6d/12] SpliceAI (own conda env)..."
 # SpliceAI gets its OWN environment. Two independent reasons, both measured:
 #
 #  1. Abseil collision. pyarrow and tensorflow each vendor their own Abseil, and
@@ -872,6 +1039,7 @@ echo "[6d/12] SpliceAI (own conda env)..."
 # --exclude-spliceai-env puts it back in the active env (and back in reach of both
 # problems). --spliceai-env NAME changes the env name.
 if [[ "$INSTALL_SPLICEAI" -eq 1 ]]; then
+  echo "[6d/12] SpliceAI (own conda env)..."
   CONDA_BIN=""
   command -v conda >/dev/null 2>&1 && CONDA_BIN=conda
   [[ -z "$CONDA_BIN" ]] && command -v mamba >/dev/null 2>&1 && CONDA_BIN=mamba
@@ -991,8 +1159,8 @@ fi
 # recover it -- and genesplicer_ensemble.py cannot tell an empty stdout with
 # rc=0 from a sequence that genuinely has no splice sites, so every gene would
 # be silently reported as site-free.
-echo "[7/12] GeneSplicer binary (source build from JHU)..."
 if [[ "$BUILD_GENESPLICER" -eq 1 ]]; then
+  echo "[7/12] GeneSplicer binary (source build from JHU)..."
   GS_DIR="$BFF_DIR/genesplicer"
   GS_TAR="$GS_DIR/GeneSplicer.tar.gz"
   GS_SRC="$GS_DIR/GeneSplicer"
@@ -1045,8 +1213,8 @@ fi
 # silently replacing -- system Java affects unrelated tooling.
 JAVA_MIN_MAJOR=17
 NEXTFLOW_MIN="22.10.0"
-echo "[7b/12] Nextflow + OpenJDK..."
 if [[ "$INSTALL_NEXTFLOW" -eq 1 ]]; then
+  echo "[7b/12] Nextflow + OpenJDK..."
   # ---- OpenJDK ----
   # Nextflow 24+ requires Java 17+. Earlier policy was warn-and-continue,
   # but the official Nextflow installer fails immediately when Java is below
@@ -1214,8 +1382,8 @@ if [[ "$INSTALL_NEXTFLOW" -eq 1 ]]; then
 fi
 
 # -- Step 8: AlphaFold3 --------------------------------------------------
-echo "[8/12] AlphaFold3 upstream (optional clone)..."
 if [[ "$CLONE_AF3" -eq 1 ]]; then
+  echo "[8/12] AlphaFold3 upstream (optional clone)..."
   clone_or_update "https://github.com/google-deepmind/alphafold3.git" "$BFF_DIR/alphafold3/alphafold3" \
     || record_failure "step 8: clone AlphaFold3"
 fi
@@ -1229,8 +1397,8 @@ fi
 #     was never set up.
 # EVmutation is intentionally NOT here: it ships no setup.py/pyproject and is
 # imported via sys.path from its clone, so it cannot be `pip install -e`'d.
-echo "[8b/12] Editable installs of python-based cloned repos..."
 if [[ "$INSTALL_EDITABLE_REPOS" -eq 1 ]]; then
+  echo "[8b/12] Editable installs of python-based cloned repos..."
   # Each entry: label|relpath-under-BFF_DIR|install-subdir-suffix|setup-marker
   EDITABLE_REPOS=(
     "nsp3|NetSurfP3/nsp3|/nsp3|setup.py"
@@ -1291,8 +1459,8 @@ fi
 # resolve the console scripts declared in pyproject.toml the same way a shell
 # invocation would. Warn-only: a missing OPTIONAL backend (torch, ViennaRNA, an
 # unfetched clone) must not abort a bootstrap that has already done real work.
-echo "[8c/12] Verifying installed package layout..."
 if [[ "$PIP_INSTALL" -eq 1 || "$INSTALL_EDITABLE_REPOS" -eq 1 ]]; then
+  echo "[8c/12] Verifying installed package layout..."
   "$PY_BIN" - <<'PYCHECK' || echo "  WARN layout verification reported problems (see above)"
 import importlib, sys
 from importlib.metadata import distributions, entry_points
@@ -1343,25 +1511,24 @@ else:
 
 sys.exit(1 if bad else 0)
 PYCHECK
-else
-  echo "  SKIP (no python env step ran in this mode)"
 fi
+# No `else` branch. The [8c] header now prints inside the gate along with the
+# rest, so an unconditional SKIP here emitted a bare indented line under no
+# heading -- which is what a db-phase run looked like: one orphaned "SKIP" with
+# nothing to attach it to. A step that does not run in the selected phase says
+# nothing at all.
 
-# -- Step 9: FTP datasets ------------------------------------------------
-echo "[9/12] Optional FTP datasets..."
-if [[ "$DOWNLOAD_UNIREF90" -eq 1 ]]; then
-  download_file \
-    "https://ftp.uniprot.org/pub/databases/uniprot/uniref/uniref90/uniref90.fasta.gz" \
-    "$ROOT_DIR/_downloads/uniref90.fasta.gz" \
-    || record_failure "step 9: download uniref90.fasta.gz"
+# -- Step 9: Prepared datasets -------------------------------------------
+if [[ "$RUN_BUILD_DB" -eq 1 ]]; then
+  echo "[9/12] Prepared database downloads..."
+  # Deferred to [12b] on purpose: build_db.sh downloads hundreds of GB over many
+  # hours, and the licensed-dependency checklist in [11] is worth putting in
+  # front of the user before that starts. The step number here is the one that
+  # actually prints, so this line no longer points at a step that never runs in
+  # a db-only invocation ([10]-[12] are inside the git-phase block).
+  echo "  DEFER to scripts/build_db.sh (runs below as [12b/12])"
+  echo "  DB root: $BIO_DBS_DIR"
 fi
-if [[ "$DOWNLOAD_IDMAPPING" -eq 1 ]]; then
-  download_file \
-    "https://ftp.uniprot.org/pub/databases/uniprot/current_release/knowledgebase/idmapping/idmapping.dat.gz" \
-    "$ROOT_DIR/_downloads/idmapping.dat.gz" \
-    || record_failure "step 9: download idmapping.dat.gz"
-fi
-
 # -- Step 9b: CoCoPUTs codon usage table -- MOVED ------------------------
 # The table is built by scripts/build_db.sh (step 9b there), not here. It is a
 # prepared database like every other artifact under Bio_DBs, and building it from
@@ -1438,17 +1605,46 @@ EOF
 fi
 
 if [[ "$RUN_BUILD_DB" -eq 1 ]]; then
+  echo "[12b/12] Prepared databases -- scripts/build_db.sh..."
   DB_SCRIPT="$ROOT_DIR/build_db.sh"
-  if [[ -x "$DB_SCRIPT" ]]; then
+  # -f, not -x, and invoked through `bash`. The exec bit is 100755 in git but it
+  # does not survive every transport: scp without -p, a zip round-trip, a docker
+  # COPY, a noexec mount, or a checkout with core.fileMode=false all deliver a
+  # readable script with mode 644. Requiring -x turned that into "db-phase
+  # silently does nothing", which is exactly what it looks like from the outside.
+  if [[ -f "$DB_SCRIPT" && -r "$DB_SCRIPT" ]]; then
     echo "  RUN scripts/build_db.sh"
-    # DB_ROOT and SKIP_COCOPUTS are the two things bootstrap owns about the
-    # database build: --bio-dbs picks the root, --exclude-cocoputs turns off the
-    # codon-usage table. Everything else build_db.sh decides for itself.
-    if [[ -n "$BIO_DBS_DIR" ]]; then export DB_ROOT="$BIO_DBS_DIR"; fi
-    if [[ "$BUILD_COCOPUTS_CUT" -eq 0 ]]; then export SKIP_COCOPUTS=1; fi
-    "$DB_SCRIPT" || record_failure "step 12: scripts/build_db.sh"
+    # Run in a subshell so database-only controls do not leak into later shell
+    # state. build_db.sh is the sole owner of prepared-database downloads.
+    (
+      export DB_ROOT="$BIO_DBS_DIR"
+      # build_db.sh:504 runs "${PYTHON:-python3}" for the CoCoPUTs table. Bare
+      # python3 is a PATH lookup, so without this the table is built by whatever
+      # interpreter happens to be first -- typically /usr/bin/python3, not the
+      # env this bootstrap just validated. PY_BIN is the resolved one.
+      if [[ -n "${PY_BIN:-}" ]]; then export PYTHON="$PY_BIN"; fi
+      if [[ "$DOWNLOAD_UNIREF90" -eq 0 ]]; then export SKIP_UNIREF90=1; fi
+      if [[ "$DOWNLOAD_IDMAPPING" -eq 0 ]]; then export SKIP_IDMAPPING=1; fi
+      if [[ "$BUILD_COCOPUTS_CUT" -eq 0 ]]; then export SKIP_COCOPUTS=1; fi
+      if [[ "$DOWNLOAD_REFSEQ" -eq 0 ]]; then export SKIP_REFSEQ=1; fi
+      if [[ "$DOWNLOAD_MIRNA" -eq 0 ]]; then export SKIP_MIRNA=1; fi
+      if [[ "$DOWNLOAD_AF3RBP" -eq 0 ]]; then export SKIP_AF3RBP=1; fi
+      # Without these two, build_db.sh step 9 has no source for anything and
+      # now refuses instead of leaving an empty AF3/RBP_db behind.
+      if [[ -n "$POSTAR3_TXT_URL" ]]; then export POSTAR3_TXT_URL; fi
+      if [[ -n "$AF3_RBP_MSA_ARCHIVE_URL" ]]; then export AF3_RBP_MSA_ARCHIVE_URL; fi
+      bash "$DB_SCRIPT"
+    ) || record_failure "step 12b: scripts/build_db.sh"
   else
-    echo "  WARN build_db.sh not found/executable at $DB_SCRIPT"
+    # A FAILURE, not a warning. RUN_BUILD_DB is 1 only because the caller either
+    # selected db-phase or ran the full bootstrap, so the databases were asked
+    # for. Reporting WARN here let a db-phase run that did literally nothing end
+    # with "Done. All selected steps succeeded."
+    if [[ -e "$DB_SCRIPT" ]]; then
+      record_failure "step 12b: $DB_SCRIPT exists but is not readable"
+    else
+      record_failure "step 12b: $DB_SCRIPT does not exist (stale or partial checkout?)"
+    fi
   fi
 fi
 

@@ -25,7 +25,7 @@ import json
 import sys
 from pathlib import Path
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple, Set
 import math
 import statistics
 from collections import Counter
@@ -229,6 +229,8 @@ class AF3Parser:
                     res_id = int(record.get('auth_seq_id', record.get('label_seq_id', 0)))
                     res_name = record.get('auth_comp_id', record.get('label_comp_id', 'UNK'))
                     atom_name = record.get('auth_atom_id', record.get('label_atom_id', 'CA'))
+                    if len(atom_name) >= 2 and atom_name[0] in ('"', "'") and atom_name[-1] == atom_name[0]:
+                        atom_name = atom_name[1:-1]
 
                     try:
                         x = float(record.get('Cartn_x', 0))
@@ -414,6 +416,19 @@ class AggregatedBindingAnalysis:
     contact_frequency_protein: Dict[int, float]
 
 
+def ensemble_interface_sites(structures: List[AF3Structure],
+                             aggregation: Optional[AggregatedBindingAnalysis],
+                             ranked: Optional[AF3Structure] = None) -> List:
+    """Use ranked geometry while retaining residues contacting in any sample."""
+    structure = ranked if ranked is not None else (structures[0] if structures else None)
+    if structure is None:
+        return []
+    contact_union = ({'R': set(aggregation.contact_frequency_rna),
+                      'P': set(aggregation.contact_frequency_protein)}
+                     if aggregation is not None else {})
+    return extract_interface_sites(structure, include_res_ids=contact_union)
+
+
 def parse_all_samples(output_dir: str) -> List[AF3Structure]:
     """
     Parse all seed-N_sample-N subdirectories in an AF3 output directory.
@@ -523,14 +538,25 @@ def extract_interface_sites(
     rna_chain: str = "R",
     protein_chain: str = "P",
     contact_threshold: float = 8.0,
-    near_threshold: float = 12.0
+    near_threshold: float = 12.0,
+    include_res_ids: Optional[Dict[str, Set[int]]] = None
 ) -> List[InterfaceSite]:
     """
     Extract per-residue data for residues at or near the interface.
 
     Includes all residues within near_threshold of the other chain.
     Marks is_contact=True for residues within contact_threshold.
+
+    include_res_ids: {chain_id: {res_id, ...}} of residues to emit REGARDLESS of
+        distance in THIS structure. AF3 produces five diffusion samples and the
+        caller aggregates contact frequency across all of them, but geometry has
+        to come from one structure. A residue that contacts in some samples and
+        sits beyond near_threshold in the one chosen would otherwise vanish from
+        sites.tsv while its ensemble frequency had already been computed and
+        carried. Pass the union of ensemble contact residues here to keep them,
+        with this structure's real distance and pLDDT and is_contact=False.
     """
+    forced = include_res_ids or {}
     rna_residues = structure.get_chain(rna_chain)
     prot_residues = structure.get_chain(protein_chain)
     sites = []
@@ -547,7 +573,7 @@ def extract_interface_sites(
                 d = coord.distance_to(pc)
                 if d < min_dist:
                     min_dist = d
-        if min_dist <= near_threshold:
+        if min_dist <= near_threshold or r.res_id in forced.get(rna_chain, ()):
             sites.append(InterfaceSite(
                 chain=rna_chain,
                 res_id=r.res_id,
@@ -569,7 +595,7 @@ def extract_interface_sites(
                 d = coord.distance_to(rc)
                 if d < min_dist:
                     min_dist = d
-        if min_dist <= near_threshold:
+        if min_dist <= near_threshold or p.res_id in forced.get(protein_chain, ()):
             sites.append(InterfaceSite(
                 chain=protein_chain,
                 res_id=p.res_id,

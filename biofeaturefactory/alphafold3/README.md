@@ -9,9 +9,9 @@ For each variant, finds RBPs with POSTAR3/ENCODE eCLIP peaks near the site, runs
 | AlphaFold3 Docker image | Built locally; see setup below |
 | NVIDIA GPU | With CUDA drivers and the [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html) |
 | Docker | Required for local mode |
-| Python >= 3.9 | With `pysam` for tabix queries. Uses `biofeaturefactory/lib/`. |
+| Python >= 3.10 | With `pysam` for tabix queries. Uses `biofeaturefactory/lib/`. |
 | POSTAR3 database | Tabix-indexed BED, passed with `-pd` |
-| RBP sequences or MSAs | `-rs` FASTA, or `-md` A3M directory (preferred) |
+| RBP sequences or MSAs | `-rs` FASTA, `-md` A3M directory, or both |
 
 ### AlphaFold3 setup
 
@@ -19,6 +19,8 @@ Follow the [AF3 installation guide](https://github.com/google-deepmind/alphafold
 through **Obtaining Model Parameters**. Stop before **Obtaining Genetic Databases** -- this pipeline
 does not use AF3's genetic database pipeline; RBP binding sites come from POSTAR3 (`-pd`) and
 protein sequences or MSAs are supplied directly (`-md` / `-rs`).
+When both are supplied, a valid per-RBP MSA is preferred and the FASTA is used
+for RBPs whose MSA is absent or invalid.
 
 ```bash
 cd alphafold3
@@ -75,6 +77,10 @@ In directory mode `-f` is the `variant_mapping` output root and supplies `-mu`, 
 | `-mw, --multi-window` | No | off | Run multiple windows per mutation |
 | `-mwo, --multi-window-offsets` | No | `0.3,0.5,0.7` | Mutation position as a fraction of the window |
 | `-mg, --max-gpus` | No | auto | Max GPUs for parallel AF3 execution |
+| `--af3-batch-size` | No | `16` | Inputs per local AF3 Docker process; `1` restores one process per input |
+| `--no-resume` | No | off | Ignore complete matching local results and rerun them |
+| `--adopt-legacy-results` | No | off | One-time adoption of matching complete outputs created before provenance sidecars |
+| `--jax-cache-dir` | No | `{output}/.cache/af3-jax` | Persistent JAX compilation cache mounted into local AF3 containers |
 | `-vl, --validation-log` | No | -- | Validation log for filtering mutations |
 
 \* One of `-rs` or `-md` is required. Mutations come from `-mu` or `-cm`.
@@ -102,6 +108,8 @@ In directory mode `-f` is the `variant_mapping` output root and supplies `-mu`, 
 | `top_event_class` | gained / lost / strengthened / weakened / none |
 | `top_event_delta_pae` | PAE change for that RBP (angstrom) |
 | `qc_flags` | See below |
+| `protein_msa` | `provided`, `none`, `mixed`, `unknown`, or `not_tested`; describes actual submitted protein MSA content, not alignment quality |
+| `n_rbps_msa_provided`, `n_rbps_msa_free`, `n_rbps_msa_unknown`, `n_rbps_msa_mixed` | Per-RBP MSA provenance counts |
 
 ### `{GENE}.events.tsv`
 
@@ -111,13 +119,16 @@ In directory mode `-f` is the `variant_mapping` output root and supplies `-mu`, 
 | `rbp_name` | RBP gene symbol |
 | `wt_chain_pair_pae_min`, `mut_chain_pair_pae_min` | Minimum inter-chain PAE per allele (angstrom) |
 | `delta_chain_pair_pae_min` | MUT - WT (angstrom) |
-| `wt_interface_contacts`, `mut_interface_contacts` | Cross-chain atom pairs within 8 angstrom |
+| `wt_interface_contacts`, `mut_interface_contacts` | Cross-chain residue pairs within 8 angstrom, using RNA C1' and protein CA representative atoms |
 | `delta_interface_contacts` | MUT - WT |
 | `cls` | gained / lost / strengthened / weakened / unchanged / no_binding / incomplete |
 | `priority` | Ranking score: absolute delta PAE, hyperbolically decayed by distance to the variant |
 | `n_samples_wt`, `n_samples_mut` | AF3 samples parsed per allele (ensemble mode) |
 | `std_pae_wt`, `std_pae_mut` | SD of chain-pair PAE across samples (angstrom) |
-| `n_windows` | Windows used (multi-window mode only) |
+| `n_windows` | Windows requested after deduplication (multi-window mode only) |
+| `n_windows_paired`, `n_windows_used_wt`, `n_windows_used_mut` | Matching successful windows actually used for WT/MUT comparison |
+| `n_windows_success_wt`, `n_windows_success_mut` | Individually successful windows, including unpaired diagnostic results |
+| `qc_flags`, `protein_msa` | Per-event completeness and actual protein MSA provenance |
 
 ### `{GENE}.sites.tsv`
 
@@ -132,6 +143,10 @@ In directory mode `-f` is the `variant_mapping` output root and supplies `-mu`, 
 | `is_contact` | 1 if within 8 angstrom of the other chain |
 | `min_contact_distance` | Nearest atom in the other chain (angstrom) |
 | `contact_frequency` | Fraction of ensemble samples where this residue is a contact (0-1) |
+| `res_id_wt_frame` | WT-window coordinate used for safe WT/MUT joins; empty for inserted bases |
+| `align_status` | `aligned`, `inserted`, `deleted`, or `res_id_outside_window` |
+| `window_idx` | Zero-based window identity; include it with pkey/RBP/chain when joining WT/MUT sites |
+| `window_edit_offset`, `window_wt_length`, `window_mut_length` | Exact window-local edit offset (zero-based) and allele lengths |
 
 ### Sign conventions
 
@@ -163,12 +178,22 @@ pLDDT at or above `min_plddt_interface`.
 
 | Flag | Condition |
 |------|-----------|
-| `PASS` | All RBPs produced complete results |
-| `PARTIAL` | Some RBPs succeeded, some failed |
-| `ALL_FAILED` | Every RBP prediction failed |
+| `PASS` | Every submitted RBP comparison produced both WT and MUT metrics for every requested window |
+| `PARTIAL` | Some results exist, but at least one submitted allele/window lacks a usable metric |
+| `ALL_FAILED` | RBPs were submitted, but no allele produced a parseable metric |
 | `no_rbps_tested` | No RBPs were evaluated |
 | `no_rbps_in_region` | No RBP peaks within the query window |
 | `FAILED:{error}` | An individual RBP prediction raised an exception |
+
+In local mode, RBPs skipped before submission, such as those without an
+available sequence, are reported separately in `n_rbps_skipped` and
+`rbps_skipped`; inspect those columns alongside `qc_flags` when assessing
+coverage.
+
+Local execution and burst ingest return nonzero when any mutation has `PARTIAL`,
+`ALL_FAILED`, or `FAILED:` outcomes. Intentional no-RBP/unsupported-input skips do
+not count as runtime failures. Incomplete event comparisons export blank deltas,
+not apparent zero effects or one-sided measurements presented as differences.
 
 ## Ensemble and multi-window aggregation
 
@@ -183,12 +208,25 @@ near transcript ends), AF3 runs per window with jobs suffixed `_w0`, `_w1`, ...,
 aggregated across windows. Cost is `3 offsets x 2 alleles x N RBPs` AF3 jobs per mutation, so it is
 off by default.
 
+Both drivers compare only matching successful WT/MUT window pairs. Disjoint
+successful window sets yield `incomplete`, never a binding gain/loss. All parsed
+windows retain their own sites rows and contact frequencies; frequencies are not
+averaged across coordinate frames. Sites use ranked-model geometry plus the union
+of contacts across samples, with zero for measured noncontacts and blank only
+when no ensemble frequency is known. Quoted mmCIF names are decoded before the
+C1' lookup. Previously exported tables are not changed by installing these fixes.
+
 ## SLURM execution
 
 `burst.py` is a separate two-phase driver; `alphafold3_pipeline.py` is local/Docker only.
 Submit generates input JSONs, dedupes by `AF3Input.get_hash()`, writes a manifest, renders a SLURM
 array script, and `sbatch`es it, then exits. Ingest walks the cache, computes deltas, and writes the
 per-gene TSVs.
+
+Every submit creates an immutable generation under
+`{output}/.burst/submissions/{timestamp}-{uuid}/` containing its own inputs,
+manifest, script, and default logs. A later submit cannot rewrite files read by
+an already queued array.
 
 ```bash
 python -m biofeaturefactory.alphafold3.burst submit \
@@ -212,8 +250,45 @@ broken artifacts and never ingested results.
 
 ## Caching
 
-WT predictions are cached by `{gene}-{rbp}` hash and reused across that gene's mutations. RBP
-sequences are loaded once at startup. Cache location: `{output}/cache/`.
+Local mode resumes a job only when its saved input JSON exactly matches the requested input and its
+AF3 result directory contains the matching, nonempty top-ranked model, confidences, and summary
+files. A result-specific provenance sidecar also binds the output to the exact input, model-weight
+digests, and Docker image ID. Existing results under `{output}/af3_runs/` therefore survive
+interruption and are reused by the same command. Partial, input-mismatched, or provenance-mismatched
+outputs are preserved with a `.stale-*` suffix instead of being deleted. Use `--no-resume` to force
+a rerun.
+
+Outputs made by the older local runner have no provenance sidecar. After verifying they were made
+with the same model weights and Docker image, pass `--adopt-legacy-results` on the first resumed run;
+the runner writes sidecars as it adopts them. Later resumes do not need the flag. Without explicit
+adoption, the runner stops before modifying a complete legacy result.
+
+Pending local inputs are sent to AF3's native `--input_dir` mode in bounded groups, so one Docker
+process loads the model once and folds up to `--af3-batch-size` inputs. Completed children are
+published independently; if AF3 aborts partway through a group, only missing children are retried.
+Batch logs are written under `{output}/.af3_local/logs/`, and JAX compilation artifacts default to
+`{output}/.cache/af3-jax/`.
+
+The SLURM burst driver has a separate content-addressed cache under
+`{output}/.cache/af3/`. Its SHA-256 key is computed from a canonical,
+versioned serialization of every prediction-affecting JSON field, including
+RNA/protein sequences, chain identifiers, and protein MSA; the display name is
+excluded. Older 12-character cache keys are intentionally not reused.
+
+Burst workers accept a cache entry only when the exact result directory holds
+the nonempty top-ranked model, confidences, and summary files and both JSON
+files parse. Each worker stages output in the stable sibling
+`{output}/.cache/.af3-coordination/` and publishes it with a locked atomic rename
+after validation. The same external lock serializes staging, publication, and
+`--clear-cache`. Clearing invalidates the cache generation and deletes only
+completed AF3 cache entries, preserving active staging and JAX data. Workers from
+a cleared submission cannot publish into the new generation; resubmit them.
+Regenerate SLURM scripts when upgrading to this protocol, and finish or stop
+workers using older scripts before clearing their legacy staging trees.
+On a handled worker failure, incomplete
+Docker output is preserved under an `.incomplete-*` name and is never treated
+as a cache hit. RBP sequences and MSA indexes are loaded once at pipeline
+startup.
 
 ## Module reference
 

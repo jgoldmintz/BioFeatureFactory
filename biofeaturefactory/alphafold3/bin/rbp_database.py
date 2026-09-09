@@ -21,12 +21,47 @@ Queries tabix-indexed POSTAR3 BED file to find RBP binding sites
 overlapping with mutation positions.
 """
 
+import re
 import gzip
 from pathlib import Path
 from dataclasses import dataclass
 from typing import List, Optional, Dict, Set
 import subprocess
 import sys
+
+
+def _canonical_postar_chrom(chrom: str) -> str:
+    """Return a chromosome token compatible with chr-prefixed POSTAR data."""
+    token = chrom.strip()
+    if not token:
+        return token
+
+    core = token[3:] if token.lower().startswith('chr') else token
+    refseq_match = re.fullmatch(
+        r'NC_0*(\d+)(?:\.\d+)?', core, flags=re.IGNORECASE
+    )
+    number = None
+    if refseq_match:
+        number = int(refseq_match.group(1))
+    elif core.isdigit():
+        number = int(core)
+
+    if number is not None:
+        if 1 <= number <= 22:
+            return str(number)
+        if number == 23:
+            return 'X'
+        if number == 24:
+            return 'Y'
+        if number == 12920:
+            return 'M'
+
+    upper = core.upper()
+    if upper in {'X', 'Y'}:
+        return upper
+    if upper in {'M', 'MT'}:
+        return 'M'
+    return core
 
 
 @dataclass
@@ -184,10 +219,19 @@ class POSTAR3Database:
             List of overlapping RBP binding sites
         """
         # Normalize chromosome name
-        chrom_variants = [chrom, f"chr{chrom}", chrom.replace('chr', '')]
+        canonical_chrom = _canonical_postar_chrom(chrom)
+        chrom_variants = list(dict.fromkeys([
+            chrom,
+            canonical_chrom,
+            f"chr{canonical_chrom}",
+        ]))
 
         if self._tabix_available:
-            return self._query_tabix(chrom, start, end)
+            for chrom_candidate in dict.fromkeys((chrom, canonical_chrom)):
+                results = self._query_tabix(chrom_candidate, start, end)
+                if results:
+                    return results
+            return []
         else:
             return self._query_memory(chrom_variants, start, end)
 

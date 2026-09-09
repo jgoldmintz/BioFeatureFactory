@@ -2,8 +2,8 @@
 
 Scores variants as the change in a Potts model Hamiltonian fitted to a multiple sequence alignment. Two backends and two levels:
 
-- **Protein level** -- amino acid MSA. Missense and stop variants.
-- **Codon level** -- codon-aware MSA. Synonymous variants, which have no protein-level score.
+- **Protein level** -- amino acid MSA. Primary route for missense and other protein-altering variants.
+- **Codon level** -- codon-aware MSA. Synonymous variants and stop annotations; explicit codon-only mode also scores missense variants.
 - **EVmutation backend** -- model fitted by `plmc`.
 - **adabmDCA backend** -- model fitted by `adabmDCA train`.
 
@@ -26,8 +26,43 @@ Sign convention for every score: positive = tolerated/favoured, negative = delet
 ## Controller (multi-gene, Nextflow)
 
 `mutEffects_controller.py` validates dependencies, then orchestrates MSA generation and both
-scoring backends with per-gene parallelism. Protein MSA (jackhmmer) and codon MSA (mmseqs2 + MAFFT)
-run in parallel per gene; scoring waits for both.
+scoring backends with per-gene parallelism. Ready alignments start scoring without
+waiting for missing alignments on the other side. Nextflow generates missing
+protein MSAs with the core MSA pipeline and missing codon MSAs with the core codon
+MSA pipeline when the shared CPU/RAM budget permits.
+
+With neither `--msa` nor `-cm`, both paths are available and selection is per gene:
+
+| Mutation classes | Selected paths |
+|------------------|----------------|
+| Missense plus synonymous/stop-codon variants | Protein and codon |
+| Synonymous and/or stop-codon variants only | Codon only |
+| Missense only | Protein only |
+
+The controller first searches for existing `MSA/` and `CodonMSA/` alignments under
+the output and input roots. Only selected, missing alignments need databases.
+Other protein-altering variants retain the protein path; unclassifiable variants
+conservatively retain both paths and their QC handling. Genes without remaining
+mutations after validation filtering do not launch model or alignment work.
+
+When protein MSA generation is required, `--db-root` must contain a nonempty
+`uniref90.fasta`. Jackhmmer needs a rewindable, uncompressed database; gzip-only
+input is rejected before Nextflow starts, with a `gzip -dk` preparation command.
+Allow space for the expanded database and move aside an existing empty destination
+first. The controller does not silently unpack or overwrite database files.
+Pre-built protein MSAs do not require this database.
+
+Explicit `--msa` without `-cm` selects protein-only mode, with a warning for
+synonymous/stop variants that this will not produce biologically accurate results
+for their codon-level effects. Explicit `-cm` without `--msa` selects codon-only
+mode, including codon-level missense scores; a warning notes the substantially
+higher computation cost relative to amino-acid scoring. These scores need not be
+numerically identical. Both flags explicitly enable both paths. `--skip-codon`
+remains a per-backend override to protein processing, with a warning when it
+overrides a selected codon path. Backend selection itself is unchanged.
+
+Stop-gain/loss rows retain the existing annotation-only scoring behavior; selecting
+the codon path does not add numerical stop-effect predictions.
 
 ```bash
 # Full run, both backends, generating MSAs
@@ -59,8 +94,8 @@ python mutEffects_controller.py \
 | `-o, --output` | -- | Output base directory |
 | `-pb, --plmc-binary` | -- | Path to `plmc`. Required whenever the EVmutation backend runs |
 | `-dr, --db-root` | -- | Bio_DBs root (`uniref90.fasta`, `refseq_assemblies/`, ...). Required only when a gene needs MSA generation |
-| `-ms, --msa` | -- | Protein MSA file or directory |
-| `-cm, --codon-msa` | -- | Codon MSA file or directory |
+| `-ms, --msa` | -- | Protein MSA source; used alone explicitly selects protein-only processing |
+| `-cm, --codon-msa` | -- | Codon MSA source; used alone explicitly selects codon-only processing |
 | `-mp, --model-params` | -- | Pre-built protein plmc params file or directory |
 | `-cmp, --codon-model-params` | -- | Pre-built codon plmc params file or directory |
 | `-app, --adabmdca-protein-params` | `<output>/adabmdca_protein_params/` | Pre-built adabmDCA protein params |
@@ -72,23 +107,141 @@ python mutEffects_controller.py \
 | `-ji, --jackhmmer-iterations` | `5` | jackhmmer iterations |
 | `-mb, --mmseqs-binary` | `mmseqs` | mmseqs2 path |
 | `-a, --aligner` | `mafft` | Protein aligner |
-| `-am, --adabmdca-model` | `bmDCA` | `bmDCA`/`eaDCA`/`edDCA` are Boltzmann-learning (high memory); `pseudoDCA` is pseudolikelihood (~2x less peak GPU memory, no MCMC) |
-| `-an, --adabmdca-nepochs` | 500 (pseudoDCA) / 50000 | Max epochs |
+| `-am, --adabmdca-model` | `pseudoDCA` | Pseudolikelihood without MCMC; explicitly select `bmDCA`/`eaDCA`/`edDCA` for Boltzmann learning |
+| `-an, --adabmdca-nepochs` | `500` | Maximum pseudoDCA epochs; an explicitly selected Boltzmann model defaults to 50000; explicit epoch counts override either default |
 | `-at, --adabmdca-tol` | `0.001` | pseudoDCA convergence threshold on `\|\|grad\|\|/\|\|grad\|\|_0`; 0 disables |
 | `-ap, --adabmdca-patience` | `3` | Consecutive passing checks required to stop |
 | `-ace, --adabmdca-check-every` | `10` | Epochs between convergence checks |
 | `-ata, --adabmdca-target` | `0.95` | Pearson Cij target |
 | `-al, --adabmdca-lr` | `0.01` | Learning rate |
-| `-anc, --adabmdca-nchains` | `10000` | PCD chain count |
-| `-ans, --adabmdca-nsweeps` | `10` | Sweeps per step |
-| `-ad, --adabmdca-device` | `cuda` | Device |
+| `-anc, --adabmdca-nchains` | `10000` | Boltzmann-only PCD chain count; unused by pseudoDCA |
+| `-ans, --adabmdca-nsweeps` | `10` | Boltzmann-only sweeps per step; unused by pseudoDCA |
+| `-ad, --adabmdca-device` | `auto` | Eligible GPU, otherwise CPU; `cpu`, `cuda`, or `cuda:N` forces placement |
 | `-adt, --adabmdca-dtype` | `float32` | Dtype |
 | `-as, --adabmdca-seed` | `0` | Seed |
-| `-t, --threads` | `4` | Threads |
+| `-t, --threads` | automatic | Share usable CPUs across estimated concurrent jobs; an explicit value sets the per-task default |
 | `-vl, --validation-log` | -- | Validation log for mutation filtering |
 | `-r, --resume` | off | Resume a previous Nextflow run |
 
-The Boltzmann path emits an OOM hint suggesting `pseudoDCA` when memory becomes the bottleneck.
+### Resource-aware local execution
+
+The controller uses Nextflow's existing local executor. No additional scheduler,
+GPU instance, or scheduler service is required. Both protein and codon tasks use
+one GPU process queue, with its concurrency bounded by the number of allocated
+GPUs. CPU tasks run in a separate queue. Nextflow admits both queues against a
+shared host RAM and CPU budget, including declared MSA and EVmutation requests.
+
+Without `--threads`, the controller estimates concurrency from pending work,
+host RAM requests and distinct eligible GPUs, then divides the usable CPU budget
+across those jobs. A machine exposing 21 CPUs has a default budget of 20; two
+fitting concurrent tasks receive 10 threads each. Five fitting tasks receive four
+each. Verified completed tasks are excluded; missing alignments count as generation
+tasks, not simultaneously runnable downstream scoring. Explicit per-task thread
+overrides take precedence and consume part of the shared budget.
+This is a deterministic startup estimate, not optimal packing or live resizing:
+threads do not increase as tasks finish, and newly generated alignments are planned
+with the same default share. Nextflow still enforces CPU/RAM admission at runtime.
+
+The default `pseudoDCA` model uses a 500-epoch cap and can stop earlier through its
+convergence checks. Reaching the cap does not prove convergence. Its epoch count
+is not interchangeable with Boltzmann-learning epochs or plmc optimizer iterations.
+
+Each GPU task locks one eligible physical GPU UUID, sets `CUDA_VISIBLE_DEVICES`,
+and holds the lock until its backend exits. Tasks select a free eligible card,
+not a round-robin index. Eligibility uses total VRAM with headroom; a temporarily
+busy card remains eligible, and free VRAM is checked under its lock before launch.
+Locks coordinate BFF runs using the same lease directory;
+they do not reserve cloud instances or prevent unrelated programs from using CUDA.
+Mixed-capacity cards are checked individually. Tasks waiting for a particular
+large card can occupy a GPU-process slot; this is not an optimal backfilling scheduler.
+
+```bash
+python biofeaturefactory/mutation_effects/mutEffects_controller.py \
+    --fasta ~/out --adabmdca-only --output ~/results \
+    --adabmdca-nepochs 1 --adabmdca-nchains 64 --resource-plan-only
+```
+
+Remove `--resource-plan-only` to execute. Planning-only prints hardware and task
+estimates without writing outputs or launching inference. Missing alignments must
+be generated before their resource requirements can be estimated; those tasks are
+planned inside Nextflow after MSA generation. This is a one-epoch smoke test, not
+a recommendation for obtaining converged models.
+
+| Resource flag | Default | Purpose |
+|---------------|---------|---------|
+| `--resource-cpus` | detected minus one | Shared CPU ceiling; task libraries receive matching thread limits |
+| `--resource-memory-gib` | detected available RAM × headroom | Shared host RAM ceiling, not a per-task allowance |
+| `--resource-headroom` | `0.9` | Fraction of available host RAM and total GPU VRAM usable for planning |
+| `--resource-memory-margin` | `1.15` | Multiplier on estimated peak memory |
+| `--resource-overrides` | none | JSON keyed by `GENE.protein` / `GENE.codon` containing measured memory requests |
+| `--resource-hardware` | detected | Explicit allocation JSON: `cpus`, `memory_gib`, `gpus` (each has `uuid` and `memory_gib`) |
+| `--gpu-lease-dir` | `~/.cache/biofeaturefactory/gpu-leases` | Use the same directory for local BFF runs sharing GPUs |
+| `--gpu-wait-timeout` | `600` seconds | Bounded wait for an eligible GPU |
+| `--msa-memory-gib` | `8` | Per-MSA-generation host memory request; adjust to database/workload size |
+| `--evmutation-memory-gib` | automatic | Optional minimum per-EVmutation RAM request; cannot lower the model estimate |
+
+adabmDCA estimates use alignment width, alphabet, dtype, model, chain count and
+sequence count; they include GPU tasks' host-memory requirements for loading and scoring.
+The defaults are **uncalibrated conservative envelopes**, not measured guarantees.
+Per-task overrides accept `gpu_memory_gib`, `gpu_host_memory_gib`,
+`cpu_memory_gib`, and `threads`. Obtain overrides from completed isolated runs,
+not from memory observed before an OOM. Nextflow requests are admission accounting,
+not OS-enforced memory limits; unrelated processes and underestimated requests can
+still exhaust the host. Independent Nextflow runs do not share a host-RAM ledger.
+
+EVmutation requests are calculated separately for each gene's protein or codon
+model, not from its mutation count. The plmc estimate follows its gap-reduced
+alphabet (`q=20` protein, `q=64` codon) and focus-selected length:
+`P = L*q + L*(L-1)*q*q/2`. It reserves nineteen
+parameter-sized arrays for the default L-BFGS optimizer and persistent marginals,
+assuming double-precision native arithmetic, plus thread-local workspace, alignment
+storage and runtime allowances. Thread-local workspace is conservatively reserved
+against the usable CPU ceiling, so automatic thread sharing cannot invalidate the
+RAM estimate. Admission uses the larger of training memory and dense EVmutation
+scoring memory, including the independent-model copy. Supplied native plmc v2
+parameters use their header dimensions and require only the scoring estimate.
+
+Prebuilt alignments are planned before launching Nextflow. Missing alignments are
+planned immediately after generation, without holding up other ready models.
+Nextflow can overlap models only while their combined RAM and CPU requests fit;
+splitting a mutation list does not reduce the memory needed to train its model.
+A request exceeding the entire RAM budget, or dimensions overflowing plmc's native
+integer indexing, is skipped before training instead of starting an unsafe job. These
+estimates do not change plmc precision, optimizer settings or scoring results.
+
+Per-gene resource-planning errors skip only the affected backend and side; other
+schedulable jobs continue. This also applies to planning after MSA generation.
+The controller collects these errors and routing warnings in a final summary,
+then exits nonzero if any requested task was blocked. Skipped tasks are not marked
+complete, so a later run can retry them with suitable resources while reusing
+verified successful results. `--resource-plan-only` includes `resource_errors` and
+`warnings` in its JSON report without writing files or launching jobs. Invalid
+global configuration, missing required tools/databases, and execution failures
+retain their existing fatal behavior; collected diagnostics are still summarized
+when the controller can finish normally. Direct Nextflow invocation retains
+fail-fast resource planning.
+
+In `auto` mode, tasks too large for any eligible GPU are routed to CPU with the
+same adabmDCA model, dtype and training settings. A recognized CUDA OOM can produce
+one fresh CPU task with its own RAM request, if that request fits. Explicit CUDA
+placement does not silently fall back. Tasks exceeding the entire usable host
+budget are skipped and reported rather than waiting indefinitely. CPU execution can be much
+slower and is not guaranteed to produce bit-identical floating-point results.
+
+Plans are published in `resource_plans/`. Successful task artifacts have a
+`GENE.side.complete.json` manifest with input/model fingerprints, output hashes,
+device and observed resource telemetry. Attempts use isolated directories so an
+OOM checkpoint cannot be mistaken for a complete model. Existing TSVs without a
+matching completion manifest are recomputed; explicitly supplied prebuilt model
+parameters remain supported. Nextflow's `--resume` additionally reuses valid work
+directories. Resource configurations and input manifests passed to Nextflow are
+immutable snapshots under `.bff-resources/`.
+
+EVmutation scores use `GENE.side.routing.json` records to check their inputs,
+effective scoring mode, and TSV/model/MSA hashes before reuse. Older EVmutation
+tables without these records are rescored using existing parameters when present;
+switching between protein-only, codon-only and automatic routing cannot reuse a
+table with the wrong mutation distribution.
 
 ## Single backend, no Nextflow
 
@@ -136,6 +289,12 @@ Same input contract; `-pp/--protein-params` and `-cp/--codon-params` replace the
 `-st/--skip-train` replaces `-sp/--skip-plmc`, `-pa/--protein-alphabet` replaces `-a/--alphabet`,
 and the `-am`/`-an`/`-at`/`-ap`/`-ace`/`-ata`/`-al`/`-anc`/`-ans`/`-ad`/`-adt`/`-as` training
 options are as listed in the controller table.
+
+Both standalone backends accept `--score-missense-codon` for exclusive codon-level
+scoring, including missense variants. The controller forwards this for forced
+codon-only processing when protein-altering or unclassified variants are present.
+It cannot be combined with `--skip-codon`. Existing default standalone routing is
+unchanged. Codon-mode missense rows carry `MISSENSE_CODON_LEVEL` in `qc_flags`.
 
 ### Parameter resolution
 

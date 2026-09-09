@@ -56,6 +56,14 @@ are also accepted positionally.
 
 ## Output
 
+SignalP execution failures, timeouts, missing rows and malformed predictions are
+failures, not negative signal-peptide calls. A valid `OTHER` prediction remains a
+measured negative. Explicit `--signalp6-bin` paths are forwarded through all
+workers. Successful sequences in a partial run are retained; failed batches or
+workers contribute to the final nonzero exit status and unscored-allele QC.
+Cached NetNGlyc results lacking SignalP summaries are not reused when SignalP is
+enabled; legacy exports need regeneration to reflect these checks.
+
 ```
 {output}/{GENE}/NetNglyc/
     {GENE}.tsv          -- per-mutation summary

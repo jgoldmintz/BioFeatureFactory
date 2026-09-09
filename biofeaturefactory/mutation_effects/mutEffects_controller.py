@@ -23,11 +23,11 @@ Drives two parallel DCA backends over each gene:
   adabmDCA         -- Boltzmann / pseudolikelihood Potts inference, run in-process
                      via the adabmDCApy Python API (GPU); see adabmdca_pipeline.py
 
-Each backend scores a protein side (missense/stop) and a codon side
-(synonymous). The full chain per gene:
+Each backend has a protein side and a codon side. Without explicit MSA flags,
+mutation classes select the required sides per gene. The full chain per gene:
   1. Protein MSA (jackhmmer -> UniRef90)  -- skipped if pre-built
   2. Codon MSA (mmseqs2 -> MAFFT)         -- skipped if pre-built
-  3. Scoring: EVmutation (plmc) and/or adabmDCA, each protein + codon
+  3. Scoring: EVmutation (plmc) and/or adabmDCA on selected sides as they become ready
 
 Before launching Nextflow, inventories existing artifacts per gene
 (MSAs, plmc + adabmDCA params, prior TSVs) and writes a manifest so
@@ -40,19 +40,27 @@ Use --resume to continue from a previous Nextflow run.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import importlib.util
 import json
+import os
+import shlex
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
 
 from biofeaturefactory.lib.utility import (
     derive_mutations_root,
     discover_fasta_files,
+    discover_mutation_files,
     extract_gene_from_filename,
+    find_gene_file,
 )
-from biofeaturefactory.mutation_effects.evmutation_pipeline import _find_file_for_gene
+from biofeaturefactory.mutation_effects.bin import evmutation_cache, plmc_resources, resource_planner
+from biofeaturefactory.mutation_effects.bin.adabmdca_task import verify_completion
+from biofeaturefactory.mutation_effects.bin.mutation_routing import classify_gene, choose_route
 
 HERE = Path(__file__).resolve().parent
 NEXTFLOW_SCRIPT = HERE / "bin" / "main.nf"
@@ -73,11 +81,11 @@ def _resolve_genes(fasta_path: Path) -> List[str]:
     return []
 
 
-def build_manifest(genes: List[str], args: argparse.Namespace) -> Dict[str, List[str]]:
+def build_manifest(genes: List[str], args: argparse.Namespace) -> Dict[str, Any]:
     """
     Inventory existing artifacts per gene.
 
-    Returns dict mapping artifact type to list of genes that have it.
+    Returns artifact gene lists and resolved per-gene input_files for Nextflow.
     """
     out_dir = args.output
 
@@ -120,17 +128,102 @@ def build_manifest(genes: List[str], args: argparse.Namespace) -> Dict[str, List
     }
 
     manifest = {key: [] for key in list(artifact_checks) + list(tsv_checks)}
+    fasta_files = (
+        discover_fasta_files(str(args.fasta)) if args.fasta.is_dir()
+        else {gene: str(args.fasta) for gene in genes}
+    )
+    mutation_files = discover_mutation_files(args.mutations)
+    input_files = {}
+    param_files = {}
 
     for gene in genes:
+        param_files[gene] = {}
+        mutation_file = (
+            args.mutations if args.mutations.is_file()
+            else mutation_files.get(gene)
+        )
+        input_files[gene] = {
+            "fasta": normalize(Path(fasta_files[gene])),
+            "mutations": normalize(Path(mutation_file)) if mutation_file else None,
+        }
         for artifact, (path, patterns) in artifact_checks.items():
-            if Path(str(path)).exists() and _find_file_for_gene(gene, str(path), patterns):
+            candidates = [path]
+            if artifact in ("msa", "codon_msa") and not getattr(args, artifact):
+                candidates.append(out_dir)
+                if args.fasta.is_dir():
+                    candidates.extend([args.fasta, args.fasta / path.name])
+            resolved = next((
+                match for candidate in candidates
+                if (match := find_gene_file(str(candidate), gene, patterns))
+            ), None)
+            if resolved:
                 manifest[artifact].append(gene)
+                if artifact in ("msa", "codon_msa"):
+                    input_files[gene][artifact] = normalize(Path(resolved))
+                else:
+                    param_files[gene][artifact] = normalize(Path(resolved))
 
         for tsv_key, (subdir, suffix) in tsv_checks.items():
             if (out_dir / gene / subdir / f"{gene}.{suffix}").exists():
                 manifest[tsv_key].append(gene)
 
+    manifest["input_files"] = input_files
+    manifest["param_files"] = param_files
+    manifest["routing"] = {}
+    manifest["ev_fingerprints"] = {}
+    for gene, inputs in input_files.items():
+        classes = classify_gene(inputs["fasta"], inputs["mutations"], gene,
+                                getattr(args, "validation_log", None)) if inputs["mutations"] else []
+        route = choose_route(classes, protein_explicit=bool(args.msa),
+                             codon_explicit=bool(args.codon_msa))
+        if route["codon"]:
+            for backend in ("evmutation", "adabmdca"):
+                if getattr(args, f"run_{backend}") and getattr(args, f"skip_codon_{backend}"):
+                    route["warnings"].append(
+                        f"--skip-codon overrides codon processing for {backend}; "
+                        "this will not produce biologically accurate results for synonymous/stop-codon effects."
+                    )
+        manifest["routing"][gene] = route
+        manifest["ev_fingerprints"][gene] = {}
+        for side in ("protein", "codon"):
+            if not side_enabled(args, manifest, gene, "evmutation", side):
+                continue
+            fingerprint = evmutation_cache.routing_fingerprint(
+                gene, side, inputs["fasta"], inputs["mutations"],
+                validation_log=getattr(args, "validation_log", None),
+                skip_codon=side == "protein" and not side_enabled(args, manifest, gene, "evmutation", "codon"),
+                score_missense_codon=side == "codon" and route["score_missense_codon"],
+            )
+            manifest["ev_fingerprints"][gene][side] = fingerprint
+            artifact = "EVmutation" if side == "protein" else "codon_EVmutation"
+            params_artifact = "model_params" if side == "protein" else "codon_model_params"
+            model_params = param_files[gene].get(params_artifact)
+            alignment = inputs.get("msa" if side == "protein" else "codon_msa")
+            folder = out_dir / gene / "EVmutation"
+            if gene in manifest[artifact] and not (model_params and alignment and evmutation_cache.verify_completion(
+                folder / f"{gene}.{side}.routing.json", fingerprint,
+                folder / f"{gene}.{side}.tsv", model_params, msa=alignment,
+            )):
+                manifest[artifact].remove(gene)
     return manifest
+
+
+def side_enabled(args, manifest, gene, backend, side):
+    if not getattr(args, f"run_{backend}"):
+        return False
+    route = manifest.get("routing", {}).get(gene, {"protein": True, "codon": True})
+    if getattr(args, f"skip_codon_{backend}"):
+        return side == "protein" and (route["protein"] or route["codon"])
+    return route[side]
+
+
+def side_pending(args, manifest, gene, backend, side):
+    artifact = ("EVmutation" if side == "protein" else "codon_EVmutation") if backend == "evmutation" else f"adabmdca_{side}"
+    blocked = any(
+        error["gene"] == gene and error["backend"] == backend and error["side"] == side
+        for error in manifest.get("resource_errors", [])
+    )
+    return not blocked and side_enabled(args, manifest, gene, backend, side) and gene not in manifest.get(artifact, [])
 
 
 def parse_args() -> argparse.Namespace:
@@ -149,15 +242,17 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("-dr", "--db-root", type=Path,
                         help="Bio_DBs root directory (contains uniref90.fasta, refseq_assemblies/, etc.). "
                              "Required only when at least one gene needs MSA generation; omit when "
-                             "--msa and --codon-msa cover every gene in --fasta.")
+                             "pre-built MSAs cover every gene in --fasta.")
     parser.add_argument("--output", "-o", type=Path, default=Path("."),
                         help="Output base directory")
 
     # Pre-built MSA sources (optional, skips generation for genes that have them)
     parser.add_argument("-ms", "--msa", type=Path,
-                        help="Protein MSA file or directory")
+                        help="Protein MSA source; without -cm explicitly selects protein-only mode. "
+                             "Without either flag, select per gene and discover MSAs under --output/--fasta.")
     parser.add_argument("-cm", "--codon-msa", type=Path,
-                        help="Codon MSA file or directory")
+                        help="Codon MSA source; without --msa explicitly selects codon-only mode, "
+                             "including codon-level missense scoring. Both flags enable both sides.")
 
     # Tool binaries
     parser.add_argument("-jb", "--jackhmmer-binary", type=str, default="jackhmmer",
@@ -206,13 +301,12 @@ def parse_args() -> argparse.Namespace:
     # NOTE: there is no --adabmdca-binary flag -- the `adabmDCA` console script
     # is installed by `pip install adabmDCA` (the Python/torch implementation,
     # not a compiled binary) and is expected on PATH.
-    parser.add_argument("-am", "--adabmdca-model", default="bmDCA",
+    parser.add_argument("-am", "--adabmdca-model", default="pseudoDCA",
                         choices=["bmDCA", "eaDCA", "edDCA", "pseudoDCA"],
-                        help="Training routine (default: bmDCA). bmDCA/eaDCA/edDCA are "
+                        help="Training routine (default: pseudoDCA). bmDCA/eaDCA/edDCA are "
                              "Boltzmann-learning variants (high memory); pseudoDCA is "
-                             "pseudolikelihood (~2x less peak GPU memory, no MCMC). The "
-                             "Boltzmann path emits an OOM-triggered hint suggesting "
-                             "pseudoDCA when memory becomes the bottleneck.")
+                             "pseudolikelihood (no MCMC). Automatic device fallback "
+                             "preserves the selected model.")
     # None => adabmdca_pipeline.py picks per backend (500 pseudoDCA / 50000 Boltzmann).
     # A single 50000 default silently multiplied the pseudoDCA path by 100x.
     parser.add_argument("-an", "--adabmdca-nepochs", type=int, default=None,
@@ -225,21 +319,62 @@ def parse_args() -> argparse.Namespace:
                         help="Pearson Cij target (default: 0.95)")
     parser.add_argument("-al", "--adabmdca-lr", type=float, default=0.01)
     parser.add_argument("-anc", "--adabmdca-nchains", type=int, default=10000,
-                        help="PCD chain count (default: 10000)")
-    parser.add_argument("-ans", "--adabmdca-nsweeps", type=int, default=10)
-    parser.add_argument("-ad", "--adabmdca-device", default="cuda",
-                        help="adabmDCA device (default: cuda)")
+                        help="Boltzmann-only PCD chain count (default: 10000; unused by pseudoDCA)")
+    parser.add_argument("-ans", "--adabmdca-nsweeps", type=int, default=10,
+                        help="Boltzmann-only sweeps per step (default: 10; unused by pseudoDCA)")
+    parser.add_argument("-ad", "--adabmdca-device", default="auto",
+                        help="auto routes to eligible GPUs or CPU; cpu/cuda/cuda:N force placement")
     parser.add_argument("-adt", "--adabmdca-dtype", default="float32",
                         choices=["float32", "float64"])
     parser.add_argument("-as", "--adabmdca-seed", type=int, default=0)
 
     # Options
-    parser.add_argument("-t", "--threads", type=int, default=4)
+    parser.add_argument("-t", "--threads", type=int,
+                        help="Threads per task (default: share usable CPUs across estimated concurrent jobs)")
     parser.add_argument("-vl", "--validation-log", type=Path)
     parser.add_argument("-r", "--resume", action="store_true",
                         help="Resume previous Nextflow run")
+    parser.add_argument("--resource-cpus", type=int,
+                        help="Maximum CPUs shared by all Nextflow tasks")
+    parser.add_argument("--resource-memory-gib", type=float,
+                        help="Maximum shared host RAM budget in GiB")
+    parser.add_argument("--resource-headroom", type=float, default=0.9,
+                        help="Usable fraction of available RAM and total GPU VRAM (default: 0.9)")
+    parser.add_argument("--resource-memory-margin", type=float, default=1.15,
+                        help="Safety multiplier for uncalibrated memory estimates (default: 1.15)")
+    parser.add_argument("--resource-overrides", type=Path,
+                        help="JSON per gene.side with measured gpu_memory_gib/cpu_memory_gib/gpu_host_memory_gib/threads")
+    parser.add_argument("--resource-hardware", type=Path,
+                        help="Explicit allocated hardware JSON instead of local autodetection")
+    parser.add_argument("--resource-plan-only", action="store_true",
+                        help="Print placement estimates without launching tasks or writing outputs")
+    parser.add_argument("--gpu-lease-dir", type=Path,
+                        default=Path.home() / ".cache" / "biofeaturefactory" / "gpu-leases",
+                        help="Shared GPU coordination directory; use the same directory across local runs")
+    parser.add_argument("--gpu-wait-timeout", type=float, default=600,
+                        help="Maximum seconds waiting for an eligible GPU held by another task")
+    parser.add_argument("--msa-memory-gib", type=float, default=8,
+                        help="Host RAM request per MSA generation task; tune for the databases used")
+    parser.add_argument("--evmutation-memory-gib", type=float,
+                        help="Minimum host RAM request per EVmutation task in GiB; default: automatic model/workspace estimate")
 
     args = parser.parse_args()
+    if args.adabmdca_device not in {"auto", "cpu", "cuda"}:
+        if not args.adabmdca_device.startswith("cuda:") or not args.adabmdca_device[5:].isdigit():
+            parser.error("--adabmdca-device must be auto, cpu, cuda or cuda:N")
+    if args.threads is not None and args.threads < 1:
+        parser.error("--threads must be positive")
+    if not 0 < args.resource_headroom < 1:
+        parser.error("--resource-headroom must be between zero and one")
+    for name in ("resource_memory_margin", "gpu_wait_timeout", "msa_memory_gib", "evmutation_memory_gib"):
+        if getattr(args, name) is None:
+            continue
+        try:
+            resource_planner.positive(getattr(args, name), name)
+        except ValueError as error:
+            parser.error(str(error))
+    if args.resource_memory_margin < 1:
+        parser.error("--resource-memory-margin cannot be less than one")
 
     # One root supplies both; see lib/utility.derive_mutations_root.
 
@@ -268,20 +403,11 @@ def validate_args(args: argparse.Namespace) -> None:
     if not genes:
         raise SystemExit(f"ERROR: No FASTA files found in {args.fasta}")
 
-    # plmc is only needed to BUILD params. Providing --model-params (protein) /
-    # --codon-model-params (codon) lets evmutation_pipeline.py skip plmc and score
-    # directly, so the binary is required only when a side still builds params.
-    need_protein_plmc = args.run_evmutation and not args.model_params
-    need_codon_plmc = args.run_evmutation and not args.skip_codon_evmutation and not args.codon_model_params
-    if (need_protein_plmc or need_codon_plmc) and not args.plmc_binary:
-        raise SystemExit("ERROR: --plmc-binary is required when the EVmutation backend builds params "
-                         "(provide --model-params / --codon-model-params to skip plmc, or --adabmdca-only)")
-
     # --db-root is validated at runtime in validate_db_coverage(), once the
     # manifest has been built and we know which genes still need MSA generation.
 
 
-def validate_db_coverage(genes: List[str], manifest: Dict[str, List[str]],
+def validate_db_coverage(genes: List[str], manifest: Dict[str, Any],
                          args: argparse.Namespace) -> None:
     """
     Decide whether --db-root is needed based on MSA coverage from the manifest.
@@ -292,8 +418,12 @@ def validate_db_coverage(genes: List[str], manifest: Dict[str, List[str]],
     """
     have_protein = set(manifest.get("msa", []))
     have_codon   = set(manifest.get("codon_msa", []))
-    need_protein_gen = [g for g in genes if g not in have_protein]
-    need_codon_gen   = [g for g in genes if g not in have_codon]
+    need_protein_gen = [gene for gene in genes if gene not in have_protein and any(
+        side_pending(args, manifest, gene, backend, "protein") for backend in ("evmutation", "adabmdca")
+    )]
+    need_codon_gen = [gene for gene in genes if gene not in have_codon and any(
+        side_pending(args, manifest, gene, backend, "codon") for backend in ("evmutation", "adabmdca")
+    )]
 
     if not need_protein_gen and not need_codon_gen:
         return  # all MSAs pre-built; --db-root genuinely unnecessary
@@ -316,9 +446,21 @@ def validate_db_coverage(genes: List[str], manifest: Dict[str, List[str]],
     if need_protein_gen:
         uniref90    = args.db_root / "uniref90.fasta"
         uniref90_gz = args.db_root / "uniref90.fasta.gz"
-        if not uniref90.exists() and not uniref90_gz.exists():
+        if not uniref90.is_file() or uniref90.stat().st_size == 0:
+            if uniref90_gz.is_file():
+                destination_note = (
+                    f"Move aside the empty or non-file destination {shlex.quote(str(uniref90))} first. "
+                    if uniref90.exists() else ""
+                )
+                raise SystemExit(
+                    "ERROR: jackhmmer requires an uncompressed, rewindable UniRef90 FASTA. "
+                    f"Only gzip data is available in --db-root ({args.db_root}). "
+                    f"{destination_note}"
+                    "Prepare uniref90.fasta before rerunning (allow space for the expanded database):\n"
+                    f"  gzip -dk {shlex.quote(str(uniref90_gz.resolve()))}"
+                )
             raise SystemExit(
-                f"ERROR: uniref90.fasta(.gz) not found in --db-root ({args.db_root}) "
+                f"ERROR: nonempty uniref90.fasta not found in --db-root ({args.db_root}) "
                 f"but {len(need_protein_gen)} gene(s) still need protein MSA generation."
             )
 
@@ -329,6 +471,8 @@ def normalize(path: Optional[Path]) -> Optional[str]:
 
 def build_nextflow_cmd(args: argparse.Namespace, manifest_path: str) -> List[str]:
     cmd = ["nextflow", "run", str(NEXTFLOW_SCRIPT)]
+    if getattr(args, "resource_runtime_config", None):
+        cmd.extend(["-c", str(args.resource_runtime_config)])
     if args.resume:
         cmd.append("-resume")
 
@@ -342,10 +486,23 @@ def build_nextflow_cmd(args: argparse.Namespace, manifest_path: str) -> List[str
         add_param("plmc_binary", normalize(Path(args.plmc_binary)))
     if args.db_root:
         add_param("db_root", normalize(args.db_root))
-        add_param("uniref90_db", normalize(args.db_root / "uniref90.fasta"))
+        uniref90 = args.db_root / "uniref90.fasta"
+        if uniref90.is_file() and uniref90.stat().st_size > 0:
+            add_param("uniref90_db", normalize(uniref90))
     add_param("output_dir", normalize(args.output))
-    add_param("threads", args.threads)
+    threads = getattr(args, "resource_config", {}).get("threads", args.threads)
+    add_param("threads", threads)
     add_param("manifest", manifest_path)
+    add_param("resource_errors", getattr(args, "resource_errors_path", None))
+    if getattr(args, "resource_config_path", None):
+        add_param("resource_config", str(args.resource_config_path))
+        add_param("resource_executor", "local")
+        add_param("gpu_slots", len(args.resource_config["hardware"]["gpus"]))
+        add_param("msa_cpus", threads)
+        add_param("msa_memory", f"{args.msa_memory_gib} GB")
+        add_param("evmutation_cpus", threads)
+        if args.evmutation_memory_gib is not None:
+            add_param("evmutation_memory", f"{args.evmutation_memory_gib} GB")
 
     add_param("jackhmmer_binary", args.jackhmmer_binary)
     add_param("jackhmmer_iterations", args.jackhmmer_iterations)
@@ -401,7 +558,7 @@ def build_nextflow_cmd(args: argparse.Namespace, manifest_path: str) -> List[str
     return cmd
 
 
-def validate_backend_tools(args: argparse.Namespace, manifest: Dict[str, List[str]],
+def validate_backend_tools(args: argparse.Namespace, manifest: Dict[str, Any],
                             genes: List[str]) -> None:
     """
     Pre-flight check that adabmDCApy is importable BEFORE launching the workflow.
@@ -415,12 +572,21 @@ def validate_backend_tools(args: argparse.Namespace, manifest: Dict[str, List[st
 
     Skipped when every gene that still needs inference already has pre-built params.
     """
+    need_plmc = any(
+        side_pending(args, manifest, gene, "evmutation", side)
+        and gene not in manifest.get("model_params" if side == "protein" else "codon_model_params", [])
+        for gene in genes for side in ("protein", "codon")
+    )
+    if need_plmc and not args.plmc_binary:
+        raise SystemExit("ERROR: --plmc-binary is required when a selected EVmutation task builds params "
+                         "(provide pre-built params or --adabmdca-only)")
     if not args.run_adabmdca:
         return
 
-    need_protein_inf = [g for g in genes if g not in manifest.get("adabmdca_protein_params", [])]
-    need_codon_inf = [] if args.skip_codon_adabmdca else \
-        [g for g in genes if g not in manifest.get("adabmdca_codon_params", [])]
+    need_protein_inf = [gene for gene in genes if side_pending(args, manifest, gene, "adabmdca", "protein")
+                        and gene not in manifest.get("adabmdca_protein_params", [])]
+    need_codon_inf = [gene for gene in genes if side_pending(args, manifest, gene, "adabmdca", "codon")
+                      and gene not in manifest.get("adabmdca_codon_params", [])]
 
     if not need_protein_inf and not need_codon_inf:
         return  # all adabmDCA params pre-built; adabmDCApy not needed
@@ -445,11 +611,194 @@ def validate_backend_tools(args: argparse.Namespace, manifest: Dict[str, List[st
         )
 
 
+def prepare_resource_plans(args, manifest, genes):
+    config = resource_planner.make_config(args)
+    config["routing"] = manifest.get("routing", {})
+    config["evmutation"] = {"memory_gib": args.evmutation_memory_gib}
+    manifest["resource_errors"] = []
+    plans = []
+    if args.run_adabmdca:
+        manifest["adabmdca_protein"] = []
+        manifest["adabmdca_codon"] = []
+        for side in ("protein", "codon"):
+            if side == "codon" and args.skip_codon_adabmdca:
+                continue
+            explicit_params = getattr(args, f"adabmdca_{side}_params")
+            if not explicit_params:
+                manifest[f"adabmdca_{side}_params"] = []
+            for gene in genes:
+                if not side_enabled(args, manifest, gene, "adabmdca", side):
+                    continue
+                inputs = manifest["input_files"][gene]
+                msa = inputs.get("msa" if side == "protein" else "codon_msa")
+                if not msa or not inputs["mutations"]:
+                    continue
+                try:
+                    resolved_params = find_gene_file(str(explicit_params), gene, [f"*.{side}_adabm_params", f"*.{side}.dat", "*.dat"]) if explicit_params else None
+                    fingerprint = resource_planner.task_fingerprint(gene, side, inputs["fasta"], msa, inputs["mutations"], config, resolved_params)
+                    artifact_dir = args.output / gene / "adabmDCA"
+                    params_name = f"{gene}.{side}_adabm_params"
+                    tsv_name = f"{gene}.{side}.tsv"
+                    artifacts = {
+                        tsv_name: artifact_dir / tsv_name,
+                        params_name: args.output / f"adabmdca_{side}_params" / params_name,
+                    }
+                    complete = verify_completion(artifact_dir / f"{gene}.{side}.complete.json", fingerprint, artifacts)
+                    if complete:
+                        manifest[f"adabmdca_{side}"].append(gene)
+                        if gene not in manifest[f"adabmdca_{side}_params"]:
+                            manifest[f"adabmdca_{side}_params"].append(gene)
+                        plan = {"gene": gene, "side": side, "device": "cached", "cpu_memory_gib": 0, "gpu_memory_gib": 0}
+                    else:
+                        plan = resource_planner.plan_task(gene, side, inputs["fasta"], msa, inputs["mutations"], config, resolved_params)
+                except (ValueError, OSError) as error:
+                    manifest["resource_errors"].append(resource_planner.resource_error(gene, side, "adabmdca", error))
+                    continue
+                plan["verified_complete"] = complete
+                plans.append(plan)
+    config["evmutation_plans"] = []
+    for gene in genes:
+        for side in ("protein", "codon"):
+            if not side_pending(args, manifest, gene, "evmutation", side):
+                continue
+            inputs = manifest["input_files"][gene]
+            msa = inputs.get("msa" if side == "protein" else "codon_msa")
+            if not msa or not inputs["mutations"]:
+                continue
+            artifact = "model_params" if side == "protein" else "codon_model_params"
+            params = manifest["param_files"][gene].get(artifact)
+            try:
+                plan = plmc_resources.plan_evmutation_task(gene, side, msa, config, params)
+            except (ValueError, OSError) as error:
+                manifest["resource_errors"].append(resource_planner.resource_error(gene, side, "evmutation", error))
+                continue
+            config["evmutation_plans"].append(plan)
+    if args.threads is None:
+        tasks = pending_resource_tasks(args, manifest, genes, config, plans)
+        config["cpu_allocation"] = resource_planner.automatic_threads(config["hardware"], tasks)
+        config["threads"] = config["cpu_allocation"]["threads"]
+        for plan in plans:
+            if not plan["verified_complete"]:
+                override = config["overrides"].get(f"{plan['gene']}.{plan['side']}", {})
+                plan["threads"] = override.get("threads", config["threads"])
+    else:
+        config["cpu_allocation"] = {"threads": config["threads"], "concurrent_jobs": None}
+    for plan in config["evmutation_plans"]:
+        plan["threads"] = config["threads"]
+    return config, plans
+
+
+def pending_resource_tasks(args, manifest, genes, config, plans):
+    planned = {(plan["gene"], plan["side"]): plan for plan in plans}
+    ev_planned = {(plan["gene"], plan["side"]): plan for plan in config["evmutation_plans"]}
+    tasks = []
+    for gene in genes:
+        for side in ("protein", "codon"):
+            backends = [backend for backend in ("evmutation", "adabmdca")
+                        if side_pending(args, manifest, gene, backend, side)]
+            if not backends:
+                continue
+            inputs = manifest["input_files"][gene]
+            if not inputs.get("msa" if side == "protein" else "codon_msa"):
+                tasks.append({"id": f"{gene}.{side}.msa", "memory_gib": args.msa_memory_gib,
+                              "eligible_gpu_uuids": [], "threads": None})
+                continue
+            for backend in backends:
+                task = {"id": f"{gene}.{side}.{backend}", "eligible_gpu_uuids": [], "threads": None}
+                if backend == "adabmdca":
+                    plan = planned.get((gene, side))
+                    if plan is None or plan["device"] == "cached":
+                        continue
+                    gpu = plan["device"] == "cuda"
+                    task["memory_gib"] = plan["gpu_host_memory_gib" if gpu else "cpu_memory_gib"]
+                    if gpu:
+                        task["eligible_gpu_uuids"] = plan["eligible_gpu_uuids"]
+                    task["threads"] = config["overrides"].get(f"{gene}.{side}", {}).get("threads")
+                else:
+                    plan = ev_planned.get((gene, side))
+                    if plan is None:
+                        continue
+                    task["memory_gib"] = plan["memory_gib"]
+                tasks.append(task)
+    return tasks
+
+
+def write_resource_snapshot(directory, contents, suffix):
+    directory.mkdir(parents=True, exist_ok=True)
+    destination = directory / (hashlib.sha256(contents.encode()).hexdigest() + suffix)
+    descriptor, temporary = tempfile.mkstemp(dir=directory)
+    try:
+        with os.fdopen(descriptor, "w") as handle:
+            handle.write(contents)
+        os.replace(temporary, destination)
+    finally:
+        if os.path.exists(temporary):
+            os.unlink(temporary)
+    return destination
+
+
+def print_final_diagnostics(warnings, errors):
+    if not warnings and not errors:
+        return
+    sys.stdout.flush()
+    print(f"\n[mutEffects-controller] Final summary: {len(warnings)} warning(s), {len(errors)} error(s)", file=sys.stderr)
+    for warning in warnings:
+        print(f"WARNING: {warning['gene']}: {warning['message']}", file=sys.stderr)
+    for error in errors:
+        context = "/".join(str(error.get(field, "")) for field in ("gene", "side", "backend") if error.get(field))
+        print(f"ERROR: {context}: {error['message']}", file=sys.stderr)
+    sys.stderr.flush()
+
+
+def read_resource_errors(filename):
+    errors = json.loads(Path(filename).read_text())
+    if not isinstance(errors, list) or any(
+        not isinstance(error, dict)
+        or any(not isinstance(error.get(field), str) for field in ("gene", "side", "backend", "message"))
+        or error["side"] not in {"protein", "codon"}
+        or error["backend"] not in {"evmutation", "adabmdca"}
+        for error in errors
+    ):
+        raise ValueError("Invalid Nextflow resource-error report")
+    return errors
+
+
 def run_controller(args: argparse.Namespace):
     genes = _resolve_genes(args.fasta)
     manifest = build_manifest(genes, args)
-    validate_db_coverage(genes, manifest, args)
-    validate_backend_tools(args, manifest, genes)
+    warnings = [{"gene": gene, "message": warning}
+                for gene, route in manifest["routing"].items() for warning in route["warnings"]]
+    try:
+        config, plans = prepare_resource_plans(args, manifest, genes)
+    except (ValueError, OSError, KeyError) as error:
+        print_final_diagnostics(warnings, manifest.get("resource_errors", []))
+        raise SystemExit(f"ERROR: {error}") from error
+    args.resource_config = config
+    errors = list(manifest["resource_errors"])
+    try:
+        validate_db_coverage(genes, manifest, args)
+    except SystemExit:
+        print_final_diagnostics(warnings, errors)
+        raise
+    if args.resource_plan_only:
+        print(json.dumps({"hardware": config["hardware"], "cpu_allocation": config["cpu_allocation"],
+                          "routing": manifest["routing"], "tasks": plans + config["evmutation_plans"],
+                          "resource_errors": errors, "warnings": warnings}, indent=2), flush=True)
+        print_final_diagnostics(warnings, errors)
+        if errors:
+            raise SystemExit(1)
+        return
+    pending = any(side_pending(args, manifest, gene, backend, side)
+                  for gene in genes for backend in ("evmutation", "adabmdca") for side in ("protein", "codon"))
+    if errors and not pending:
+        print("[mutEffects-controller] No schedulable tasks remain.", flush=True)
+        print_final_diagnostics(warnings, errors)
+        raise SystemExit(1)
+    try:
+        validate_backend_tools(args, manifest, genes)
+    except SystemExit:
+        print_final_diagnostics(warnings, errors)
+        raise
 
     # Summary
     backends = []
@@ -463,7 +812,17 @@ def run_controller(args: argparse.Namespace):
     elif args.skip_codon_adabmdca:
         flags.append("skip-codon=adabmdca")
     print(f"[mutEffects-controller] {len(genes)} gene(s) [{', '.join(flags)}]", flush=True)
+    print(f"[resources] {config['hardware']['cpus']} CPUs, {config['hardware']['memory_gib']:.2f} GiB shared RAM, {len(config['hardware']['gpus'])} visible GPUs")
+    allocation = config["cpu_allocation"]
+    allocation_basis = f"estimated {allocation['concurrent_jobs']} concurrent jobs" if config["threads_explicit"] is False else "explicit --threads"
+    print(f"[resources] {config['threads']} threads per task ({allocation_basis}); per-task overrides take precedence")
+    for plan in plans:
+        print(f"  {plan['gene']}/{plan['side']}: {plan['device']}; CPU RAM {plan['cpu_memory_gib']:.2f} GiB, GPU VRAM {plan['gpu_memory_gib']:.2f} GiB; verified_complete={plan['verified_complete']}")
+    for plan in config["evmutation_plans"]:
+        print(f"  {plan['gene']}/{plan['side']}: EVmutation; CPU RAM {plan['memory_gib']:.2f} GiB; threads={plan['threads']}; {plan['estimate_basis']}")
     for artifact, gene_list in manifest.items():
+        if artifact in {"input_files", "param_files", "routing", "ev_fingerprints", "resource_errors"}:
+            continue
         if gene_list:
             preview = ", ".join(gene_list[:5])
             print(f"  {artifact}: {len(gene_list)} pre-built ({preview})")
@@ -484,16 +843,40 @@ def run_controller(args: argparse.Namespace):
             print(f"  ready to score: {len(ready)} gene(s)")
 
     # Write manifest
-    out_dir = args.output.resolve()
-    out_dir.mkdir(parents=True, exist_ok=True)
-    manifest_path = str(out_dir / ".evmutation_manifest.json")
-    with open(manifest_path, 'w') as f:
-        json.dump(manifest, f, indent=2)
+    try:
+        out_dir = args.output.resolve()
+        out_dir.mkdir(parents=True, exist_ok=True)
+        snapshots = out_dir / ".bff-resources"
+        args.resource_config_path = write_resource_snapshot(snapshots, json.dumps(config, indent=2) + "\n", ".json")
+        args.resource_runtime_config = write_resource_snapshot(snapshots,
+            f"executor.cpus = {config['hardware']['cpus']}\n"
+            f"executor.memory = '{config['hardware']['memory_gib']:.6f} GB'\n", ".config"
+        )
+        manifest_path = str(out_dir / ".evmutation_manifest.json")
+        with open(manifest_path, 'w') as handle:
+            json.dump(manifest, handle, indent=2)
 
-    cmd = build_nextflow_cmd(args, manifest_path)
-    print(f"[mutEffects-controller] Launching: {' '.join(cmd)}", flush=True)
-    nf_proc = subprocess.Popen(cmd, cwd=str(HERE))
-    sys.exit(nf_proc.wait())
+        immutable_manifest = write_resource_snapshot(snapshots, json.dumps(manifest, indent=2), ".manifest.json")
+        descriptor, report_path = tempfile.mkstemp(prefix="run-", suffix=".resource-errors.json", dir=snapshots)
+        with os.fdopen(descriptor, "w") as handle:
+            handle.write("null\n")
+        args.resource_errors_path = Path(report_path)
+        cmd = build_nextflow_cmd(args, str(immutable_manifest))
+        print(f"[mutEffects-controller] Launching: {' '.join(cmd)}", flush=True)
+        nf_proc = subprocess.Popen(cmd, cwd=str(HERE))
+        exit_code = nf_proc.wait()
+    except OSError as error:
+        errors.append({"backend": "Nextflow", "message": str(error)})
+        print_final_diagnostics(warnings, errors)
+        raise SystemExit(1) from error
+    try:
+        errors.extend(read_resource_errors(args.resource_errors_path))
+    except (ValueError, OSError) as error:
+        errors.append({"backend": "Nextflow", "message": f"Cannot read resource-error report: {error}"})
+    if exit_code:
+        errors.append({"backend": "Nextflow", "message": f"Exited with status {exit_code}; see the Nextflow log for details."})
+    print_final_diagnostics(warnings, errors)
+    sys.exit(exit_code or (1 if errors else 0))
 
 
 if __name__ == "__main__":

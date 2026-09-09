@@ -21,7 +21,7 @@ Computes delta metrics between WT and MUT AF3 predictions
 and classifies binding events.
 """
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Dict, Optional, List
 from enum import Enum
 
@@ -118,6 +118,10 @@ class DeltaMetrics:
     event_class: BindingEventClass
     priority_score: float  # For ranking importance
     n_windows: Optional[int] = None  # Multi-window mode only
+    n_windows_paired: Optional[int] = None
+    n_windows_success_wt: Optional[int] = None
+    n_windows_success_mut: Optional[int] = None
+    protein_msa: str = 'unknown'
 
 
 @dataclass
@@ -233,6 +237,21 @@ def compute_delta_metrics(
     if config is None:
         config = ThresholdConfig()
 
+    wt_metrics = (
+        replace(
+            wt_metrics,
+            has_binding=has_confident_binding(wt_metrics, config),
+        )
+        if wt_metrics is not None else None
+    )
+    mut_metrics = (
+        replace(
+            mut_metrics,
+            has_binding=has_confident_binding(mut_metrics, config),
+        )
+        if mut_metrics is not None else None
+    )
+
     # Compute deltas
     if wt_metrics and mut_metrics:
         delta_pae = mut_metrics.chain_pair_pae_min - wt_metrics.chain_pair_pae_min
@@ -273,6 +292,66 @@ def compute_delta_metrics(
         event_class=event_class,
         priority_score=priority_score
     )
+
+
+def qc_flag_for_deltas(delta_list: List[DeltaMetrics]) -> str:
+    """Summarize WT/MUT result completeness across submitted RBPs."""
+    if not delta_list:
+        return 'no_rbps_tested'
+    if all(
+        delta.wt_metrics is not None and delta.mut_metrics is not None
+        and (delta.n_windows is None or delta.n_windows_paired == delta.n_windows)
+        for delta in delta_list
+    ):
+        return 'PASS'
+    if any(
+        delta.wt_metrics is not None or delta.mut_metrics is not None
+        or bool(delta.n_windows_success_wt or delta.n_windows_success_mut)
+        for delta in delta_list
+    ):
+        return 'PARTIAL'
+    return 'ALL_FAILED'
+
+
+def aggregate_window_metrics(metrics: List[BindingMetrics], rbp_name: str) -> Optional[BindingMetrics]:
+    """Average only the supplied matched window metrics, not unmatched successes."""
+    from biofeaturefactory.alphafold3.bin.af3_parser import BindingAnalysis, aggregate_binding_analyses
+
+    aggregation = aggregate_binding_analyses([
+        BindingAnalysis('R', 'P', metric.interface_contacts, 0.0, 0.0,
+                        metric.interface_plddt_rna, metric.interface_plddt_protein,
+                        metric.chain_pair_pae_min, [], [])
+        for metric in metrics
+    ])
+    if aggregation is None:
+        return None
+    return BindingMetrics(
+        rbp_name, aggregation.mean.chain_pair_pae_min, aggregation.mean.n_contacts,
+        aggregation.mean.interface_plddt_rna, aggregation.mean.interface_plddt_protein,
+        False, n_samples=aggregation.n_samples,
+        std_chain_pair_pae_min=aggregation.std_chain_pair_pae_min,
+        std_interface_contacts=aggregation.std_n_contacts,
+        std_plddt_rna=aggregation.std_interface_plddt_rna,
+        std_plddt_protein=aggregation.std_interface_plddt_protein,
+    )
+
+
+def compute_window_delta(rbp_name: str, wt_by_window: Dict[int, BindingMetrics],
+                         mut_by_window: Dict[int, BindingMetrics], n_windows: int,
+                         distance_to_mutation: int, config: ThresholdConfig) -> DeltaMetrics:
+    """Compare the intersection of successful WT/MUT windows and report coverage."""
+    paired = sorted(set(wt_by_window) & set(mut_by_window))
+    delta = compute_delta_metrics(
+        rbp_name,
+        aggregate_window_metrics([wt_by_window[index] for index in paired], rbp_name),
+        aggregate_window_metrics([mut_by_window[index] for index in paired], rbp_name),
+        distance_to_mutation, config,
+    )
+    delta.n_windows = n_windows
+    delta.n_windows_paired = len(paired)
+    delta.n_windows_success_wt = len(wt_by_window)
+    delta.n_windows_success_mut = len(mut_by_window)
+    return delta
 
 
 def aggregate_mutation_summary(
@@ -330,7 +409,16 @@ def aggregate_mutation_summary(
         'global_max_abs_delta_pae': round(max_abs_delta, 3),
         'top_event_rbp': top_rbp,
         'top_event_class': top_class,
-        'top_event_delta_pae': round(top_delta, 3)
+        'top_event_delta_pae': round(top_delta, 3),
+        'protein_msa': (
+            next(iter({delta.protein_msa for delta in delta_list}))
+            if len({delta.protein_msa for delta in delta_list}) == 1
+            else 'mixed' if delta_list else 'not_tested'
+        ),
+        'n_rbps_msa_provided': sum(delta.protein_msa == 'provided' for delta in delta_list),
+        'n_rbps_msa_free': sum(delta.protein_msa == 'none' for delta in delta_list),
+        'n_rbps_msa_unknown': sum(delta.protein_msa == 'unknown' for delta in delta_list),
+        'n_rbps_msa_mixed': sum(delta.protein_msa == 'mixed' for delta in delta_list),
     }
 
 
@@ -355,6 +443,7 @@ def format_events_rows(
     rows = []
     for d in delta_list:
         multi_window = bool(d.n_windows)
+        complete = d.event_class != BindingEventClass.INCOMPLETE
         n_wt = d.wt_metrics.n_samples if d.wt_metrics and d.wt_metrics.n_samples else ''
         n_mut = d.mut_metrics.n_samples if d.mut_metrics and d.mut_metrics.n_samples else ''
         std_wt = round(d.wt_metrics.std_chain_pair_pae_min, 3) if d.wt_metrics and d.wt_metrics.std_chain_pair_pae_min is not None else ''
@@ -364,10 +453,10 @@ def format_events_rows(
             'rbp_name': d.rbp_name,
             'wt_chain_pair_pae_min': round(d.wt_metrics.chain_pair_pae_min, 3) if d.wt_metrics else '',
             'mut_chain_pair_pae_min': round(d.mut_metrics.chain_pair_pae_min, 3) if d.mut_metrics else '',
-            'delta_chain_pair_pae_min': round(d.delta_chain_pair_pae_min, 3),
+            'delta_chain_pair_pae_min': round(d.delta_chain_pair_pae_min, 3) if complete else '',
             'wt_interface_contacts': d.wt_metrics.interface_contacts if d.wt_metrics else 0,
             'mut_interface_contacts': d.mut_metrics.interface_contacts if d.mut_metrics else 0,
-            'delta_interface_contacts': d.delta_interface_contacts,
+            'delta_interface_contacts': d.delta_interface_contacts if complete else '',
             'cls': d.event_class.value,
             'priority': round(d.priority_score, 3),
             'n_samples_wt': '' if multi_window else n_wt,
@@ -375,10 +464,15 @@ def format_events_rows(
             'std_pae_wt': '' if multi_window else std_wt,
             'std_pae_mut': '' if multi_window else std_mut,
             'n_windows': d.n_windows if d.n_windows else '',
-            'n_windows_used_wt': n_wt if multi_window else '',
-            'n_windows_used_mut': n_mut if multi_window else '',
+            'n_windows_used_wt': (n_wt or 0) if multi_window else '',
+            'n_windows_used_mut': (n_mut or 0) if multi_window else '',
             'std_pae_across_windows_wt': std_wt if multi_window else '',
             'std_pae_across_windows_mut': std_mut if multi_window else '',
+            'n_windows_paired': d.n_windows_paired if multi_window else '',
+            'n_windows_success_wt': d.n_windows_success_wt if multi_window else '',
+            'n_windows_success_mut': d.n_windows_success_mut if multi_window else '',
+            'qc_flags': qc_flag_for_deltas([d]),
+            'protein_msa': d.protein_msa,
         }
         rows.append(row)
     return rows
@@ -393,7 +487,8 @@ def format_sites_rows(
     contact_frequency_protein: Optional[Dict[int, float]] = None,
     *,
     edit_span: RnaEditSpan,
-    rna_chain: str = 'R'
+    rna_chain: str = 'R',
+    window_idx: int = 0,
 ) -> List[dict]:
     """
     Format interface sites as rows for sites.tsv.
@@ -435,10 +530,20 @@ def format_sites_rows(
     mut_to_wt = {j: i for i, j in enumerate(wt_to_mut) if j is not None}
     rows = []
     for s in sites:
-        freq = ''
         freq_dict = contact_frequency_rna if s.chain == rna_chain else contact_frequency_protein
-        if freq_dict and s.res_id in freq_dict:
+        if freq_dict is None:
+            # No ensemble was aggregated (single sample), so no frequency is
+            # KNOWN for this residue. Empty, not zero.
+            freq = ''
+        elif s.res_id in freq_dict:
             freq = round(freq_dict[s.res_id], 3)
+        else:
+            # An ensemble WAS aggregated and this residue is absent from it. The
+            # frequency dict is built from a Counter, which only holds residues
+            # seen at least once, so absence means zero contacts across every
+            # sample -- a measured value. Writing '' made that indistinguishable
+            # from "not measured" in the same column.
+            freq = 0.0
 
         if s.chain != rna_chain:
             # Protein chain: identical sequence in the WT and MUT jobs.
@@ -472,5 +577,9 @@ def format_sites_rows(
             'contact_frequency': freq,
             'res_id_wt_frame': res_id_wt_frame,
             'align_status': align_status,
+            'window_idx': window_idx,
+            'window_edit_offset': edit_span.offset,
+            'window_wt_length': edit_span.wt_len,
+            'window_mut_length': edit_span.mut_len,
         })
     return rows

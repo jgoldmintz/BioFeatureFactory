@@ -34,6 +34,7 @@ import time
 import platform
 from datetime import datetime
 import logging
+import re
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from typing import Optional
 
@@ -253,7 +254,7 @@ def parse_signalp_summary(file_path: str):
         with open(file_path, "r") as handle:
             for line in handle:
                 line = line.strip()
-                if not line.startswith("# ") or "Signal peptide" not in line:
+                if not line.startswith("# ") or "signal peptide" not in line.lower():
                     continue
                 payload = line[2:]
                 if ":" not in payload:
@@ -812,7 +813,7 @@ def _process_single_sequence_worker(args):
     Worker function for parallel processing - must be at module level for pickling
     """
     (temp_fasta, temp_output, seq_name, use_signalp, cache_dir,
-     docker_timeout, verbose, native_path) = args
+     docker_timeout, verbose, native_path, signalp_bin) = args
 
     worker_processor = RobustDockerNetNGlyc(
         use_signalp=use_signalp,
@@ -821,6 +822,7 @@ def _process_single_sequence_worker(args):
         docker_timeout=docker_timeout,
         verbose=verbose,
         native_bin=native_path,
+        signalp_bin=signalp_bin,
     )
 
     try:
@@ -895,11 +897,24 @@ class SignalP6Handler:
         cache_file = os.path.join(self.cache_dir, f"{cache_key}_sp6.json")
         cache_dir = os.path.join(self.cache_dir, f"{cache_key}_sp6_output")
 
+        expected_ids = set(read_fasta(fasta_file))
+        if not expected_ids:
+            raise RuntimeError("SignalP input has no sequences")
         if os.path.exists(cache_file) and os.path.exists(cache_dir):
             if self.verbose:
                 print(f"Using cached SignalP 6 results for {os.path.basename(fasta_file)}")
-            with open(cache_file, 'r') as f:
-                return json.load(f), cache_dir
+            try:
+                with open(cache_file, 'r') as cached_handle:
+                    cached_results = json.load(cached_handle)
+                if (set(cached_results) == expected_ids
+                        and all(isinstance(info.get('has_signal'), bool)
+                                and isinstance(info.get('probability'), (float, int))
+                                and 0 <= info['probability'] <= 1
+                                for info in cached_results.values())
+                        and os.path.isfile(os.path.join(cache_dir, 'prediction_results.txt'))):
+                    return cached_results, cache_dir
+            except (OSError, ValueError, TypeError, AttributeError):
+                pass
 
         if not self.signalp6_available:
             error_msg = "ERROR: SignalP 6.0 is required but not available. Please install SignalP 6.0 and ensure it's in your PATH."
@@ -940,35 +955,43 @@ class SignalP6Handler:
                 if os.path.exists(pred_file):
                     with open(pred_file, 'r') as f:
                         for line in f:
-                            if line.startswith('#'):
+                            if line.startswith('#') or not line.strip():
                                 continue
-                            parts = line.strip().split('\t')
+                            parts = line.rstrip('\r\n').split('\t')
+                            if len(parts) < 9:
+                                raise ValueError("Malformed SignalP prediction row")
                             if len(parts) >= 9:
                                 seq_id = parts[0]
                                 prediction = parts[1]  # 'SP' or 'OTHER'
-                                sp_prob = float(parts[3]) if parts[3] else 0.0
+                                sp_prob = float(parts[3])
+                                if prediction not in {'SP', 'OTHER'} or not 0 <= sp_prob <= 1:
+                                    raise ValueError(f"Invalid SignalP prediction for {seq_id}")
+                                if seq_id in results:
+                                    raise ValueError(f"Duplicate SignalP prediction for {seq_id}")
 
                                 # Parse CS Position (column 9)
                                 cs_pos = None
                                 if len(parts) > 8 and parts[8] and parts[8].strip():
                                     cs_info = parts[8].strip()
-                                    try:
-                                        if '-' in cs_info:
-                                            cs_pos = int(cs_info.split('-')[0])
-                                        elif cs_info.isdigit():
-                                            cs_pos = int(cs_info)
-                                    except:
-                                        cs_pos = 25
+                                    cs_match = re.search(r'(?:CS pos:\s*)?(\d+)-\d+', cs_info)
+                                    if cs_match:
+                                        cs_pos = int(cs_match.group(1))
+                                    elif cs_info.isdigit():
+                                        cs_pos = int(cs_info)
 
                                 has_sp = prediction == 'SP'
                                 if has_sp and not cs_pos:
-                                    cs_pos = 25  # Default
+                                    raise ValueError(f"Missing SignalP cleavage site for {seq_id}")
 
                                 results[seq_id] = {
                                     'has_signal': has_sp,
                                     'cleavage_site': cs_pos if has_sp else None,
                                     'probability': sp_prob
                                 }
+
+                if set(results) != expected_ids:
+                    raise ValueError(
+                        f"Incomplete SignalP predictions: {len(results)}/{len(expected_ids)} sequences")
 
                 # Cache results and output directory
                 with open(cache_file, 'w') as f:
@@ -989,19 +1012,17 @@ class SignalP6Handler:
                 # failure looked identical and unactionable.
                 _err = (result.stderr or "").strip()
                 _shown = _err if len(_err) <= 2000 else "...\n" + _err[-2000:]
-                print(f"SignalP 6 failed (exit {result.returncode}):\n{_shown}")
+                raise RuntimeError(f"SignalP 6 failed (exit {result.returncode}):\n{_shown}")
 
         except Exception as e:
             if self.logger:
                 self.logger.error(f"SignalP 6 error: {e}")
-            else:
-                print(f"SignalP 6 error: {e}")
+            raise RuntimeError(f"SignalP 6 prediction failed: {e}") from e
         finally:
             # Clean up temp dir if one was created
             if temp_dir and temp_dir != signalp_output_dir:
                 shutil.rmtree(temp_dir)
 
-        return results, None
 
 
 class RobustDockerNetNGlyc:
@@ -1155,9 +1176,14 @@ class RobustDockerNetNGlyc:
         cache_file = os.path.join(self.cache_dir, f"{cache_key}_netnglyc.out")
 
         if os.path.exists(cache_file):
-            #print(f"Worker {worker_id}: Using cached result")
-            shutil.copy(cache_file, output_file)
-            return True, output_file, None
+            cached_signalp = parse_signalp_summary(cache_file) if self.use_signalp else {}
+            if (not self.use_signalp
+                    or (set(cached_signalp) == set(read_fasta(fasta_file))
+                        and all(isinstance(info.get('probability'), (int, float))
+                                and 0 <= info['probability'] <= 1
+                                for info in cached_signalp.values()))):
+                shutil.copy(cache_file, output_file)
+                return True, output_file, None
 
         try:
             # Step 1: Run SignalP 6 on host (if enabled)
@@ -1399,6 +1425,7 @@ class RobustDockerNetNGlyc:
             # Process multiple batches
             #print(f"Worker {worker_id}: Processing {len(batch_files)} batches")
             batch_outputs = []
+            batch_errors = []
             
             for i, batch_file in enumerate(batch_files):
                 # Create batch-specific output file name for parsing
@@ -1419,11 +1446,7 @@ class RobustDockerNetNGlyc:
                     else:
                         if self.verbose:
                             print(f"Batch {i+1} failed: {error}")
-                        # Clean up batch input files
-                        for bf in batch_files:
-                            if os.path.exists(bf):
-                                os.remove(bf)
-                        return False, output_base, f"Batch {i+1} failed: {error}"
+                        batch_errors.append(f"Batch {i+1} failed: {error}")
                         
                 finally:
                     # Clean up this batch input file
@@ -1432,7 +1455,8 @@ class RobustDockerNetNGlyc:
             
             # Create combined output for backwards compatibility (optional)
             #print(f"Worker {worker_id}: Creating combined output for compatibility")
-            combined_output = combine_batch_outputs(batch_outputs, output_base, format_type='netnglyc', original_fasta_file=fasta_file)
+            combined_output = self.combine_parallel_outputs(
+                batch_outputs, output_base, self.count_sequences_in_fasta(fasta_file))
             
             # PRESERVE all batch files for parsing - do NOT delete them
             #print(f"   Preserved {len(batch_outputs)} batch files for parsing:")
@@ -1440,7 +1464,7 @@ class RobustDockerNetNGlyc:
                 if os.path.exists(batch_output):
                     print(f"      - {os.path.basename(batch_output)}")
             if combined_output:
-                return True, output_base, None
+                return not batch_errors, output_base, '; '.join(batch_errors) or None
             else:
                 return False, output_base, "Failed to combine batch outputs"
                 
@@ -2965,6 +2989,7 @@ class RobustDockerNetNGlyc:
             docker_timeout=self.docker_timeout,
             verbose=self.verbose,
             native_bin=getattr(self, 'native_path', None),
+            signalp_bin=getattr(self.signalp_handler, 'signalp_bin', None),
         )
         
         processing_info = {
@@ -3191,7 +3216,8 @@ class RobustDockerNetNGlyc:
             for temp_fasta, temp_output, seq_name in temp_files:
                 args = (temp_fasta, temp_output, seq_name,
                         self.use_signalp, self.cache_dir, self.docker_timeout, self.verbose,
-                        getattr(self, 'native_path', None))
+                        getattr(self, 'native_path', None),
+                        getattr(self.signalp_handler, 'signalp_bin', None))
                 worker_args.append((args, seq_name))
             
             # Use ProcessPoolExecutor for true parallelism
@@ -3219,7 +3245,8 @@ class RobustDockerNetNGlyc:
             if successful_outputs:
                 combined_success = self.combine_parallel_outputs(successful_outputs, output_file, total_sequences)
                 if combined_success:
-                    #print(f"Successfully combined outputs into {output_file}")
+                    if failed_count:
+                        return False, output_file, f"{failed_count} sequence(s) failed; partial output retained"
                     return True, output_file, None
                 else:
                     return False, output_file, "Failed to combine parallel outputs"
@@ -3256,6 +3283,7 @@ class RobustDockerNetNGlyc:
             # Collect all sequence information and results
             all_predictions = []
             sequence_info = []
+            signalp_lines = []
             
             for output_file in output_files:
                 try:
@@ -3264,6 +3292,8 @@ class RobustDockerNetNGlyc:
                     
                     # Extract sequence information (Name: lines and sequence display)
                     lines = content.split('\n')
+                    signalp_lines.extend(line for line in lines
+                                         if line.startswith('# ') and 'signal peptide' in line.lower())
                     in_sequence_display = False
                     current_seq_lines = []
                     
@@ -3328,6 +3358,7 @@ class RobustDockerNetNGlyc:
                 ])
             
             combined_lines.append("")
+            combined_lines.extend(signalp_lines)
             
             # Write combined output
             with open(final_output_file, 'w') as f:

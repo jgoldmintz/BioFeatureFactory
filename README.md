@@ -343,6 +343,7 @@ RNA-RBP interaction structure prediction using AlphaFold3 or Boltz-1.
 - Queries POSTAR3/ENCODE eCLIP data for RBPs near mutations.
 - Predicts RNA-protein complex structures for WT and mutant alleles.
 - Computes PAE-based binding metrics and interface contacts.
+- Local Docker execution resumes exact complete jobs and batches inputs through one AF3 process.
 - `burst.py` submits and ingests SLURM array jobs against a manifest cache for large batches.
 
 ### Mutation Effects Pipeline

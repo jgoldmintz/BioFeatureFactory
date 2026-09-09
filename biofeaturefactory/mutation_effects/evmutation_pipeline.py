@@ -723,7 +723,7 @@ def _score_codon_plan(codon_lookup, codon_models, codon_plan):
 
 
 def _non_snv_rows(pkey, nt_mut, variant, orf_seq, aa_pos_stats, aa_models,
-                  codon_lookup, codon_models, skip_codon):
+                  codon_lookup, codon_models, skip_codon, score_missense_codon=False):
     """Build the row for one non-SNV token. Returns (protein_row, codon_row).
 
     Exactly one of the two is not None -- the routing mirrors the SNV path:
@@ -784,7 +784,7 @@ def _non_snv_rows(pkey, nt_mut, variant, orf_seq, aa_pos_stats, aa_models,
     }
 
     # ---- codon-table classes: synonymous and stop, exactly as for an SNV ----
-    if consequence in ("synonymous", "stop_gained", "stop_lost"):
+    if consequence in ("synonymous", "stop_gained", "stop_lost") or score_missense_codon:
         if consequence == "synonymous" and skip_codon:
             prow = _blank_row(PROTEIN_FIELDNAMES, pkey, nt_mut, qc)
             prow.update(shared)
@@ -805,8 +805,14 @@ def _non_snv_rows(pkey, nt_mut, variant, orf_seq, aa_pos_stats, aa_models,
 
         crow = _blank_row(CODON_FIELDNAMES, pkey, nt_mut, qc)
         crow.update({k: v for k, v in shared.items() if k in CODON_FIELDNAMES})
-        if consequence != "synonymous":
+        if score_missense_codon and shared["mutation_class"] == "MISSENSE":
+            qc.append("MISSENSE_CODON_LEVEL")
+        if consequence in ("stop_gained", "stop_lost"):
             qc.append(_AA_CONSEQUENCE_TO_CLASS[consequence])
+            crow["qc_flags"] = ";".join(qc)
+            return None, crow
+        if delta:
+            qc.append("FRAMESHIFT_NOT_REPRESENTABLE_FIXED_L" if delta % 3 else "CODON_LENGTH_CHANGE_UNSCORED")
             crow["qc_flags"] = ";".join(qc)
             return None, crow
 
@@ -823,7 +829,7 @@ def _non_snv_rows(pkey, nt_mut, variant, orf_seq, aa_pos_stats, aa_models,
             return None, crow
         columns, reason = _score_codon_plan(codon_lookup, codon_models, codon_plan)
         crow.update(columns)
-        qc.append("SYNONYMOUS_SCORED" if columns else reason)
+        qc.append(f"{shared['mutation_class']}_SCORED" if columns else reason.replace("SYNONYMOUS_", f"{shared['mutation_class']}_"))
         if columns and reason:
             qc.append(reason)
         crow["qc_flags"] = ";".join(qc)
@@ -894,7 +900,7 @@ def _non_snv_rows(pkey, nt_mut, variant, orf_seq, aa_pos_stats, aa_models,
 
 def score_nt_mutations(nt_mutations, gene, orf_seq, aa_lookup, failure_map=None,
                        codon_lookup=None, skip_codon=False,
-                       aa_models=None, codon_models=None):
+                       aa_models=None, codon_models=None, score_missense_codon=False):
     """
     Map and score NT mutations.
 
@@ -923,11 +929,17 @@ def score_nt_mutations(nt_mutations, gene, orf_seq, aa_lookup, failure_map=None,
     carries (the gap symbol), both facts of the record rather than user
     preferences. A per-run boolean could only permit everything or refuse
     everything, and neither is what the data needs.
+
+    score_missense_codon routes missense scores and unscored QC rows to the codon TSV.
     """
+    if score_missense_codon and skip_codon:
+        raise ValueError("Codon missense scoring cannot be combined with skip_codon")
     failure_map = failure_map or {}
     nt_re = re.compile(r"^([ACGT])(\d+)([ACGT])$")
     protein_rows = []
     codon_rows = []
+    unscored_fields = CODON_FIELDNAMES if score_missense_codon else PROTEIN_FIELDNAMES
+    unscored_rows = codon_rows if score_missense_codon else protein_rows
     aa_pos_stats = _position_stats(aa_lookup)
 
     for nt_mut in nt_mutations:
@@ -965,24 +977,24 @@ def score_nt_mutations(nt_mutations, gene, orf_seq, aa_lookup, failure_map=None,
             if variant is not None and not variant.is_snv:
                 prow, crow = _non_snv_rows(
                     pkey, nt_mut, variant, orf_seq, aa_pos_stats, aa_models,
-                    codon_lookup, codon_models, skip_codon)
+                    codon_lookup, codon_models, skip_codon, score_missense_codon)
                 if prow is not None:
-                    protein_rows.append(prow)
+                    unscored_rows.append({field: prow.get(field, "") for field in unscored_fields})
                 else:
                     codon_rows.append(crow)
                 continue
-            prow = {f: "" for f in PROTEIN_FIELDNAMES}
+            prow = {field: "" for field in unscored_fields}
             prow.update({"pkey": pkey, "nt_mutant": nt_mut, "qc_flags": "INVALID_MUTATION"})
-            protein_rows.append(prow)
+            unscored_rows.append(prow)
             continue
 
         ref_nt, pos_str, alt_nt = m.groups()
         nt_pos = int(pos_str)
         idx = nt_pos - 1
         if idx < 0 or idx >= len(orf_seq):
-            prow = {f: "" for f in PROTEIN_FIELDNAMES}
+            prow = {field: "" for field in unscored_fields}
             prow.update({"pkey": pkey, "nt_mutant": nt_mut, "qc_flags": "OUT_OF_RANGE"})
-            protein_rows.append(prow)
+            unscored_rows.append(prow)
             continue
 
         if orf_seq[idx] != ref_nt:
@@ -990,9 +1002,9 @@ def score_nt_mutations(nt_mutations, gene, orf_seq, aa_lookup, failure_map=None,
 
         codon_start = (idx // 3) * 3
         if codon_start + 3 > len(orf_seq):
-            prow = {f: "" for f in PROTEIN_FIELDNAMES}
+            prow = {field: "" for field in unscored_fields}
             prow.update({"pkey": pkey, "nt_mutant": nt_mut, "qc_flags": "PARTIAL_CODON"})
-            protein_rows.append(prow)
+            unscored_rows.append(prow)
             continue
 
         wt_codon = orf_seq[codon_start:codon_start + 3]
@@ -1012,7 +1024,9 @@ def score_nt_mutations(nt_mutations, gene, orf_seq, aa_lookup, failure_map=None,
             "mutation_class": mclass,
         }
 
-        if mclass == "SYNONYMOUS":
+        if mclass == "SYNONYMOUS" or (score_missense_codon and mclass == "MISSENSE"):
+            if mclass == "MISSENSE":
+                qc_flags.append("MISSENSE_CODON_LEVEL")
             if skip_codon:
                 prow = {f: "" for f in PROTEIN_FIELDNAMES}
                 prow.update({"pkey": pkey, "nt_mutant": nt_mut})
@@ -1033,7 +1047,7 @@ def score_nt_mutations(nt_mutations, gene, orf_seq, aa_lookup, failure_map=None,
                 if codon_lookup is not None:
                     scored = codon_lookup.get((aa_pos, mut_codon))
                     if scored is None:
-                        qc_flags.append("SYNONYMOUS_NOT_IN_CODON_MODEL")
+                        qc_flags.append(f"{mclass}_NOT_IN_CODON_MODEL")
                     else:
                         crow.update({
                             "prediction_codon_epistatic":   scored["prediction_codon_epistatic"],
@@ -1042,9 +1056,9 @@ def score_nt_mutations(nt_mutations, gene, orf_seq, aa_lookup, failure_map=None,
                             "codon_epistatic_concordance":  scored["codon_epistatic_concordance"],
                             "codon_frequency":              scored["codon_frequency"],
                         })
-                        qc_flags.append("SYNONYMOUS_SCORED")
+                        qc_flags.append(f"{mclass}_SCORED")
                 else:
-                    qc_flags.append("SYNONYMOUS_UNSCORED")
+                    qc_flags.append(f"{mclass}_UNSCORED")
                 crow["qc_flags"] = ";".join(qc_flags)
                 codon_rows.append(crow)
 
@@ -1090,7 +1104,7 @@ def score_nt_mutations(nt_mutations, gene, orf_seq, aa_lookup, failure_map=None,
                     })
                     qc_flags.append("PASS")
             prow["qc_flags"] = ";".join(qc_flags) if qc_flags else "PASS"
-            protein_rows.append(prow)
+            unscored_rows.append({field: prow.get(field, "") for field in unscored_fields})
 
     return protein_rows, codon_rows
 
@@ -1215,7 +1229,7 @@ def _resolve_per_gene_models(gene, args):
     """
     # -- Protein model --
     model_params = None
-    if args.msa:
+    if args.msa and not getattr(args, "score_missense_codon", False):
         msa_file = _find_file_for_gene(
             gene, args.msa, ["*.a2m", "*.msa.fasta", "*.msa.fa", "*.fasta", "*.fa", "*.fas"]
         )
@@ -1230,7 +1244,7 @@ def _resolve_per_gene_models(gene, args):
             model_params = target if os.path.exists(target) else None
         elif not args.quiet:
             print(f"  Warning: no protein MSA found for {gene} in {args.msa}")
-    elif args.model_params:
+    elif args.model_params and not getattr(args, "score_missense_codon", False):
         model_params = _resolve_model_params(gene, args.model_params, ".model_params")
 
     # -- Codon model --
@@ -1272,6 +1286,7 @@ def _process_gene(gene, fasta_file, mutations_file, model_params_path,
 
     Returns (n_protein_rows, n_codon_rows, n_pass, n_syn_scored).
     """
+    score_missense_codon = getattr(args, "score_missense_codon", False)
     _, orf_seq = read_orf_sequence(fasta_file)
 
     nt_mutations = trim_muts(mutations_file, log=args.validation_log, gene_name=gene)
@@ -1319,21 +1334,21 @@ def _process_gene(gene, fasta_file, mutations_file, model_params_path,
     # on pkey, and is indistinguishable from a mutation that was never submitted.
     # Every metric column stays EMPTY -- there is no site index to evaluate.
     intronic_rows = [
-        _blank_row(PROTEIN_FIELDNAMES, mint_pkey(gene, tok), tok,
+        _blank_row(CODON_FIELDNAMES if score_missense_codon else PROTEIN_FIELDNAMES, mint_pkey(gene, tok), tok,
                    ["NON_ORF_TOKEN:no_residue_or_codon_site_in_potts_model"])
         for tok in intronic
     ]
 
     if not nt_mutations:
         print("  (every mutation was intronic)")
-        return _write(intronic_rows, [])
+        return _write([], intronic_rows) if score_missense_codon else _write(intronic_rows, [])
 
     print(f"  Loaded {len(nt_mutations)} NT mutations")
 
     # Protein model
     aa_lookup = {}
     aa_models = None
-    if model_params_path:
+    if model_params_path and not score_missense_codon:
         if os.path.exists(model_params_path):
             if not args.quiet:
                 print(f"  Loading protein model: {model_params_path}")
@@ -1372,9 +1387,13 @@ def _process_gene(gene, fasta_file, mutations_file, model_params_path,
         failure_map=failure_map, codon_lookup=codon_lookup,
         skip_codon=getattr(args, "skip_codon", False),
         aa_models=aa_models, codon_models=codon_models,
+        score_missense_codon=score_missense_codon,
     )
 
-    protein_rows.extend(intronic_rows)
+    if score_missense_codon:
+        codon_rows.extend(intronic_rows)
+    else:
+        protein_rows.extend(intronic_rows)
     n_protein, n_codon, n_pass, n_syn_scored = _write(protein_rows, codon_rows)
 
     if codon_lookup is not None:
@@ -1479,6 +1498,8 @@ Examples:
     parser.add_argument("-sc", "--skip-codon", action="store_true",
                         help="Skip codon-level scoring; route synonymous + stop variants to the protein TSV "
                              "(synonymous score is 0 by construction; stop has no AA-level score)")
+    parser.add_argument("--score-missense-codon", action="store_true",
+                        help="Use only the codon model, including missense scores and unscored QC rows")
     parser.add_argument("-vl", "--validation-log",
                         help="Validation log from variant_mapping for mutation filtering")
     parser.add_argument("--output", "-o", default=".",
@@ -1487,6 +1508,8 @@ Examples:
                         help="Suppress verbose output")
 
     args = parser.parse_args()
+    if args.score_missense_codon and args.skip_codon:
+        parser.error("--score-missense-codon cannot be combined with --skip-codon")
 
 
     # Directory mode: <root>/<GENE>/mappings/mutations/ sits beside the input,
