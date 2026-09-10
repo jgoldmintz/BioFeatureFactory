@@ -53,6 +53,8 @@ from concurrent.futures import ThreadPoolExecutor
 # load_wt_sequences, extract_mutation_from_sequence_name) plus `time`, `logging` and
 # the typing aliases were imported but never referenced anywhere in this module.
 from biofeaturefactory.lib.utility import (
+    InputPathAction,
+    validate_input_mode,
     derive_mutations_root,
     discover_mutation_files,
     mint_pkey,
@@ -1240,9 +1242,11 @@ def main():
     # kept as hidden optional trailing args so existing invocations still parse;
     # the flag wins when both are given.
     parser.add_argument('-i', '--input', dest='input_flag', metavar='INPUT',
+                        action=InputPathAction,
+                        extensions=('.fasta', '.fa', '.fas', '.fna', '.faa'),
                         help='DIRECTORY MODE: variant_mapping output root '
                              '(<root>/<GENE>/fastas/ + <root>/<GENE>/mappings/). '
-                             'Also accepts a single WT FASTA or a flat directory of them.')
+                             'FILE MODE: a single WT FASTA.')
     parser.add_argument('-o', '--output', dest='output_flag', metavar='OUTPUT',
                         help='Output base directory; writes <output>/<GENE>/NetMHC/')
     parser.add_argument('input', nargs='?', help=argparse.SUPPRESS)
@@ -1274,6 +1278,7 @@ def main():
 
     # Processing options
     parser.add_argument('--mutations', '-m',
+                       action=InputPathAction, extensions=('.csv', '.tsv', '.txt'),
                        help='Mutation file or directory of mutation CSVs (single-column NT mutations)')
     parser.add_argument('-l', '--log',
                        help='Validation log file to skip failed mutations')
@@ -1290,6 +1295,9 @@ def main():
                        help='Enable verbose output')
 
     args = parser.parse_args()
+
+    args.input_flag = args.input_flag or args.input
+    validate_input_mode(parser, args, required_file_inputs=('mutations',))
 
     # Validate arguments
     # Flag wins over the positional; both fold into args.input/args.output so

@@ -34,6 +34,8 @@ import RNA
 os.environ["OMP_NUM_THREADS"] = "1"
 
 from biofeaturefactory.lib.utility import (
+    InputPathAction,
+    validate_input_mode,
     discover_mapping_files,
     discover_fasta_files,
     mint_pkey,
@@ -486,17 +488,20 @@ def main():
     parser = argparse.ArgumentParser(
         description="Compute ddG, JSD, and per-position deltau for variant-centered RNA folding windows using ViennaRNA."
     )
-    parser.add_argument("-i", "--input", required=True,
+    parser.add_argument("-i", "--input", required=True, action=InputPathAction,
+                        extensions=('.fasta', '.fa', '.fas', '.fna', '.faa'),
                         help="variant_mapping OUTPUT ROOT (<root>/<GENE>/fastas/), or a single "
                              "FASTA. Given the root, --transcript-mapping and "
                              "--intron-premrna-mapping both default to it.")
     parser.add_argument("-o", "--output", required=True, help="Output base directory")
     parser.add_argument("-w", "--window", type=int, default=151, help="Window size (odd; truncates near ends)")
-    parser.add_argument("-tm", "--transcript-mapping",
+    parser.add_argument("-tm", "--transcript-mapping", action=InputPathAction,
+                        extensions=('.tsv', '.csv'),
                         help="FILE MODE ONLY. In directory mode this defaults to --input, since "
                              "variant_mapping writes mappings/transcript/ beside fastas/ under "
                              "the same <GENE>/. Supply it only for a mapping outside that layout.")
-    parser.add_argument("-ipm", "--intron-premrna-mapping",
+    parser.add_argument("-ipm", "--intron-premrna-mapping", action=InputPathAction,
+                        extensions=('.tsv', '.csv'),
                         help="FILE MODE ONLY. In directory mode this is derived from the same "
                              "root, since mappings/intron_premRNA/ is a sibling of "
                              "mappings/transcript/. Intronic variants are folded against BOTH "
@@ -506,6 +511,7 @@ def main():
     parser.add_argument("-ta", "--tau", type=float, default=0.05, help="Threshold for change_flag on deltau")
     parser.add_argument("--workers", type=int, default=None, help="Max parallel workers (processes)")
     args = parser.parse_args()
+    input_mode = validate_input_mode(parser, args, required_file_inputs=('transcript_mapping',))
 
     if args.window < 1 or args.window % 2 == 0:
         print(f"Error: --window must be a positive odd integer (got {args.window})", file=sys.stderr)
@@ -536,7 +542,7 @@ def main():
     # Same defaulting for the intron/pre-mRNA mapping: variant_mapping writes it as
     # a sibling of mappings/transcript/ under the same <GENE>/, so a gene-layout
     # root supplies both.
-    if not args.intron_premrna_mapping:
+    if input_mode == 'directory' and not args.intron_premrna_mapping:
         _ipm_root = args.transcript_mapping or args.input
         if _ipm_root and discover_mapping_files(str(_ipm_root), "intron_premrna"):
             args.intron_premrna_mapping = _ipm_root

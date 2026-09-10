@@ -59,7 +59,7 @@ def _publish(inputs, manifest, side):
 
 def test_forced_codon_then_automatic_routing_invalidates_codon_cache(inputs, monkeypatch):
     source, output, files, hardware = inputs
-    forced = _parse(monkeypatch, inputs, "-cm", files["codon_msa"])
+    forced = _parse(monkeypatch, inputs, "-cm", source)
     before = _manifest(forced)
     assert before["routing"]["GENE"]["score_missense_codon"]
     _publish(inputs, before, "codon")
@@ -90,9 +90,9 @@ def test_unchanged_routes_reuse_verified_results(inputs, monkeypatch, mode):
     source, output, files, hardware = inputs
     options = []
     if mode in {"protein", "both"}:
-        options += ["--msa", files["msa"]]
+        options += ["--msa", source]
     if mode in {"codon", "both"}:
-        options += ["-cm", files["codon_msa"]]
+        options += ["-cm", source]
     args = _parse(monkeypatch, inputs, *options)
     before = _manifest(args)
     for side in before["ev_fingerprints"]["GENE"]:
@@ -141,7 +141,7 @@ def test_prebuilt_models_still_need_no_plmc_binary(inputs, monkeypatch, codon_on
     options = []
     if codon_only:
         files["protein_params"].unlink()
-        options += ["-cm", files["codon_msa"]]
+        options += ["-cm", source]
     args = _parse(monkeypatch, inputs, *options)
     assert args.plmc_binary is None
     manifest = _manifest(args)

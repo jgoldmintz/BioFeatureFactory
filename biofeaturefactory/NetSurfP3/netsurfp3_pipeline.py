@@ -49,12 +49,17 @@ Non-SNV handling, in brief:
 import os
 import csv
 import tempfile
+from contextlib import nullcontext
+from copy import deepcopy
 from pathlib import Path
 from types import MethodType
+from weakref import proxy
 import sys
 from typing import Optional, Dict, List, Tuple
 # Import utility functions
 from biofeaturefactory.lib.utility import (
+    InputPathAction,
+    validate_input_mode,
     derive_mutations_root,
     # The local copy this replaces did a flat glob("*.csv") and shadowed the
     # import, so a derived per-gene root resolved to {} and every gene was
@@ -90,6 +95,7 @@ from biofeaturefactory.lib.utility import (
 # Import for NSP3 prediction
 import pandas as pd
 import numpy as np
+import torch
 
 # Add local nsp3 git clone to sys.path so it's importable from any working directory
 _nsp3_package_dir = Path(__file__).resolve().parent / "nsp3" / "nsp3"
@@ -111,34 +117,141 @@ def _bounded_esm_forward(self, batch_tokens, padding_length=None):
     return embeddings[:, 1:-1, :]
 
 
-# Patch nsp3's BasePredict to use strict=False when loading state_dict.
-# The ESM-1b checkpoint may contain extra keys (e.g., emb_layer_norm_before)
-# not present in the model constructed from config.
-# Wrapped in try/except so future nsp3 updates that fix this upstream won't break the pipeline.
 try:
     import nsp3.base.base_predict as _base_predict
 
     def _patched_base_init(self, model, model_data, *args, **kwargs):
+        """Restore checkpoint-backed ESM normalization before strict state loading."""
         import torch as _torch
+        from esm.modules import ESM1bLayerNorm
+        from nsp3.embeddings.esm1b import ESM1bEmbedding
+
         super(_base_predict.BasePredict, self).__init__()
         self.model = model
-        # Load the checkpoint onto the available device: CUDA if present, else
-        # CPU. (Inference device itself is governed by nsp3's setup_device /
-        # SecondaryFeatures.inference; this just avoids a needless CPU->GPU copy
-        # on GPU hosts and keeps deserialization device-aware.)
-        _device = _torch.device('cuda' if _torch.cuda.is_available() else 'cpu')
-        print(f"Loading model onto {_device.type}... \n")
-        data = _torch.load(model_data, map_location=_device)
-        self.model.load_state_dict(data['state_dict'], strict=False)
-        self.model.eval()
-        from nsp3.embeddings.esm1b import ESM1bEmbedding
-        for module in self.model.modules():
+        print("Loading checkpoint on CPU... \n")
+        data = _torch.load(model_data, map_location='cpu', weights_only=False)
+        state_dict = data['state_dict']
+        for module_name, module in self.model.named_modules():
             if isinstance(module, ESM1bEmbedding):
-                module.forward = MethodType(_bounded_esm_forward, module)
+                prefix = f"{module_name}." if module_name else ""
+                normalization_prefix = f"{prefix}model.emb_layer_norm_before."
+                if (any(normalization_prefix + parameter in state_dict
+                        for parameter in ("weight", "bias"))
+                        and module.model.emb_layer_norm_before is None):
+                    embedding_weight = module.model.embed_tokens.weight
+                    module.model.emb_layer_norm_before = ESM1bLayerNorm(
+                        embedding_weight.shape[1]
+                    ).to(device=embedding_weight.device, dtype=embedding_weight.dtype)
+                module.forward = MethodType(_bounded_esm_forward, proxy(module))
+        self.model.load_state_dict(state_dict, strict=True)
+        self.model.eval()
 
     _base_predict.BasePredict.__init__ = _patched_base_init
 except Exception:
     pass
+
+
+def _load_nsp3_predictor(model_path, config_path, device):
+    config = deepcopy(load_config(config_path))
+    config['arch']['args'].pop('embedding_pretrained', None)
+    model = nsp3_main.get_instance(nsp3_main.module_arch, 'arch', config)
+    predictor = nsp3_main.module_pred.SecondaryFeatures(model, model_path)
+    predictor.model.to(device)
+    predictor.model.eval()
+    print(f"Using {device}; reusing this model for all batches and genes.\n")
+    return predictor
+
+
+class _NSP3Runtime:
+    """Own one predictor and calibrate CUDA batches from observed inference peaks."""
+
+    def __init__(self, model_path, config_path):
+        self.model_path = model_path
+        self.config_path = config_path
+        self.device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
+        self.predictor = None
+        self._peak_per_sequence = 0.0
+        self._peak_per_token_squared = 0.0
+        self.last_peak_bytes = 0
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc_value, traceback):
+        self.close()
+
+    def load(self):
+        if self.predictor is None:
+            self.predictor = _load_nsp3_predictor(
+                self.model_path, self.config_path, self.device)
+
+    def choose_batch_size(self, batch_sequences, upper_limit):
+        self.load()
+        limit = min(len(batch_sequences), upper_limit, 25)
+        for index, (_, sequence) in enumerate(batch_sequences[:limit]):
+            if len(sequence) != len(batch_sequences[0][1]):
+                limit = index
+                break
+        if self.device.type != 'cuda' or limit == 0:
+            return limit
+        if self._peak_per_sequence == 0:
+            return 1
+        free_bytes, _ = torch.cuda.mem_get_info(self.device)
+        cached_bytes = max(0, torch.cuda.memory_reserved(self.device)
+                           - torch.cuda.memory_allocated(self.device))
+        budget = (free_bytes + cached_bytes) * 0.8
+        for count in range(limit, 0, -1):
+            tokens = max(len(sequence) + 2 for _, sequence in batch_sequences[:count])
+            per_sequence = max(self._peak_per_sequence,
+                               self._peak_per_token_squared * tokens * tokens)
+            if count * per_sequence * 1.25 <= budget:
+                return count
+        return 1
+
+    def predict(self, fasta_path, batch_sequences):
+        self.load()
+        if self.device.type == 'cuda':
+            torch.cuda.synchronize(self.device)
+            baseline = torch.cuda.memory_allocated(self.device)
+            torch.cuda.reset_peak_memory_stats(self.device)
+        with torch.no_grad():
+            result = self.predictor(str(fasta_path))
+        if self.device.type == 'cuda':
+            torch.cuda.synchronize(self.device)
+            self.last_peak_bytes = torch.cuda.max_memory_allocated(self.device)
+            per_sequence = max(1, self.last_peak_bytes - baseline) / len(batch_sequences)
+            tokens = max(len(sequence) + 2 for _, sequence in batch_sequences)
+            self._peak_per_sequence = max(self._peak_per_sequence, per_sequence)
+            self._peak_per_token_squared = max(
+                self._peak_per_token_squared, per_sequence / (tokens * tokens))
+        return result
+
+    def release_unused_memory(self):
+        if self.device.type == 'cuda':
+            with torch.cuda.device(self.device):
+                torch.cuda.empty_cache()
+
+    def close(self):
+        self.predictor = None
+        self.release_unused_memory()
+
+
+def _collect_nsp3_predictions(result):
+    identifiers_all, sequences_all, predictions_all = result
+    if identifiers_all and not isinstance(identifiers_all[0], list):
+        identifiers_all = [identifiers_all]
+        sequences_all = [sequences_all]
+        predictions_all = [predictions_all]
+    predictions = {}
+    for chunk_index, identifiers in enumerate(identifiers_all):
+        sequences = sequences_all[chunk_index]
+        tensors = predictions_all[chunk_index]
+        for sequence_index, identifier in enumerate(identifiers):
+            predictions[identifier] = {
+                position: extract_residue_predictions(tensors, sequence_index, position, residue)
+                for position, residue in enumerate(sequences[sequence_index])
+            }
+    return predictions
 
 
 # Q8/Q3 class labels
@@ -242,7 +355,8 @@ def extract_residue_predictions(predictions_batch, seq_idx, pos_idx, residue):
     }
 
 
-def run_nsp3_prediction(fasta_file, model_path, config_path, batch_size=100, verbose=False, max_seq_length=1500):
+def run_nsp3_prediction(fasta_file, model_path, config_path, batch_size=100, verbose=False,
+                        max_seq_length=1500, runtime=None):
     """
     Run NetSurfP-3.0 prediction using the nsp3 Python library.
 
@@ -252,9 +366,10 @@ def run_nsp3_prediction(fasta_file, model_path, config_path, batch_size=100, ver
         fasta_file: Input FASTA file with AA sequences
         model_path: Path to trained NSP3 model checkpoint
         config_path: Path to NSP3 config YAML file
-        batch_size: Number of sequences to process per batch (default: 100)
+        batch_size: Upper bound on sequences per batch (default: 100)
         verbose: Print batch progress
         max_seq_length: Requested ceiling; capped at 1021 to avoid upstream ESM window stitching.
+        runtime: Optional predictor owner shared across genes; otherwise scoped to this call.
 
     Returns:
         dict: {sequence_id: {pos: {residue, q8_probs, q3_probs, disorder_pf, disorder_pt, rsa, asa, phi, psi, q8_class, q3_class}}}
@@ -299,124 +414,54 @@ def run_nsp3_prediction(fasta_file, model_path, config_path, batch_size=100, ver
 
     total_chunks = len(processed_sequences)
     all_predictions_raw = {}
-    config = load_config(config_path)
-
-    # Process chunks in batches
-    num_batches = (total_chunks + batch_size - 1) // batch_size
-
-    for batch_num, batch_start in enumerate(range(0, total_chunks, batch_size), 1):
-        batch_end = min(batch_start + batch_size, total_chunks)
-        batch_sequences = processed_sequences[batch_start:batch_end]
-
-        if verbose:
-            print(
-                f"    Batch {batch_num}/{num_batches}: processing chunks {batch_start + 1}-{batch_end} of {total_chunks}")
-
-        # Create temporary FASTA for this batch
-        batch_fasta = tempfile.NamedTemporaryFile(mode='w', suffix='.fasta', delete=False)
-        try:
-            for chunk_id, chunk_seq in batch_sequences:
-                batch_fasta.write(f">{chunk_id}\n{chunk_seq}\n")
-            batch_fasta.close()
-
-            # Run prediction on batch with error handling
+    owner = _NSP3Runtime(model_path, config_path) if runtime is None else nullcontext(runtime)
+    with owner as active_runtime:
+        batch_start = 0
+        batch_limit = batch_size
+        while batch_start < total_chunks:
+            remaining = processed_sequences[batch_start:batch_start + min(batch_limit, 25)]
+            selected_size = active_runtime.choose_batch_size(remaining, batch_limit)
+            batch_sequences = remaining[:selected_size]
+            batch_end = batch_start + selected_size
+            if verbose:
+                print(f"    Processing chunks {batch_start + 1}-{batch_end} of {total_chunks}")
+            batch_fasta = tempfile.NamedTemporaryFile(mode='w', suffix='.fasta', delete=False)
+            result = None
+            retry = False
             try:
-                result = nsp3_main.predict(config, "SecondaryFeatures", model_path, batch_fasta.name)
-
-                # Process results
-                # NSP3 returns (identifiers_list, sequences_list, predictions_list)
-                # SecondaryFeatures.__call__ internally chunks by 25, returning:
-                #   identifiers = [[chunk0_ids], [chunk1_ids], ...]
-                #   sequences   = [[chunk0_seqs], [chunk1_seqs], ...]
-                #   predictions = [[chunk0_tensors], [chunk1_tensors], ...]
-                # Each chunk's tensors have their own seq_idx space (0..len(chunk)-1)
-                identifiers_all = result[0]
-                sequences_all = result[1]
-                predictions_all = result[2]
-
-                # Normalize to list-of-chunks if not already nested
-                if identifiers_all and not isinstance(identifiers_all[0], list):
-                    identifiers_all = [identifiers_all]
-                    sequences_all = [sequences_all]
-                    predictions_all = [predictions_all]
-
-                # Process each NSP3 internal chunk
-                for chunk_idx in range(len(identifiers_all)):
-                    identifiers_chunk = identifiers_all[chunk_idx]
-                    sequences_chunk = sequences_all[chunk_idx]
-                    predictions_chunk = predictions_all[chunk_idx]
-
-                    for seq_idx in range(len(identifiers_chunk)):
-                        chunk_id = identifiers_chunk[seq_idx]
-                        sequence = sequences_chunk[seq_idx]
-                        seq_len = len(sequence)
-
-                        per_residue_predictions = {}
-
-                        for pos_idx in range(seq_len):
-                            residue = sequence[pos_idx]
-                            per_residue_predictions[pos_idx] = extract_residue_predictions(
-                                predictions_chunk, seq_idx, pos_idx, residue
-                            )
-
-                        all_predictions_raw[chunk_id] = per_residue_predictions
-
-            except RuntimeError as e:
-                if "exceeds dimension size" in str(e) or "start" in str(e):
-                    print(
-                        f"    Warning: Batch {batch_num} contains sequences too long for model, reducing batch size...")
-                    # Try processing sequences one by one
-                    for chunk_id, chunk_seq in batch_sequences:
-                        single_fasta = tempfile.NamedTemporaryFile(mode='w', suffix='.fasta', delete=False)
-                        try:
-                            single_fasta.write(f">{chunk_id}\n{chunk_seq}\n")
-                            single_fasta.close()
-
-                            try:
-                                result = nsp3_main.predict(config, "SecondaryFeatures", model_path, single_fasta.name)
-                                # Process single result (same chunk iteration as above)
-                                identifiers_all = result[0]
-                                sequences_all = result[1]
-                                predictions_all = result[2]
-
-                                if identifiers_all and not isinstance(identifiers_all[0], list):
-                                    identifiers_all = [identifiers_all]
-                                    sequences_all = [sequences_all]
-                                    predictions_all = [predictions_all]
-
-                                for ci in range(len(identifiers_all)):
-                                    ids_c = identifiers_all[ci]
-                                    seqs_c = sequences_all[ci]
-                                    preds_c = predictions_all[ci]
-
-                                    for seq_idx in range(len(ids_c)):
-                                        chunk_id = ids_c[seq_idx]
-                                        sequence = seqs_c[seq_idx]
-                                        seq_len = len(sequence)
-
-                                        per_residue_predictions = {}
-
-                                        for pos_idx in range(seq_len):
-                                            residue = sequence[pos_idx]
-                                            per_residue_predictions[pos_idx] = extract_residue_predictions(
-                                                preds_c, seq_idx, pos_idx, residue
-                                            )
-
-                                        all_predictions_raw[chunk_id] = per_residue_predictions
-
-                            except Exception as e2:
-                                raise RuntimeError(f"Prediction failed for {chunk_id}: {e2}") from e2
-
-                        finally:
-                            if os.path.exists(single_fasta.name):
-                                os.unlink(single_fasta.name)
-                else:
-                    raise
-
-        finally:
-            # Clean up temporary batch file
-            if os.path.exists(batch_fasta.name):
-                os.unlink(batch_fasta.name)
+                for chunk_id, chunk_seq in batch_sequences:
+                    batch_fasta.write(f">{chunk_id}\n{chunk_seq}\n")
+                batch_fasta.close()
+                try:
+                    result = active_runtime.predict(batch_fasta.name, batch_sequences)
+                except RuntimeError as error:
+                    if not (isinstance(error, torch.cuda.OutOfMemoryError)
+                            or 'CUDA out of memory' in str(error)):
+                        raise
+                    if selected_size == 1:
+                        raise RuntimeError(
+                            f"CUDA out of memory for {batch_sequences[0][0]} at batch size 1 "
+                            "with gradients disabled; no complete predictions for this gene. "
+                            f"{error}") from error
+                    retry = True
+                if not retry:
+                    all_predictions_raw.update(_collect_nsp3_predictions(result))
+            finally:
+                batch_fasta.close()
+                if os.path.exists(batch_fasta.name):
+                    os.unlink(batch_fasta.name)
+                result = None
+            if retry:
+                active_runtime.release_unused_memory()
+                batch_limit = max(1, selected_size // 2)
+                print(f"    CUDA OOM: retrying the same chunks with batch size <= {batch_limit}",
+                      file=sys.stderr)
+                continue
+            if verbose and active_runtime.device.type == 'cuda':
+                allocated = torch.cuda.memory_allocated(active_runtime.device) / (1024 ** 3)
+                peak = active_runtime.last_peak_bytes / (1024 ** 3)
+                print(f"    CUDA memory: batch peak {peak:.2f} GiB; retained {allocated:.2f} GiB")
+            batch_start = batch_end
 
     # Reassemble chunked predictions
     all_predictions = {}
@@ -1158,9 +1203,11 @@ def main():
     # kept as optional trailing args so existing invocations still parse; the flag
     # wins when both are given.
     parser.add_argument('-i', '--input', dest='input_flag', metavar='INPUT',
+                        action=InputPathAction,
+                        extensions=('.fasta', '.fa', '.fas', '.fna', '.faa'),
                         help='DIRECTORY MODE: variant_mapping output root '
                              '(<root>/<GENE>/fastas/ + <root>/<GENE>/mappings/). '
-                             'Also accepts a single WT FASTA or a flat directory of them '
+                             'FILE MODE: a single WT FASTA '
                              '(nucleotide or amino acid).')
     parser.add_argument('-o', '--output', dest='output_flag', metavar='OUTPUT',
                         help='Output base directory; writes one set per gene at '
@@ -1177,6 +1224,7 @@ def main():
 
     # Processing options
     parser.add_argument('-m', '--mutation-dir',
+                        action=InputPathAction, extensions=('.csv', '.tsv', '.txt'),
                         help='Mutation file or directory. For --input-type=nt: NT mutations '
                              '(A1002T, and non-SNV forms such as ACAA1002A, T28TGGT). '
                              'For --input-type=aa: AA mutations (M334V, KE100K). '
@@ -1188,13 +1236,17 @@ def main():
     parser.add_argument('-l', '--log',
                         help='Validation log file to skip failed mutations')
     parser.add_argument('-bs', '--batch-size', type=int, default=100,
-                        help='Number of sequences to process per NSP3 batch (default: 100)')
+                        help='Upper bound on batch size (default: 100); capped at 25 and '
+                             'adapted to sequence lengths and measured CUDA memory')
     parser.add_argument('--max-seq-length', type=int, default=1500,
                         help='Requested chunk ceiling (default: 1500); capped at 1021 to avoid upstream ESM stitching')
     parser.add_argument('-v', '--verbose', action='store_true',
                         help='Enable verbose output')
 
     args = parser.parse_args()
+
+    args.input_flag = args.input_flag or args.input
+    validate_input_mode(parser, args, required_file_inputs=('mutation_dir',))
 
     # Flag wins over the positional. Both are folded into args.input/args.output so
     # nothing downstream has to know which form the caller used.
@@ -1241,6 +1293,11 @@ def main():
                                               label="netsurfp3")
     mutation_files = discover_mutation_files(args.mutation_dir) if args.mutation_dir else {}
 
+    with _NSP3Runtime(args.model, args.config) as runtime:
+        return _process_genes(args, input_path, fasta_files, mutation_files, failure_map, runtime)
+
+
+def _process_genes(args, input_path, fasta_files, mutation_files, failure_map, runtime):
     failures = []
     completed_genes = 0
 
@@ -1399,7 +1456,8 @@ def main():
                 args.config,
                 batch_size=args.batch_size,
                 verbose=args.verbose,
-                max_seq_length=args.max_seq_length
+                max_seq_length=args.max_seq_length,
+                runtime=runtime,
             )
 
             if args.verbose:

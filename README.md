@@ -68,7 +68,7 @@ The two MSA generators add to the same tree:
 
 ```bash
 python3 biofeaturefactory/core/msa_generation_pipeline.py -f mapped/ -d uniref90.fasta -j jackhmmer -o mapped/
-python3 biofeaturefactory/core/codon_msa_pipeline.py      -f mapped/ -d Bio_DBs/ -o mapped/
+python3 biofeaturefactory/core/codon_msa_pipeline.py      -i mapped/ -d Bio_DBs/ -o mapped/
 ```
 
 ```
@@ -92,6 +92,25 @@ python3 biofeaturefactory/spliceai/spliceai_pipeline_controller.py -mp mapped/ -
 Supply mapping paths explicitly only when your files live outside this layout;
 those flags are marked **FILE MODE ONLY** in each `--help`. In directory mode
 they are optional.
+
+For pipeline options accepting either a file or a directory, the first supplied
+input option selects the mode. Other dual-purpose inputs must use the same mode:
+
+- **File mode:** provide an existing input file and explicit files for required
+  mutation or mapping inputs. A FASTA is never used as its own mutation file.
+- **Directory mode:** provide the parent `<dir>` containing `<gene>/...`, such as
+  `mapped/`. Do not provide `mapped/PAM/`, `mapped/PAM/fastas/`, or a tool's
+  subdirectory. Existing automatic discovery of companion inputs is retained.
+
+Output directories, reference databases, model checkpoints, executable locations,
+and other options with their own fixed roles do not select the mode. File names
+must use a format accepted by the corresponding input option.
+
+```bash
+python3 biofeaturefactory/codon_usage/codon_usage_pipeline.py \
+  -f mapped/PAM/fastas/PAM.fasta \
+  -m mapped/PAM/mappings/mutations/PAM_mutations.csv -o results/
+```
 
 ### 4. Join
 

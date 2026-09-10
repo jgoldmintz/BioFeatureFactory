@@ -36,6 +36,8 @@ import platform
 from pathlib import Path
 
 from biofeaturefactory.lib.utility import (
+    InputPathAction,
+    validate_input_mode,
     derive_mapping_root,
     mint_pkey,
     token_from_name,
@@ -1748,9 +1750,11 @@ def main():
     # kept as hidden optional trailing args so existing invocations still parse;
     # the flag wins when both are given.
     parser.add_argument('-i', '--input', dest='input_flag', metavar='INPUT',
+                        action=InputPathAction,
+                        extensions=('.fasta', '.fa', '.fas', '.fna', '.faa'),
                         help='DIRECTORY MODE: variant_mapping output root '
                              '(<root>/<GENE>/fastas/ + <root>/<GENE>/mappings/). '
-                             'Also accepts a single WT FASTA or a flat directory of them.')
+                             'FILE MODE: a single WT FASTA.')
     parser.add_argument('-o', '--output', dest='output_flag', metavar='OUTPUT',
                         help='Output base directory; writes <output>/<GENE>/NetPhos/<GENE>.tsv, .events.tsv, .sites.tsv')
     parser.add_argument('input', nargs='?', help=argparse.SUPPRESS)
@@ -1760,7 +1764,8 @@ def main():
     parser.add_argument('-yo', '--yes-only', action='store_true',
                         help='Only include predictions marked as YES')
     parser.add_argument('-md', '--mapping-dir',
-                        help='Directory or single CSV file containing mutation mapping(s)')
+                        action=InputPathAction, extensions=('.csv', '.tsv'),
+                        help='Mapping CSV file in file mode, or parent gene-tree root in directory mode')
     parser.add_argument('-l', '--log',
                         help='Validation log file or directory to skip failed mutations')
     parser.add_argument('-wh', '--wt-header', default='ORF',
@@ -1799,6 +1804,10 @@ def main():
     # nothing downstream has to know which form the caller used.
     args.input = args.input_flag or args.input
     args.output = args.output_flag or args.output
+
+    args.input_flag = args.input
+    validate_input_mode(parser, args, required_file_inputs=('mapping_dir',))
+    args.input = args.input_flag
 
     if not args.input or not args.output:
         parser.error("input and output arguments are required (unless using --clear-cache)")

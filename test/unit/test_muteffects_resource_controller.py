@@ -156,9 +156,17 @@ def test_explicit_prebuilt_params_are_inventoried_and_skip_training_dependencies
     options = []
     supplied = {}
     for side in ("protein", "codon"):
-        params = _write(inputs["source"].parent / f"explicit-{side}" / f"NPM1.{side}_adabm_params", "h 0 A 0.25\n")
+        params_root = inputs["source"].parent / f"explicit-{side}"
+        msa_directory = "MSA" if side == "protein" else "CodonMSA"
+        params = _write(params_root / "NPM1" / msa_directory / f"NPM1.{side}_adabm_params", "h 0 A 0.25\n")
         supplied[side] = params
-        options.extend([f"--adabmdca-{side}-params", params.parent if directory_mode else params])
+        options.extend([f"--adabmdca-{side}-params", params_root if directory_mode else params])
+    if not directory_mode:
+        inputs = dict(inputs, source=inputs["files"]["fasta"])
+        options.extend([
+            "--mutations", inputs["files"]["mutations"],
+            "--msa", inputs["files"]["msa"], "--codon-msa", inputs["files"]["codon_msa"],
+        ])
     args = _parse(monkeypatch, inputs, *options)
     config, plans, manifest, genes = _prepare(args)
     for plan in plans:

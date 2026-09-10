@@ -49,6 +49,8 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 CG_DIR = SCRIPT_DIR / "cg_cotrans"
 
 from biofeaturefactory.lib.utility import (
+    InputPathAction,
+    validate_input_mode,
     derive_mutations_root,
     discover_msa_files,
     discover_mutation_files,
@@ -1140,17 +1142,16 @@ Examples:
     --msa /path/to/codon_msa.fasta \\
     --usage /path/to/codon_usage.p.gz \\
     --wt-gi "focus_sequence_id" \\
-    --fasta /path/to/gene.fasta \\
     --mutations /path/to/mutations.csv \\
     --output results/
 
   # Directory mode
   python rare_codon_pipeline.py \\
-    --fasta fastas/ --msa msas/ --usage codon_usage.p.gz \\
-    --mutations mutations/ --output results/
+    --msa /path/to/out/ --usage codon_usage.p.gz \\
+    --output results/
 
 Required preprocessing:
-  1. Generate codon-aware MSA (use msa/codon_msa_pipeline.py)
+  1. Generate codon-aware MSA (use core/codon_msa_pipeline.py)
   2. Optional: provide --usage codon_usage.p.gz (auto-generated if omitted)
 
 Copyright notice:
@@ -1160,8 +1161,9 @@ Copyright notice:
     )
 
     # MSA and codon usage inputs
-    parser.add_argument('-a', '--msa', required=True,
-                        help='Path to codon-aware MSA FASTA file or directory')
+    parser.add_argument('-a', '--msa', required=True, action=InputPathAction,
+                        extensions=('.fasta', '.fa', '.fas', '.fna', '.a2m', '.a3m'),
+                        help='Codon-aware MSA FASTA file or parent output directory containing gene subdirectories')
     parser.add_argument('-u', '--usage', help='Path to codon usage .p.gz file (optional; auto-built if missing)')
     parser.add_argument('-wg', '--wt-gi', help='Identifier for WT/focus sequence in MSA (single-gene mode)')
 
@@ -1169,8 +1171,9 @@ Copyright notice:
     # --fasta was removed: its only informational job was to supply the WT ORF,
     # and the MSA already carries it as the wt_gi record. Everything else the flag
     # did (enumerating genes in directory mode) the MSA resolver does too.
-    parser.add_argument('-m', '--mutations', required=False,
-                        help='Mutations CSV file or directory of CSV files')
+    parser.add_argument('-m', '--mutations', required=False, action=InputPathAction,
+                        extensions=('.csv', '.tsv', '.txt'),
+                        help='Mutation-list file (.csv/.tsv/.txt) or parent output directory containing gene subdirectories')
     parser.add_argument('-vl', '--validation-log', help='Validation log for filtering')
 
     # Analysis parameters
@@ -1198,13 +1201,7 @@ Copyright notice:
     parser.add_argument('--output', '-o', required=True, help='Output base directory')
 
     args = parser.parse_args()
-
-    # Directory mode: <root>/<GENE>/mappings/mutations/ sits beside the input,
-
-    # so the root supplies both. Explicit --mutations always wins; FILE MODE and
-
-    # any layout outside the tree are unaffected.
-
+    validate_input_mode(parser, args, required_file_inputs=('mutations',))
     args.mutations = derive_mutations_root(args.mutations, args.msa, "rare_codon")
 
     if not args.mutations:

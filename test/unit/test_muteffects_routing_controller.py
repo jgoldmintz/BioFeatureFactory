@@ -80,7 +80,7 @@ def test_oversized_unused_codon_does_not_abort_protein_run(gene_input, monkeypat
 def test_explicit_mode_overrides_and_warns(gene_input, monkeypatch, capsys, option, source, mutations, side, warning):
     root, files, hardware, output = gene_input
     files["mutations"].write_text("mutant\n" + mutations)
-    args = parse_cli(monkeypatch, gene_input, option, files[source], "--resource-plan-only")
+    args = parse_cli(monkeypatch, gene_input, option, root, "--resource-plan-only")
     capsys.readouterr()
     controller.run_controller(args)
     printed = capsys.readouterr()
@@ -93,7 +93,7 @@ def test_explicit_mode_overrides_and_warns(gene_input, monkeypatch, capsys, opti
 
 def test_both_explicit_sources_enable_both_sides(gene_input, monkeypatch):
     root, files, hardware, output = gene_input
-    args = parse_cli(monkeypatch, gene_input, "--msa", files["msa"], "-cm", files["codon_msa"])
+    args = parse_cli(monkeypatch, gene_input, "--msa", root, "-cm", root)
     manifest = controller.build_manifest(["GENE"], args)
     config, plans = controller.prepare_resource_plans(args, manifest, ["GENE"])
     assert {plan["side"] for plan in plans} == {"protein", "codon"}
@@ -102,11 +102,11 @@ def test_both_explicit_sources_enable_both_sides(gene_input, monkeypatch):
 
 def test_mode_changes_invalidate_codon_fingerprint(gene_input, monkeypatch):
     root, files, hardware, output = gene_input
-    args = parse_cli(monkeypatch, gene_input, "--msa", files["msa"], "-cm", files["codon_msa"])
+    args = parse_cli(monkeypatch, gene_input, "--msa", root, "-cm", root)
     manifest = controller.build_manifest(["GENE"], args)
     config, plans = controller.prepare_resource_plans(args, manifest, ["GENE"])
     combined = next(plan for plan in plans if plan["side"] == "codon")
-    args = parse_cli(monkeypatch, gene_input, "-cm", files["codon_msa"])
+    args = parse_cli(monkeypatch, gene_input, "-cm", root)
     manifest = controller.build_manifest(["GENE"], args)
     config, plans = controller.prepare_resource_plans(args, manifest, ["GENE"])
     assert plans[0]["fingerprint"] != combined["fingerprint"]

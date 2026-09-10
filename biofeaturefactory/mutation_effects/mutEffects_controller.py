@@ -52,6 +52,8 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from biofeaturefactory.lib.utility import (
+    InputPathAction,
+    validate_input_mode,
     derive_mutations_root,
     discover_fasta_files,
     discover_mutation_files,
@@ -232,10 +234,12 @@ def parse_args() -> argparse.Namespace:
     )
 
     # Required
-    parser.add_argument("-f", "--fasta", type=Path, required=True,
-                        help="ORF FASTA file or directory of per-gene FASTA files")
-    parser.add_argument("-m", "--mutations", type=Path, required=False,
-                        help="Mutations CSV file or directory of per-gene CSVs")
+    parser.add_argument("-f", "--fasta", type=Path, required=True, action=InputPathAction,
+                        extensions=(".fasta", ".fa", ".fas", ".fna", ".faa"),
+                        help="ORF FASTA file or parent output directory containing gene subdirectories")
+    parser.add_argument("-m", "--mutations", type=Path, required=False, action=InputPathAction,
+                        extensions=(".csv", ".tsv", ".txt"),
+                        help="Mutation-list file (.csv/.tsv/.txt) or parent output directory containing gene subdirectories")
     parser.add_argument("-pb", "--plmc-binary", type=str,
                         help="Path to plmc executable (required when the EVmutation backend runs; "
                              "omit only when --adabmdca-only is set)")
@@ -247,10 +251,12 @@ def parse_args() -> argparse.Namespace:
                         help="Output base directory")
 
     # Pre-built MSA sources (optional, skips generation for genes that have them)
-    parser.add_argument("-ms", "--msa", type=Path,
+    parser.add_argument("-ms", "--msa", type=Path, action=InputPathAction,
+                        extensions=(".a2m", ".a3m", ".fasta", ".fa", ".fas", ".fna", ".faa"),
                         help="Protein MSA source; without -cm explicitly selects protein-only mode. "
                              "Without either flag, select per gene and discover MSAs under --output/--fasta.")
-    parser.add_argument("-cm", "--codon-msa", type=Path,
+    parser.add_argument("-cm", "--codon-msa", type=Path, action=InputPathAction,
+                        extensions=(".fasta", ".fa", ".fas", ".fna", ".a2m", ".a3m"),
                         help="Codon MSA source; without --msa explicitly selects codon-only mode, "
                              "including codon-level missense scoring. Both flags enable both sides.")
 
@@ -266,9 +272,11 @@ def parse_args() -> argparse.Namespace:
                         help="Protein aligner (default: mafft)")
 
     # Pre-built model params
-    parser.add_argument("-mp", "--model-params", type=Path,
+    parser.add_argument("-mp", "--model-params", type=Path, action=InputPathAction,
+                        extensions=None,
                         help="Protein model params file or directory")
-    parser.add_argument("-cmp", "--codon-model-params", type=Path,
+    parser.add_argument("-cmp", "--codon-model-params", type=Path, action=InputPathAction,
+                        extensions=None,
                         help="Codon model params file or directory")
 
     # Backend selection -- both run in parallel by default.
@@ -290,10 +298,12 @@ def parse_args() -> argparse.Namespace:
                              "Synonymous + stop variants route to the protein TSV instead.")
 
     # adabmDCA pre-built params
-    parser.add_argument("-app", "--adabmdca-protein-params", type=Path,
+    parser.add_argument("-app", "--adabmdca-protein-params", type=Path, action=InputPathAction,
+                        extensions=None,
                         help="Pre-built adabmDCA protein params file or directory "
                              "(default: <output>/adabmdca_protein_params/{GENE}.protein_adabm_params)")
-    parser.add_argument("-acp", "--adabmdca-codon-params", type=Path,
+    parser.add_argument("-acp", "--adabmdca-codon-params", type=Path, action=InputPathAction,
+                        extensions=None,
                         help="Pre-built adabmDCA codon params file or directory "
                              "(default: <output>/adabmdca_codon_params/{GENE}.codon_adabm_params)")
 
@@ -359,6 +369,7 @@ def parse_args() -> argparse.Namespace:
                         help="Minimum host RAM request per EVmutation task in GiB; default: automatic model/workspace estimate")
 
     args = parser.parse_args()
+    validate_input_mode(parser, args, required_file_inputs=("mutations",))
     if args.adabmdca_device not in {"auto", "cpu", "cuda"}:
         if not args.adabmdca_device.startswith("cuda:") or not args.adabmdca_device[5:].isdigit():
             parser.error("--adabmdca-device must be auto, cpu, cuda or cuda:N")
@@ -375,8 +386,6 @@ def parse_args() -> argparse.Namespace:
             parser.error(str(error))
     if args.resource_memory_margin < 1:
         parser.error("--resource-memory-margin cannot be less than one")
-
-    # One root supplies both; see lib/utility.derive_mutations_root.
 
     args.mutations = derive_mutations_root(args.mutations, args.fasta, label="mutEffects")
 

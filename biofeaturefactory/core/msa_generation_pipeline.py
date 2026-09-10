@@ -36,6 +36,7 @@ from Bio import SeqIO
 from Bio.Seq import Seq
 
 from biofeaturefactory.lib.utility import (
+    InputPathAction, validate_input_mode,
     prepare_protein_query, extract_gene_from_filename, discover_fasta_files,
     run_jackhmmer, parse_stockholm, stockholm_to_a2m,
     filter_msa_by_gaps, compute_sequence_weights, compute_neff,
@@ -226,7 +227,7 @@ def main():
 Examples:
   # Single FASTA
   python msa_generation_pipeline.py \\
-    -i /path/to/out/ \\
+    -i /path/to/GENE.fasta \\
     -d /path/to/uniref90.fasta \\
     -j jackhmmer \\
     -o results/
@@ -234,7 +235,7 @@ Examples:
   #         results/GENE/MSA/GENE.msa.stats.json
 
   # Directory: a variant_mapping output root, one MSA per gene found at
-  # <root>/<GENE>/fastas/<GENE>.fasta. A flat directory of FASTAs also works.
+  # <root>/<GENE>/fastas/<GENE>.fasta.
   python msa_generation_pipeline.py \\
     -f out/ \\
     -d /path/to/uniref90.fasta \\
@@ -263,10 +264,13 @@ Quality thresholds:
     # understood a variant_mapping root; only the flag NAME differed, so the same
     # invocation that works everywhere else failed here on an unrecognised -i.
     parser.add_argument('-i', '--input', dest='input_root', metavar='INPUT',
+                        action=InputPathAction,
+                        extensions=('.fasta', '.fa', '.fas', '.fna', '.faa'),
                         help='DIRECTORY MODE: variant_mapping output root. Runs every '
                              'gene found under <root>/<GENE>/fastas/. Also accepts a '
-                             'flat directory of FASTAs, or a single FASTA file.')
-    parser.add_argument('--fasta', '-f',
+                             'single FASTA file.')
+    parser.add_argument('--fasta', '-f', action=InputPathAction,
+                        extensions=('.fasta', '.fa', '.fas', '.fna', '.faa'),
                         help='FILE MODE: one query FASTA. Equivalent to --input; kept '
                              'so existing invocations still parse. --input wins when '
                              'both are given.')
@@ -305,6 +309,7 @@ Quality thresholds:
     # Flag wins over the legacy form; everything downstream reads args.fasta and
     # so does not have to know which one the caller used.
     args.fasta = args.input_root or args.fasta
+    validate_input_mode(parser, args)
 
     # Validate inputs
     if not args.fasta:

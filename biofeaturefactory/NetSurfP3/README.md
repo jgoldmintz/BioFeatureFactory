@@ -51,33 +51,53 @@ python netsurfp3_pipeline.py -i out/ -o results/ \
     -M /path/to/checkpoint.pth \
     -c NetSurfP3/nsp3/experiments/netsurfp_3/CNNbLSTM/CNNbLSTM.yml
 
-# Flat FASTA directory + explicit mutation directory
-python netsurfp3_pipeline.py -i FASTA_files/nt/ -o results/ \
-    -m mutations/aa/ -it aa \
+# File mode: explicit FASTA and mutation file
+python netsurfp3_pipeline.py -i out/PAM/fastas/PAM.fasta -o results/ \
+    -m out/PAM/mappings/mutations/PAM_mutations.csv -it nt \
     -M /path/to/checkpoint.pth -c .../CNNbLSTM.yml -l validation.log
 ```
 
 In directory mode `-i` is the `variant_mapping` output root (`<root>/<GENE>/fastas/` and
 `<root>/<GENE>/mappings/`); the gene is taken from the directory name. `input` and `output`
-are also accepted positionally.
+are also accepted positionally. Supply the parent root, not `out/PAM/` or
+`out/PAM/fastas/`. File mode requires an explicit mutation file; file and directory
+inputs cannot be mixed. Model and configuration paths do not select the input mode.
 
 ## Arguments
 
 | Flag | Default | Description |
 |------|---------|-------------|
-| `-i, --input` | -- | variant_mapping output root, flat FASTA directory, or single FASTA |
+| `-i, --input` | -- | variant_mapping parent output root or single FASTA |
 | `-o, --output` | -- | Output base directory |
 | `-M, --model` | required | Trained nsp3 checkpoint |
 | `-c, --config` | required | nsp3 config YAML matching the checkpoint |
-| `-m, --mutation-dir` | required in practice | Mutation file or directory |
+| `-m, --mutation-dir` | derived in directory mode | Explicit mutation file in file mode, or parent gene-tree root |
 | `-it, --input-type` | auto | `nt` or `aa`. Omitted: auto-detected from the WT sequence via `detect_alphabet` |
 | `-l, --log` | -- | Validation log; skips failed mutations |
-| `-bs, --batch-size` | `100` | Sequences per NSP3 batch |
+| `-bs, --batch-size` | `100` | Batch-size ceiling; limited to 25 and reduced according to CUDA memory and sequence lengths |
 | `--max-seq-length` | `1500` | Requested chunk ceiling, capped at 1021 to avoid upstream ESM stitching |
 | `-v, --verbose` | off | Verbose output |
 
 With `-it nt` the mutation CSVs hold NT tokens (`A1002T`, and non-SNV forms such as `ACAA1002A`,
 `T28TGGT`); with `-it aa` they hold AA tokens (`M334V`, `KE100K`). Non-SNV tokens are processed by default.
+
+### Inference memory
+
+The wrapper loads the checkpoint on CPU, restores checkpoint-backed ESM normalization,
+and requires every model tensor to match before moving the predictor to the GPU.
+One model is reused across all batches and genes. Predictions disable gradient tracking;
+genes and batches run sequentially on the first visible CUDA GPU, or on CPU when CUDA
+is unavailable. This does not distribute work across multiple GPUs.
+Only equal-length chunks share a batch: padded embeddings from a longer batch neighbor
+can otherwise affect the shorter sequence's convolutional predictions. Input order is
+preserved, and changes in batch size can still introduce floating-point roundoff.
+
+CUDA inference starts with one sequence to measure its activation-memory peak. Later
+batches use that measurement, sequence lengths, and current free/reusable VRAM, with
+safety margins. This is an estimate, not a guarantee: an inference OOM halves the batch
+and retries the same sequences. If one sequence still fails, the gene is reported as
+failed rather than publishing incomplete residue predictions. `-bs 1` keeps every batch
+at one sequence; `-v` reports peak and retained CUDA memory after each successful batch.
 
 ## Output
 

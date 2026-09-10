@@ -30,8 +30,9 @@ if any("BAD" in header for header in headers):
     raise SystemExit(7)
 output = pathlib.Path(sys.argv[sys.argv.index("--output_dir") + 1])
 output.mkdir(parents=True, exist_ok=True)
-rows = ["\\t".join([header, "OTHER", "0.9", "0.1", "0", "0", "0", "0", ""]) for header in headers]
-(output / "prediction_results.txt").write_text("\\n".join(rows) + "\\n")
+rows = ["\\t".join([header, "OTHER", "0.9", "0.1", ""]) for header in headers]
+table_header = "# SignalP-6.0\\tOrganism: Eukarya\\n# ID\\tPrediction\\tOTHER\\tSP(Sec/SPI)\\tCS Position\\n"
+(output / "prediction_results.txt").write_text(table_header + "\\n".join(rows) + "\\n")
 ''')
     signalp.chmod(0o755)
     netnglyc = tools_dir / "explicit-netnglyc"
@@ -72,6 +73,67 @@ def test_valid_negative_and_signalp_cache_are_not_failure(tmp_path, executables)
             "has_signal": False, "probability": 0.1, "cleavage_site": None}
         executables[0].unlink()
         assert processor.process_single_fasta(str(fasta), str(tmp_path / "cached.out"))[0]
+
+
+@pytest.mark.parametrize("cleavage", (None, 0))
+def test_positive_footer_without_valid_cleavage_is_regenerated_from_raw_cache(
+    tmp_path, executables, monkeypatch, cleavage,
+):
+    fasta = tmp_path / "positive.fasta"
+    fasta.write_text(">SIGNAL\nMKTE\n")
+    checksum = hashlib.md5(fasta.read_bytes()).hexdigest()
+    with _processor(tmp_path, executables) as processor:
+        netnglyc_cache = Path(processor.cache_dir) / f"{checksum[:16]}_netnglyc.out"
+        netnglyc_cache.write_text(
+            "# Predictions for N-Glycosylation sites\nName: SIGNAL Length: 4\n"
+            f"# SIGNAL: Signal peptide detected, cleavage at position {cleavage} (probability: 0.900)\n")
+        raw_cache = Path(processor.signalp_handler.cache_dir) / f"{checksum}_sp6_output"
+        raw_cache.mkdir()
+        (raw_cache.parent / f"{checksum}_sp6.json").write_text("{}")
+        (raw_cache / "prediction_results.txt").write_text(
+            "# SignalP-6.0\tOrganism: Eukarya\n"
+            "# ID\tPrediction\tOTHER\tSP(Sec/SPI)\tCS Position\n"
+            "SIGNAL\tSP\t0.1\t0.9\tCS pos: 3-4. Pr: 0.8500\n")
+        processor.signalp_handler.signalp6_available = False
+        original_run = subprocess.run
+        native_calls = []
+
+        def invoke(command, **kwargs):
+            assert command[0] == str(executables[1]), "SignalP inference was unexpectedly requested"
+            native_calls.append(command)
+            return original_run(command, **kwargs)
+
+        monkeypatch.setattr(pipeline.subprocess, "run", invoke)
+        output = tmp_path / "repaired.out"
+        success, _, error = processor.process_single_fasta(str(fasta), str(output))
+        assert success, error
+        assert len(native_calls) == 1
+        expected = {"has_signal": True, "probability": 0.9, "cleavage_site": 3}
+        assert pipeline.parse_signalp_summary(output)["SIGNAL"] == expected
+        assert pipeline.parse_signalp_summary(netnglyc_cache)["SIGNAL"] == expected
+
+
+@pytest.mark.parametrize("has_signal", (False, True))
+def test_healthy_signalp_footer_cache_reuses_netnglyc_output(tmp_path, executables, monkeypatch, has_signal):
+    fasta = tmp_path / "healthy.fasta"
+    fasta.write_text(">SEQ\nMKTE\n")
+    checksum = hashlib.md5(fasta.read_bytes()).hexdigest()[:16]
+    description = (
+        "Signal peptide detected, cleavage at position 3 (probability: 0.900)"
+        if has_signal else "No signal peptide detected (probability: 0.100000)"
+    )
+    content = f"# Predictions for N-Glycosylation sites\nName: SEQ Length: 4\n# SEQ: {description}\n"
+    with _processor(tmp_path, executables) as processor:
+        cache = Path(processor.cache_dir) / f"{checksum}_netnglyc.out"
+        cache.write_text(content)
+        monkeypatch.setattr(processor.signalp_handler, "run_signalp6",
+                            lambda *args, **kwargs: pytest.fail("Unexpected SignalP processing"))
+        monkeypatch.setattr(processor, "_run_native_netnglyc",
+                            lambda *args, **kwargs: pytest.fail("Unexpected NetNGlyc processing"))
+        output = tmp_path / "cached.out"
+        success, _, error = processor.process_single_fasta(str(fasta), str(output))
+        assert success, error
+        assert output.read_text() == content
 
 
 @pytest.mark.parametrize("mode", ["nonzero", "timeout", "missing", "malformed", "empty", "nan"])
@@ -125,7 +187,9 @@ def test_valid_positive_cleavage_is_preserved(tmp_path, executables, monkeypatch
         output = Path(command[command.index("--output_dir") + 1])
         output.mkdir(parents=True, exist_ok=True)
         (output / "prediction_results.txt").write_text(
-            f"SEQ\tSP\t0.1\t0.9\t0\t0\t0\t0\t{cleavage}\n")
+            "# SignalP-6.0\tOrganism: Eukarya\n"
+            "# ID\tPrediction\tOTHER\tSP(Sec/SPI)\tCS Position\n"
+            f"SEQ\tSP\t0.1\t0.9\t{cleavage}\n")
         return subprocess.CompletedProcess(command, 0, "", "")
 
     monkeypatch.setattr(pipeline.subprocess, "run", invoke)

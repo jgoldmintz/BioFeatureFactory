@@ -45,6 +45,8 @@ import json
 from pathlib import Path
 import numpy as np
 from biofeaturefactory.lib.utility import (
+    InputPathAction,
+    validate_input_mode,
     read_fasta,
     write_fasta,
     codon_to_aa,
@@ -1145,9 +1147,11 @@ Example:
     # nt FASTA this tool needs, and the output already lands per gene at
     # <output>/<GENE>/CodonMSA/. --fasta stays as the single-gene form.
     parser.add_argument('-i', '--input', dest='input_root', metavar='INPUT',
+                        action=InputPathAction,
+                        extensions=('.fasta', '.fa', '.fas', '.fna'),
                         help='DIRECTORY MODE: variant_mapping output root. Runs every '
                              'gene found under <root>/<GENE>/fastas/. Also accepts a '
-                             'flat directory of ORF FASTAs.')
+                             'single ORF FASTA file.')
 
     parser.add_argument('-f', '--fasta',
                         help='FILE MODE ONLY: one FASTA with the focus ORF nt sequence. '
@@ -1181,6 +1185,7 @@ Example:
                         help='Print progress updates')
 
     args = parser.parse_args()
+    validate_input_mode(parser, args)
 
     if args.min_seqid < 0 or args.min_seqid > 1:
         parser.error("--min-seqid must be between 0 and 1")

@@ -51,6 +51,8 @@ from biofeaturefactory.alphafold3.bin.binding_metrics import (
 )
 
 from biofeaturefactory.lib.utility import (
+    InputPathAction,
+    validate_input_mode,
     derive_mutations_root,
     derive_mapping_root,
     discover_fasta_files,
@@ -1081,17 +1083,22 @@ def main():
                        help='Directory with A3M MSA files (preferred over --rbp-sequences)')
 
     # Gene inputs (file or directory, auto-detected)
-    parser.add_argument('-f', '--fasta',
-                        help='DIRECTORY MODE: variant_mapping output root. Supplies --mutations, --chromosome-mapping, --premrna-mapping and --vcf from <root>/<GENE>/. Also accepts a single transcript FASTA or a flat directory of them.')
-    parser.add_argument('-mu', '--mutations',
+    parser.add_argument('-f', '--fasta', action=InputPathAction,
+                        extensions=('.fasta', '.fa', '.fas', '.fna', '.faa'),
+                        help='DIRECTORY MODE: variant_mapping parent output root. Supplies --mutations, --chromosome-mapping, --premrna-mapping and --vcf from <root>/<GENE>/. Also accepts a single transcript FASTA; gene/tool subdirectories are not input roots.')
+    parser.add_argument('-mu', '--mutations', action=InputPathAction,
+                        extensions=('.csv', '.tsv', '.txt'),
                         help='FILE MODE ONLY: mutations CSV. Derived from --fasta in directory mode. Optional when --chromosome-mapping provides them.')
 
     # VCF-based coordinate resolution (replaces --chrom/--tx-start/--strand)
-    parser.add_argument('-v', '--vcf',
+    parser.add_argument('-v', '--vcf', action=InputPathAction,
+                        extensions=('.vcf',),
                         help='FILE MODE ONLY: per-gene VCF from vcf_converter.py (provides chromosome). Derived from --fasta in directory mode when <root>/<GENE>/vcf/ exists.')
-    parser.add_argument('-cm', '--chromosome-mapping',
+    parser.add_argument('-cm', '--chromosome-mapping', action=InputPathAction,
+                        extensions=('.csv', '.tsv', '.txt'),
                         help='FILE MODE ONLY: chromosome mapping CSV. Derived from --fasta in directory mode.')
-    parser.add_argument('-pm', '--premrna-mapping',
+    parser.add_argument('-pm', '--premrna-mapping', action=InputPathAction,
+                        extensions=('.csv', '.tsv', '.txt'),
                         help='FILE MODE ONLY: pre-mRNA mapping CSV. Derived from --fasta in directory mode. Required to score intronic (gd.) variants: they have no ORF or transcript coordinate and are windowed on the pre_mRNA record.')
 
     # Legacy genomic coordinates (still supported)
@@ -1147,6 +1154,9 @@ def main():
                        help='Persistent JAX compilation cache directory (default: OUTPUT/.cache/af3-jax)')
 
     args = parser.parse_args()
+    input_mode = validate_input_mode(
+        parser, args, required_file_inputs=(('mutations', 'chromosome_mapping'),),
+    )
 
 
     # One root supplies these: <root>/<GENE>/mappings/{mutations,chromosome,
@@ -1155,11 +1165,10 @@ def main():
 
     # derived -- it is a POSTAR3 RBP table, not a variant_mapping product.
 
-    args.mutations = derive_mutations_root(args.mutations, args.fasta, label="af3")
-
-    args.chromosome_mapping = derive_mapping_root(
-
-        args.chromosome_mapping, args.fasta, "chromosome", label="af3")
+    if input_mode == 'directory':
+        args.mutations = derive_mutations_root(args.mutations, args.fasta, label="af3")
+        args.chromosome_mapping = derive_mapping_root(
+            args.chromosome_mapping, args.fasta, "chromosome", label="af3")
 
     # --vcf too. spliceai / vcf_converter publish <root>/<GENE>/vcf/<GENE>.vcf, so
     # the same root answers for it. Named EXPLICITLY per gene rather than globbed:
@@ -1173,9 +1182,9 @@ def main():
             args.vcf = str(_root)
             print(f"[af3] --vcf not given; using {args.fasta} (per-gene layout detected)")
 
-    args.premrna_mapping = derive_mapping_root(
-
-        args.premrna_mapping, args.fasta, "premrna", label="af3")
+    if input_mode == 'directory':
+        args.premrna_mapping = derive_mapping_root(
+            args.premrna_mapping, args.fasta, "premrna", label="af3")
 
     # Validate that we have either MSA dir or sequences
     if not args.msa_dir and not args.rbp_sequences:

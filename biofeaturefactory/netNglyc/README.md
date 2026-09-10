@@ -12,6 +12,41 @@ N-linked glycosylation site prediction for WT and mutant protein sequences using
 | Input FASTAs | ORF FASTAs (header `>ORF`). WT amino-acid sequences are synthesized automatically. |
 | Mapping CSVs | Per-gene NT -> AA mappings (`mutant`, `aamutant`) from `variant_mapping`. |
 
+### Install SignalP 6 fast
+
+Download and extract the licensed fast package from DTU. Install it in a separate
+conda environment: its `torch<2` requirement must stay isolated from BFF's newer
+PyTorch dependencies. Bootstrap only checks for SignalP; it does not install it.
+Set `SIGNALP_PACKAGE` to the extracted `signalp-6-package` directory containing
+`setup.py` and `models/`:
+
+```bash
+conda create -n signalp6 python=3.10 -y
+conda activate signalp6
+SIGNALP_PACKAGE="/path/to/signalp6_fast/signalp-6-package"
+python -m pip install "numpy<2" "$SIGNALP_PACKAGE"
+SIGNALP_DIR=$(python -c 'import os, signalp; print(os.path.dirname(signalp.__file__))')
+mkdir -p "$SIGNALP_DIR/model_weights"
+cp "$SIGNALP_PACKAGE/models/distilled_model_signalp6.pt" "$SIGNALP_DIR/model_weights/"
+signalp6 --version
+```
+
+After installation, reactivate your **BFF environment** and run the NetNGlyc
+pipeline there. For example, use `conda activate bff` if your BFF environment is
+named `bff`; that name is not required.
+
+The pipeline does **not** activate the SignalP conda environment. It invokes the
+installed `signalp6` executable as a subprocess; the executable's shebang selects
+that environment's Python and dependencies. Leave the executable and weights in
+the SignalP environment; do not move them into NetNGlyc's `bin/` directory.
+
+The resolver searches sibling environments named `signalp6` or `signalp6_fast`,
+as well as `PATH` and configured locations. For a different name or location,
+pass `--signalp6-bin /path/to/envs/your-signalp-env/bin/signalp6` to the NetNGlyc
+pipeline. This flag selects an existing executable, does not install anything,
+and is **not a bootstrap flag**. The `signalp6_adapter` below is a separate shim,
+not the SignalP installation.
+
 ### SignalP 6 adapter
 
 NetNGlyc's tcsh wrapper expects a SignalP v3/v4 binary at `$SIGNALP`. Point it at the shim instead:
@@ -61,8 +96,13 @@ failures, not negative signal-peptide calls. A valid `OTHER` prediction remains 
 measured negative. Explicit `--signalp6-bin` paths are forwarded through all
 workers. Successful sequences in a partial run are retained; failed batches or
 workers contribute to the final nonzero exit status and unscored-allele QC.
-Cached NetNGlyc results lacking SignalP summaries are not reused when SignalP is
-enabled; legacy exports need regeneration to reflect these checks.
+Fresh and cached SignalP tables share a header-based parser for five-column
+eukaryotic and nine-column output layouts. Positive calls require a valid cleavage
+position; `OTHER` calls may leave it empty. SignalP cache hits reparse the saved
+table rather than trusting previously parsed JSON.
+Cached NetNGlyc results lacking SignalP summaries or positive-call cleavage sites
+are not reused when SignalP is enabled; legacy exports need regeneration to
+reflect these checks.
 
 ```
 {output}/{GENE}/NetNglyc/

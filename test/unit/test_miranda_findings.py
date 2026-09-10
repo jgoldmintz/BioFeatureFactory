@@ -159,14 +159,13 @@ def test_concurrent_main_invocations_use_private_intermediates(tmp_path):
         import time
         import pandas as pd
         from biofeaturefactory.miranda import miranda_ensemble as pipeline
-        output, barrier, identity = map(Path, sys.argv[1:])
-        args = argparse.Namespace(input='unused', output=str(output), miranda_dir=None,
-            mirna_db='unused', log=None, mapping_dir='unused', wt_header='transcript',
+        output, barrier, fasta, mapping, identity = map(Path, sys.argv[1:])
+        args = argparse.Namespace(input=str(fasta), output=str(output), miranda_dir=None,
+            mirna_db='unused', log=None, mapping_dir=str(mapping), wt_header='transcript',
             intron_premrna_mapping=None, strict_introns=False, no_parallel=True, max_workers=1)
         argparse.ArgumentParser.parse_args = lambda self: args
         import shutil
         shutil.which = lambda binary: '/stub/miranda'
-        pipeline.derive_mapping_root = lambda *args, **kwargs: 'unused'
         pipeline.load_transcript_mappings = lambda *args: {'TEST': pd.DataFrame([('A10C', 'A10C')], columns=['mutant', 'transcript'])}
         pipeline.load_wt_sequences = lambda *args, **kwargs: {'TEST': 'A' * 40}
         pipeline._load_substrate_sequences = lambda *args: {}
@@ -191,7 +190,11 @@ def test_concurrent_main_invocations_use_private_intermediates(tmp_path):
     output.mkdir()
     barrier = tmp_path / "barrier"
     barrier.mkdir()
-    command = [sys.executable, "-c", runner, str(output), str(barrier)]
+    fasta = tmp_path / "TEST.fasta"
+    fasta.write_text(">transcript\n" + "A" * 40 + "\n")
+    mapping = tmp_path / "transcript_mapping_TEST.csv"
+    mapping.write_text("mutant,transcript\nA10C,A10C\n")
+    command = [sys.executable, "-c", runner, str(output), str(barrier), str(fasta), str(mapping)]
     processes = [subprocess.Popen(command + [identity], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True) for identity in ("first", "second")]
     for process in processes:
         stdout, stderr = process.communicate(timeout=30)
@@ -205,14 +208,17 @@ def test_concurrent_main_invocations_use_private_intermediates(tmp_path):
 
 
 def test_failed_invocation_retains_unparsed_outputs(tmp_path, monkeypatch):
+    fasta = tmp_path / "TEST.fasta"
+    fasta.write_text(">transcript\n" + "A" * 40 + "\n")
+    mapping = tmp_path / "transcript_mapping_TEST.csv"
+    mapping.write_text("mutant,transcript\nA10C,A10C\n")
     args = argparse.Namespace(
-        input="unused", output=str(tmp_path), miranda_dir=None, mirna_db="unused",
-        log=None, mapping_dir="unused", wt_header="transcript",
+        input=str(fasta), output=str(tmp_path), miranda_dir=None, mirna_db="unused",
+        log=None, mapping_dir=str(mapping), wt_header="transcript",
         intron_premrna_mapping=None, strict_introns=False, no_parallel=True, max_workers=1,
     )
     monkeypatch.setattr(argparse.ArgumentParser, "parse_args", lambda self: args)
     monkeypatch.setattr(shutil, "which", lambda binary: "/stub/miranda")
-    monkeypatch.setattr(miranda, "derive_mapping_root", lambda *args, **kwargs: "unused")
     monkeypatch.setattr(miranda, "load_transcript_mappings", lambda *args: {
         "TEST": pd.DataFrame([("A10C", "A10C")], columns=["mutant", "transcript"]),
     })

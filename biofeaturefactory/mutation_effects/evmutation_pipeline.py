@@ -83,6 +83,8 @@ if not hasattr(collections, "Iterable"):
 from EVmutation.model import CouplingsModel
 import EVmutation.tools as ev_tools
 from biofeaturefactory.lib.utility import (
+    InputPathAction,
+    validate_input_mode,
     derive_mutations_root,
     mint_pkey,
     codon_to_aa,
@@ -1429,7 +1431,7 @@ Model params resolution (--model-params / --codon-model-params):
 
 MSA resolution (--msa / --codon-msa):
   - File: used directly (single-gene mode).
-  - Directory: finds {GENE}.* files by gene name (multi-gene mode).
+  - Parent output directory: finds MSAs under {GENE}/MSA or {GENE}/CodonMSA.
   - --focus defaults to gene name; --codon-focus defaults to ORF.
 
 Examples:
@@ -1450,17 +1452,19 @@ Examples:
 
   # Multi-gene directory
   python evmutation_pipeline.py \\
-      --fasta /data/fastas/ --mutations /data/mutations/ \\
-      --msa /data/msas/ --codon-msa /data/codon_msas/ \\
+      --fasta /data/out/ \\
+      --msa /data/out/ --codon-msa /data/out/ \\
       --plmc-binary /usr/local/bin/plmc \\
       --output results/
 """,
     )
 
-    parser.add_argument("-f", "--fasta", required=True,
-                        help="ORF FASTA file (single gene) or directory (multi-gene)")
-    parser.add_argument("-m", "--mutations", required=False,
-                        help="Mutations CSV file or directory of per-gene CSVs")
+    parser.add_argument("-f", "--fasta", required=True, action=InputPathAction,
+                        extensions=(".fasta", ".fa", ".fas", ".fna", ".faa"),
+                        help="ORF FASTA file or parent output directory containing gene subdirectories")
+    parser.add_argument("-m", "--mutations", required=False, action=InputPathAction,
+                        extensions=(".csv", ".tsv", ".txt"),
+                        help="Mutation-list file (.csv/.tsv/.txt) or parent output directory containing gene subdirectories")
 
     # Model params (file or directory; optional)
     parser.add_argument("--model-params",
@@ -1471,14 +1475,16 @@ Examples:
                              "containing {GENE}.codon_model_params")
 
     # MSA / plmc args (file or directory)
-    parser.add_argument("--msa",
-                        help="Protein MSA file or directory of per-gene MSA files; "
+    parser.add_argument("--msa", action=InputPathAction,
+                        extensions=(".a2m", ".a3m", ".fasta", ".fa", ".fas", ".fna", ".faa"),
+                        help="Protein MSA file or parent output root; "
                              "triggers plmc if model params absent")
     parser.add_argument("--focus",
                         help="Focus sequence ID in protein MSA "
                              "(default: gene name)")
-    parser.add_argument("-cm", "--codon-msa",
-                        help="Codon MSA file or directory of per-gene codon MSA files; "
+    parser.add_argument("-cm", "--codon-msa", action=InputPathAction,
+                        extensions=(".fasta", ".fa", ".fas", ".fna", ".a2m", ".a3m"),
+                        help="Codon MSA file or parent output root; "
                              "encoded then run through plmc if params absent")
     parser.add_argument("-cf", "--codon-focus",
                         help="Focus sequence ID in codon MSA (default: ORF)")
@@ -1508,16 +1514,9 @@ Examples:
                         help="Suppress verbose output")
 
     args = parser.parse_args()
+    validate_input_mode(parser, args, required_file_inputs=("mutations",))
     if args.score_missense_codon and args.skip_codon:
         parser.error("--score-missense-codon cannot be combined with --skip-codon")
-
-
-    # Directory mode: <root>/<GENE>/mappings/mutations/ sits beside the input,
-
-    # so the root supplies both. Explicit --mutations always wins; FILE MODE and
-
-    # any layout outside the tree are unaffected.
-
     args.mutations = derive_mutations_root(args.mutations, args.fasta, "evmutation")
 
     if not args.mutations:

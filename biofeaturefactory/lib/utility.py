@@ -14,6 +14,7 @@
 # You should have received a copy of the GNU Affero General Public License
 # along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
+import argparse
 import csv
 import hashlib
 import re
@@ -1336,6 +1337,115 @@ def find_gene_file(path_arg, gene, patterns):
             if (extract_gene_from_filename(f.name) or "").upper() == up:
                 return str(f)
     return None
+
+
+class InputPathAction(argparse.Action):
+    """Record file-or-directory inputs in their supplied command-line order."""
+
+    def __init__(self, option_strings, dest, extensions=None, **kwargs):
+        self.extensions = tuple(extension.lower() for extension in extensions) if extensions else None
+        super().__init__(option_strings, dest, **kwargs)
+
+    def __call__(self, parser, namespace, values, option_string=None):
+        if values is not None:
+            supplied = list(getattr(namespace, '_bff_input_paths', ()))
+            supplied.append((self.dest, option_string, values))
+            setattr(namespace, '_bff_input_paths', supplied)
+        setattr(namespace, self.dest, values)
+
+
+def _input_directory_root(path):
+    """Recognize a gene-tree parent, or suggest that parent for a nested input."""
+    markers = ('fastas', 'mappings', 'MSA', 'CodonMSA', 'vcf', 'EVmutation', 'adabmDCA')
+
+    def gene_directory(candidate):
+        return any((candidate / marker).is_dir() for marker in markers)
+
+    if any(child.is_dir() and not child.name.startswith('.') and gene_directory(child)
+           for child in path.iterdir()):
+        return True, None
+    resolved_path = path.resolve()
+    for candidate in (resolved_path, *resolved_path.parents):
+        if gene_directory(candidate):
+            return False, candidate.parent
+    return False, None
+
+
+def validate_input_mode(parser, namespace, required_file_inputs=()):
+    """Validate registered input paths before discovery or backend execution.
+
+    The first supplied dual-purpose option selects the mode. Required companion
+    inputs must be explicit in file mode; directory mode retains auto-discovery.
+    A tuple inside required_file_inputs represents alternative companion inputs.
+    """
+    actions = {action.dest: action for action in parser._actions
+               if isinstance(action, InputPathAction)}
+    supplied = list(getattr(namespace, '_bff_input_paths', ()))
+    if hasattr(namespace, '_bff_input_paths'):
+        delattr(namespace, '_bff_input_paths')
+    recorded = {destination for destination, _, _ in supplied}
+    for destination, action in actions.items():
+        value = getattr(namespace, destination, None)
+        if value is not None and value != '' and destination not in recorded:
+            supplied.append((destination, None, value))
+
+    mode = None
+    first_option = None
+    for destination, option, value in supplied:
+        action = actions[destination]
+        label = option or next((name for name in action.option_strings
+                                if name.startswith('--')), destination)
+        path = Path(value).expanduser()
+        accepted_extension = action.extensions is None or any(
+            path.name.lower().endswith(extension) for extension in action.extensions)
+        if not path.exists():
+            parser.error(f"{label}: input path does not exist: {path}")
+        if path.is_file():
+            if not accepted_extension:
+                parser.error(f"{label}: unsupported input file type: {path}; "
+                             f"expected {', '.join(action.extensions)}")
+            current_mode = 'file'
+        elif path.is_dir():
+            if action.extensions and accepted_extension:
+                parser.error(f"{label}: expected an input file, but found a directory: {path}")
+            current_mode = 'directory'
+        else:
+            parser.error(f"{label}: input must be a regular file or directory: {path}")
+
+        if mode is None:
+            mode, first_option = current_mode, label
+        elif current_mode != mode:
+            parser.error(f"{label}: {first_option} selected {mode} mode; "
+                         f"provide an explicit {mode} input, not {path}")
+
+        if current_mode == 'directory':
+            try:
+                valid_root, suggested_root = _input_directory_root(path)
+            except OSError as error:
+                parser.error(f"{label}: cannot inspect input directory {path}: {error}")
+            if not valid_root:
+                suggestion = f" Provide {suggested_root} instead." if suggested_root else ''
+                parser.error(f"{label}: invalid directory input: {path}. "
+                             "Provide the parent <dir> containing <gene>/... directories, "
+                             "not a gene directory or one of its subdirectories."
+                             f"{suggestion} For file mode, provide an explicit input file.")
+        resolved_value = getattr(namespace, destination, None)
+        if resolved_value == value:
+            setattr(namespace, destination, path if isinstance(value, Path) else str(path))
+
+    if mode == 'file':
+        for requirement in required_file_inputs:
+            destinations = (requirement,) if isinstance(requirement, str) else requirement
+            if not any(getattr(namespace, destination, None) for destination in destinations):
+                labels = []
+                for destination in destinations:
+                    action = actions.get(destination)
+                    labels.append(next((name for name in action.option_strings
+                                        if name.startswith('--')), destination)
+                                  if action else destination)
+                parser.error(f"{' or '.join(labels)} is required in file mode; "
+                             "provide an explicit companion input file.")
+    return mode
 
 
 def derive_mutations_root(explicit, input_root, label=None):

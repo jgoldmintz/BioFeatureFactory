@@ -77,6 +77,7 @@ from biofeaturefactory.alphafold3.bin.burst_manifest import (
 )
 
 from biofeaturefactory.lib.utility import (
+    InputPathAction, validate_input_mode,
     discover_fasta_files, discover_mapping_files, discover_mutation_files,
     mint_pkey,
     Variant, _collect_failures_from_logs, extract_gene_from_filename,
@@ -1180,10 +1181,17 @@ def _add_shared_input_args(p: argparse.ArgumentParser) -> None:
     p.add_argument('--rbp-mapping', required=True, help='Gene-UniProt mapping TSV')
     p.add_argument('-rs', '--rbp-sequences', help='Protein sequences FASTA (optional if --msa-dir provided)')
     p.add_argument('-md', '--msa-dir', help='Directory with A3M MSA files (preferred)')
-    p.add_argument('-f', '--fasta', required=True, help='Transcript FASTA file or directory')
-    p.add_argument('-mu', '--mutations', help='Mutations CSV file or directory')
-    p.add_argument('-v', '--vcf', help='Per-gene VCF file or directory (for chromosome resolution)')
-    p.add_argument('-cm', '--chromosome-mapping', help='Chromosome mapping CSV file or directory')
+    p.add_argument('-f', '--fasta', required=True, action=InputPathAction,
+                   extensions=('.fasta', '.fa', '.fas', '.fna', '.faa'),
+                   help='Transcript FASTA file or variant_mapping parent output root')
+    p.add_argument('-mu', '--mutations', action=InputPathAction,
+                   extensions=('.csv', '.tsv', '.txt'),
+                   help='Mutations CSV file or variant_mapping parent output root')
+    p.add_argument('-v', '--vcf', action=InputPathAction, extensions=('.vcf',),
+                   help='Per-gene VCF file or variant_mapping parent output root (for chromosome resolution)')
+    p.add_argument('-cm', '--chromosome-mapping', action=InputPathAction,
+                   extensions=('.csv', '.tsv', '.txt'),
+                   help='Chromosome mapping CSV file or variant_mapping parent output root')
     p.add_argument('-ch', '--chrom', help='Chromosome (alternative to --vcf)')
     p.add_argument('-ts', '--tx-start', type=int,
                    help='Transcript start (alternative to --chromosome-mapping)')
@@ -1240,6 +1248,10 @@ def main() -> int:
 
     # Per-subcommand input validation; preflight uses its own minimal arg set.
     if args.subcommand in ('submit', 'ingest'):
+        validate_input_mode(
+            p_sub if args.subcommand == 'submit' else p_ing,
+            args, required_file_inputs=(('mutations', 'chromosome_mapping'),),
+        )
         if not args.msa_dir and not args.rbp_sequences:
             parser.error("Provide either --msa-dir or --rbp-sequences")
         if not args.mutations and not args.chromosome_mapping:

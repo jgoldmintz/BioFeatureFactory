@@ -23,6 +23,8 @@ import sys
 from pathlib import Path
 
 from biofeaturefactory.lib.utility import (
+    InputPathAction,
+    validate_input_mode,
     derive_mutations_root,
     discover_fasta_files,
     discover_mutation_files,
@@ -623,7 +625,7 @@ Examples:
   python codon_usage_pipeline.py --fasta /path/to/gene.fasta --mutations /path/to/mutations.csv --output results/
 
   # Directory processing
-  python codon_usage_pipeline.py --fasta /path/to/fastas --mutations /path/to/mutations --output results/
+  python codon_usage_pipeline.py --fasta /path/to/out/ --output results/
 
 Metrics:
   RSCU       - Relative Synonymous Codon Usage (gene-specific)
@@ -638,22 +640,18 @@ Metrics:
     )
 
     # Input options
-    parser.add_argument('-f', '--fasta', required=True, help='FASTA file or directory of FASTA files')
-    parser.add_argument('-m', '--mutations', help='Mutations CSV file or directory of CSV files')
+    parser.add_argument('-f', '--fasta', required=True, action=InputPathAction,
+                        extensions=('.fasta', '.fa', '.fas', '.fna', '.faa'),
+                        help='FASTA file or parent output directory containing gene subdirectories')
+    parser.add_argument('-m', '--mutations', action=InputPathAction, extensions=('.csv', '.tsv', '.txt'),
+                        help='Mutation-list file (.csv/.tsv/.txt) or parent output directory containing gene subdirectories')
     parser.add_argument('-vl', '--validation-log', help='Validation log for filtering failed mutations')
 
     # Output options
     parser.add_argument('--output', '-o', required=True, help='Output base directory')
 
     args = parser.parse_args()
-
-
-    # Directory mode: <root>/<GENE>/mappings/mutations/ sits beside the input,
-
-    # so the root supplies both. Explicit --mutations always wins; FILE MODE and
-
-    # any layout outside the tree are unaffected.
-
+    validate_input_mode(parser, args, required_file_inputs=('mutations',))
     args.mutations = derive_mutations_root(args.mutations, args.fasta, "codon_usage")
 
     if not args.mutations:

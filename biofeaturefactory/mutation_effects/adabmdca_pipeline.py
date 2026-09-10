@@ -69,6 +69,8 @@ except ImportError:
     CODON_TO_CHAR = {}
 
 from biofeaturefactory.lib.utility import (
+    InputPathAction,
+    validate_input_mode,
     derive_mutations_root,
     codon_to_aa,
     discover_fasta_files,
@@ -1956,15 +1958,19 @@ def main() -> None:
     parser = argparse.ArgumentParser(
         description="BioFeatureFactory: adabmDCA mutation pipeline (train + score)",
     )
-    parser.add_argument("-f", "--fasta", required=True,
-                        help="ORF FASTA file (single gene) or directory")
-    parser.add_argument("-m", "--mutations", required=False,
-                        help="Mutations CSV file or directory")
+    parser.add_argument("-f", "--fasta", required=True, action=InputPathAction,
+                        extensions=(".fasta", ".fa", ".fas", ".fna", ".faa"),
+                        help="ORF FASTA file or parent output directory containing gene subdirectories")
+    parser.add_argument("-m", "--mutations", required=False, action=InputPathAction,
+                        extensions=(".csv", ".tsv", ".txt"),
+                        help="Mutation-list file (.csv/.tsv/.txt) or parent output directory containing gene subdirectories")
     # MSAs are the primary inputs: training is invoked here if params don't exist.
-    parser.add_argument("--msa",
-                        help="Protein MSA file or directory; triggers `adabmDCA train` if params absent")
-    parser.add_argument("-cm", "--codon-msa",
-                        help="Codon MSA file or directory (triplets); encoded + trained if params absent")
+    parser.add_argument("--msa", action=InputPathAction,
+                        extensions=(".a2m", ".a3m", ".fasta", ".fa", ".fas", ".fna", ".faa"),
+                        help="Protein MSA file or parent output root; triggers `adabmDCA train` if params absent")
+    parser.add_argument("-cm", "--codon-msa", action=InputPathAction,
+                        extensions=(".fasta", ".fa", ".fas", ".fna", ".a2m", ".a3m"),
+                        help="Codon MSA file or parent output root (triplets); encoded + trained if params absent")
     # Pre-built params (cache / override) -- skip train if these resolve.
     parser.add_argument("-pp", "--protein-params",
                         help="Pre-built protein params file or directory")
@@ -2021,16 +2027,9 @@ def main() -> None:
     parser.add_argument("--quiet", "-q", action="store_true")
 
     args = parser.parse_args()
+    validate_input_mode(parser, args, required_file_inputs=("mutations",))
     if args.score_missense_codon and args.skip_codon:
         parser.error("--score-missense-codon cannot be combined with --skip-codon")
-
-
-    # Directory mode: <root>/<GENE>/mappings/mutations/ sits beside the input,
-
-    # so the root supplies both. Explicit --mutations always wins; FILE MODE and
-
-    # any layout outside the tree are unaffected.
-
     args.mutations = derive_mutations_root(args.mutations, args.fasta, "adabmdca")
 
     if not args.mutations:

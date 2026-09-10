@@ -61,6 +61,8 @@ import pandas as pd
 # -------------------------------------------------------------------------
 HERE = os.path.dirname(os.path.abspath(__file__))
 from biofeaturefactory.lib.utility import (
+    InputPathAction,
+    validate_input_mode,
     derive_mapping_root,
     discover_mapping_files,
     discover_fasta_files,
@@ -1607,10 +1609,11 @@ def _load_substrate_sequences(input_path: str) -> Dict[str, str]:
 def main():
     parser = argparse.ArgumentParser(description="Unified MirandA pipeline (WT+MUT) with comparative outputs")
     # IO
-    parser.add_argument("-i", "--input", required=True,
+    parser.add_argument("-i", "--input", required=True, action=InputPathAction,
+                        extensions=('.fasta', '.fa', '.fna'),
                         help="variant_mapping OUTPUT ROOT (<root>/<GENE>/fastas/), or a single "
                              "WT FASTA file. In directory mode the gene is the DIRECTORY name, "
-                             "not the filename; a flat directory of FASTAs also works.")
+                             "not the filename. Gene/tool subdirectories are not input roots.")
     parser.add_argument("-o", "--output", required=True, help="output directory of miranda")
     # MirandA
     parser.add_argument("-m", "--miranda_dir", default=None,
@@ -1621,13 +1624,15 @@ def main():
     # --mapping-dir kept as an alias so existing invocations keep working; dest is
     # pinned so args.mapping_dir is unchanged throughout.
     parser.add_argument("-M", "--variant-mapping-root", "--mapping-dir",
-                        dest="mapping_dir",
+                        dest="mapping_dir", action=InputPathAction,
+                        extensions=('.csv', '.tsv', '.txt'),
                         help="FILE MODE ONLY. In directory mode this is derived from --input, "
                              "which IS the variant_mapping output root: mappings/ and fastas/ "
                              "are siblings under the same <GENE>/. Supply it only to point at a "
                              "transcript-mapping CSV/TSV outside that layout. Given a root, "
                              "--intron-premrna-mapping is derived from it too.")
-    parser.add_argument("-ipm", "--intron-premrna-mapping",
+    parser.add_argument("-ipm", "--intron-premrna-mapping", action=InputPathAction,
+                        extensions=('.csv', '.tsv', '.txt'),
                         help="FILE MODE ONLY. In directory mode this is derived from "
                              "--variant-mapping-root, since mappings/intron_premRNA/ is a "
                              "sibling of mappings/transcript/ under the same <GENE>/. Supply it "
@@ -1644,6 +1649,7 @@ def main():
     # WT header
     parser.add_argument("-wh", "--wt-header", default="transcript", help="Preferred WT FASTA header")
     args = parser.parse_args()
+    input_mode = validate_input_mode(parser, args, required_file_inputs=('mapping_dir',))
 
     # Validate miranda availability
     if args.miranda_dir:
@@ -1690,7 +1696,7 @@ def main():
     # caller repeat themselves. discover_mapping_files confirms an
     # intron_premRNA mapping is actually present before defaulting, so a run
     # without one behaves exactly as before.
-    if not args.intron_premrna_mapping and args.mapping_dir:
+    if input_mode == 'directory' and not args.intron_premrna_mapping and args.mapping_dir:
         if discover_mapping_files(str(args.mapping_dir), "intron_premrna"):
             args.intron_premrna_mapping = args.mapping_dir
             print(f"[miranda] --intron-premrna-mapping not given; using "

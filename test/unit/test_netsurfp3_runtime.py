@@ -77,7 +77,9 @@ def test_actual_embedding_forward_has_complete_ordered_wrapper_coverage(tmp_path
         return identifiers, sequences, predictions
 
     monkeypatch.setattr(pipeline, "load_config", lambda path: {})
-    monkeypatch.setattr(pipeline.nsp3_main, "predict", predict)
+    monkeypatch.setattr(pipeline, "_load_nsp3_predictor",
+                        lambda model_path, config_path, device:
+                        lambda fasta_path: predict({}, "SecondaryFeatures", model_path, fasta_path))
     monkeypatch.setattr(pipeline, "extract_residue_predictions",
                         lambda tensors, seq_idx, pos_idx, residue:
                         {"residue": residue, "value": tensors[0][seq_idx, pos_idx, 0]})
@@ -102,7 +104,9 @@ def test_overlap_uses_interior_not_first_chunk(tmp_path, monkeypatch):
         return identifiers, sequences, predictions
 
     monkeypatch.setattr(pipeline, "load_config", lambda path: {})
-    monkeypatch.setattr(pipeline.nsp3_main, "predict", predict)
+    monkeypatch.setattr(pipeline, "_load_nsp3_predictor",
+                        lambda model_path, config_path, device:
+                        lambda fasta_path: predict({}, "SecondaryFeatures", model_path, fasta_path))
     monkeypatch.setattr(pipeline, "extract_residue_predictions",
                         lambda tensors, seq_idx, pos_idx, residue:
                         {"owner": tensors[0][seq_idx, pos_idx, 0]})
@@ -116,7 +120,8 @@ def test_missing_chunk_is_not_published_as_complete(tmp_path, monkeypatch):
     fasta = tmp_path / "missing.fasta"
     fasta.write_text(">protein\nMMM\n")
     monkeypatch.setattr(pipeline, "load_config", lambda path: {})
-    monkeypatch.setattr(pipeline.nsp3_main, "predict", lambda *args: ([], [], []))
+    monkeypatch.setattr(pipeline, "_load_nsp3_predictor",
+                        lambda *args: lambda fasta_path: ([], [], []))
     with pytest.raises(RuntimeError, match="0/3 residues"):
         pipeline.run_nsp3_prediction(fasta, "unused", "unused")
 
@@ -132,8 +137,10 @@ def test_completed_genes_survive_later_prediction_failure(tmp_path, monkeypatch,
         (fasta_dir / f"{gene}.fasta").write_text(">ORF\nATGAAAACCTAA\n")
         (mutation_dir / f"{gene}_mutations.csv").write_text("mutant\nA4G\n")
     visited = []
+    runtimes = []
 
     def predict(fasta, *args, **kwargs):
+        runtimes.append(kwargs.get("runtime"))
         sequences = pipeline.read_fasta(fasta)
         gene = next(iter(sequences)).split("-")[0]
         visited.append(gene)
@@ -157,6 +164,8 @@ def test_completed_genes_survive_later_prediction_failure(tmp_path, monkeypatch,
                                      "-M", "unused", "-c", "unused"])
     assert pipeline.main() == 1
     assert visited == ["FIRST", "BROKEN", "LAST"]
+    assert all(runtime is not None for runtime in runtimes)
+    assert len({id(runtime) for runtime in runtimes}) == 1
     for gene in visited:
         directory = output_root / gene / "NetSurfP3"
         assert len(list(directory.glob("*.tsv"))) == 3

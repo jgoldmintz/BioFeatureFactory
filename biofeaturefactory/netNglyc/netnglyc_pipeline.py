@@ -40,6 +40,8 @@ from typing import Optional
 
 # Import utility functions
 from biofeaturefactory.lib.utility import (
+    InputPathAction,
+    validate_input_mode,
     derive_mapping_root,
     read_fasta,
     get_mutation_data_bioAccurate,
@@ -755,8 +757,79 @@ def iter_netnglyc_output_files(directory: Path):
                 yield file_path
 
 
+def parse_signalp_predictions(pred_file, expected_ids=None):
+    """Read SignalP 6 tables, including legacy headerless five/nine-column files."""
+    eukarya_columns = ("ID", "Prediction", "OTHER", "SP(Sec/SPI)", "CS Position")
+    other_columns = (
+        "ID", "Prediction", "OTHER", "SP(Sec/SPI)", "LIPO(Sec/SPII)",
+        "TAT(Tat/SPI)", "TATLIPO(Tat/SPII)", "PILIN(Sec/SPIII)", "CS Position",
+    )
+    columns = None
+    results = {}
+    with open(pred_file, "r") as handle:
+        for line_number, line in enumerate(handle, start=1):
+            content = line.rstrip("\r\n")
+            if not content.strip():
+                continue
+            if content.lstrip().startswith("#"):
+                header = tuple(part.strip() for part in content.lstrip()[1:].split("\t"))
+                if "ID" in header or "Prediction" in header:
+                    if (results or len(set(header)) != len(header)
+                            or not set(eukarya_columns).issubset(header)):
+                        raise ValueError(f"Invalid SignalP header at line {line_number}")
+                    columns = header
+                continue
+
+            parts = content.split("\t")
+            if columns is None:
+                if len(parts) == len(eukarya_columns):
+                    columns = eukarya_columns
+                elif len(parts) == len(other_columns):
+                    columns = other_columns
+            if columns is None or len(parts) != len(columns):
+                raise ValueError(f"Malformed SignalP prediction row at line {line_number}")
+            row = dict(zip(columns, (part.strip() for part in parts)))
+            seq_id = row["ID"]
+            if not seq_id or row["Prediction"] not in {"SP", "OTHER"}:
+                raise ValueError(f"Invalid SignalP prediction at line {line_number}")
+            if seq_id in results:
+                raise ValueError(f"Duplicate SignalP prediction for {seq_id}")
+            try:
+                probability = float(row["SP(Sec/SPI)"])
+            except ValueError as error:
+                raise ValueError(f"Invalid SignalP probability for {seq_id}") from error
+            if not 0 <= probability <= 1:
+                raise ValueError(f"Invalid SignalP probability for {seq_id}")
+
+            has_signal = row["Prediction"] == "SP"
+            cleavage_site = None
+            if has_signal:
+                cleavage_match = re.fullmatch(
+                    r"(?:CS pos:\s*)?(\d+)(?:-(\d+))?(?:\.\s*Pr:\s*\d+(?:\.\d+)?)?",
+                    row["CS Position"],
+                )
+                if not cleavage_match or int(cleavage_match.group(1)) < 1:
+                    raise ValueError(f"Missing or invalid SignalP cleavage site for {seq_id}")
+                cleavage_site = int(cleavage_match.group(1))
+                if (cleavage_match.group(2) is not None
+                        and int(cleavage_match.group(2)) != cleavage_site + 1):
+                    raise ValueError(f"Invalid SignalP cleavage site for {seq_id}")
+            results[seq_id] = {
+                "has_signal": has_signal,
+                "probability": probability,
+                "cleavage_site": cleavage_site,
+            }
+
+    if not results:
+        raise ValueError("Empty SignalP predictions")
+    if expected_ids is not None and set(results) != set(expected_ids):
+        raise ValueError(
+            f"Incomplete SignalP predictions: {len(results)}/{len(expected_ids)} sequences")
+    return results
+
+
 def load_signalp_cache(cache_root):
-    """Load cached SignalP summaries from json files under the cache root."""
+    """Load validated SignalP summaries from cached raw prediction tables."""
     cache_data = {}
     bases = []
     if cache_root:
@@ -773,38 +846,9 @@ def load_signalp_cache(cache_root):
                 continue
             seen_dirs.add(parent)
             try:
-                with open(pred_file, "r") as handle:
-                    for line in handle:
-                        if not line or line.startswith("#"):
-                            continue
-                        parts = line.strip().split("\t")
-                        if len(parts) < 4:
-                            parts = line.strip().split()
-                        if len(parts) < 4:
-                            continue
-                        seq_id = parts[0].strip()
-                        prediction = parts[1].strip().upper()
-                        sp_prob = None
-                        try:
-                            sp_prob = float(parts[3]) if parts[3] else None
-                        except (ValueError, IndexError):
-                            sp_prob = None
-                        cleavage = None
-                        if len(parts) > 4 and parts[4]:
-                            token = parts[4].strip()
-                            try:
-                                if "-" in token:
-                                    cleavage = int(token.split("-")[0])
-                                else:
-                                    cleavage = int(token)
-                            except ValueError:
-                                cleavage = None
-                        cache_data[seq_id] = {
-                            "has_signal": prediction.startswith("SP"),
-                            "probability": sp_prob,
-                            "cleavage_site": cleavage,
-                        }
-            except OSError:
+                cache_data.update(parse_signalp_predictions(pred_file))
+            except (OSError, ValueError) as error:
+                logging.warning("Skipping invalid SignalP cache %s: %s", pred_file, error)
                 continue
     return cache_data
 
@@ -901,20 +945,15 @@ class SignalP6Handler:
         if not expected_ids:
             raise RuntimeError("SignalP input has no sequences")
         if os.path.exists(cache_file) and os.path.exists(cache_dir):
-            if self.verbose:
-                print(f"Using cached SignalP 6 results for {os.path.basename(fasta_file)}")
             try:
-                with open(cache_file, 'r') as cached_handle:
-                    cached_results = json.load(cached_handle)
-                if (set(cached_results) == expected_ids
-                        and all(isinstance(info.get('has_signal'), bool)
-                                and isinstance(info.get('probability'), (float, int))
-                                and 0 <= info['probability'] <= 1
-                                for info in cached_results.values())
-                        and os.path.isfile(os.path.join(cache_dir, 'prediction_results.txt'))):
-                    return cached_results, cache_dir
-            except (OSError, ValueError, TypeError, AttributeError):
+                cached_results = parse_signalp_predictions(
+                    os.path.join(cache_dir, "prediction_results.txt"), expected_ids)
+            except (OSError, ValueError):
                 pass
+            else:
+                if self.verbose:
+                    print(f"Using cached SignalP 6 results for {os.path.basename(fasta_file)}")
+                return cached_results, cache_dir
 
         if not self.signalp6_available:
             error_msg = "ERROR: SignalP 6.0 is required but not available. Please install SignalP 6.0 and ensure it's in your PATH."
@@ -934,8 +973,6 @@ class SignalP6Handler:
             temp_dir = tempfile.mkdtemp()
             signalp_output_dir = temp_dir
 
-        results = {}
-
         try:
             # Run SignalP 6
             cmd = [
@@ -950,48 +987,8 @@ class SignalP6Handler:
             result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
 
             if result.returncode == 0:
-                # Parse prediction_results.txt
                 pred_file = os.path.join(signalp_output_dir, "prediction_results.txt")
-                if os.path.exists(pred_file):
-                    with open(pred_file, 'r') as f:
-                        for line in f:
-                            if line.startswith('#') or not line.strip():
-                                continue
-                            parts = line.rstrip('\r\n').split('\t')
-                            if len(parts) < 9:
-                                raise ValueError("Malformed SignalP prediction row")
-                            if len(parts) >= 9:
-                                seq_id = parts[0]
-                                prediction = parts[1]  # 'SP' or 'OTHER'
-                                sp_prob = float(parts[3])
-                                if prediction not in {'SP', 'OTHER'} or not 0 <= sp_prob <= 1:
-                                    raise ValueError(f"Invalid SignalP prediction for {seq_id}")
-                                if seq_id in results:
-                                    raise ValueError(f"Duplicate SignalP prediction for {seq_id}")
-
-                                # Parse CS Position (column 9)
-                                cs_pos = None
-                                if len(parts) > 8 and parts[8] and parts[8].strip():
-                                    cs_info = parts[8].strip()
-                                    cs_match = re.search(r'(?:CS pos:\s*)?(\d+)-\d+', cs_info)
-                                    if cs_match:
-                                        cs_pos = int(cs_match.group(1))
-                                    elif cs_info.isdigit():
-                                        cs_pos = int(cs_info)
-
-                                has_sp = prediction == 'SP'
-                                if has_sp and not cs_pos:
-                                    raise ValueError(f"Missing SignalP cleavage site for {seq_id}")
-
-                                results[seq_id] = {
-                                    'has_signal': has_sp,
-                                    'cleavage_site': cs_pos if has_sp else None,
-                                    'probability': sp_prob
-                                }
-
-                if set(results) != expected_ids:
-                    raise ValueError(
-                        f"Incomplete SignalP predictions: {len(results)}/{len(expected_ids)} sequences")
+                results = parse_signalp_predictions(pred_file, expected_ids)
 
                 # Cache results and output directory
                 with open(cache_file, 'w') as f:
@@ -1181,6 +1178,9 @@ class RobustDockerNetNGlyc:
                     or (set(cached_signalp) == set(read_fasta(fasta_file))
                         and all(isinstance(info.get('probability'), (int, float))
                                 and 0 <= info['probability'] <= 1
+                                and (not info['has_signal']
+                                     or (isinstance(info.get('cleavage_site'), int)
+                                         and info['cleavage_site'] > 0))
                                 for info in cached_signalp.values()))):
                 shutil.copy(cache_file, output_file)
                 return True, output_file, None
@@ -3545,9 +3545,11 @@ def main():
     # kept as hidden optional trailing args so existing invocations still parse;
     # the flag wins when both are given.
     parser.add_argument("-i", "--input", dest="input_flag", metavar="INPUT",
+                        action=InputPathAction,
+                        extensions=('.fasta', '.fa', '.fas', '.fna', '.faa'),
                         help="DIRECTORY MODE: variant_mapping output root "
                              "(<root>/<GENE>/fastas/ + <root>/<GENE>/mappings/). "
-                             "Also accepts a single WT FASTA or a flat directory of them.")
+                             "FILE MODE: a single WT FASTA.")
     parser.add_argument("-o", "--output", dest="output_flag", metavar="OUTPUT",
                         help="Output base directory; writes <output>/<GENE>/NetNglyc/<GENE>.tsv, .events.tsv, .sites.tsv")
     parser.add_argument("input", nargs='?', help=argparse.SUPPRESS)
@@ -3557,7 +3559,8 @@ def main():
     parser.add_argument("-cc", "--clear-cache", action="store_true",
                         help="Clear all cached results and exit (no other args required)")
     parser.add_argument("-md", "--mapping-dir",
-                        help="Directory containing mutation mapping CSV files (REQUIRED for parsing modes)")
+                        action=InputPathAction, extensions=('.csv', '.tsv'),
+                        help="Mapping CSV file in file mode, or parent gene-tree root in directory mode")
     parser.add_argument("-th", "--threshold", type=float, default=0.5,
                         help="Minimum glycosylation potential threshold for predictions (default: 0.5)")
     parser.add_argument("-bt", "--batch-timeout", type=int, default=5000,
@@ -3592,6 +3595,8 @@ def main():
             print("No caches found to clear")
         return 0
 
+    args.input_flag = args.input_flag or args.input
+    validate_input_mode(parser, args, required_file_inputs=('mapping_dir',))
     return run_full_pipeline_mode(args, failure_map, parser)
 
 

@@ -52,6 +52,8 @@ import concurrent.futures
 # imports from biofeaturefactory.lib.utility
 # ---------------------------------------------------------------------------
 from biofeaturefactory.lib.utility import (
+    InputPathAction,
+    validate_input_mode,
     derive_mapping_root,
     discover_fasta_files,
     discover_mapping_files,
@@ -144,16 +146,20 @@ def _run_genesplicer_on_seq(seq_name: str, seq: str, genesplicer_dir: str | None
     out = None
     rc = None
     err = ""
-    cmd = ""
     try:
         if genesplicer_dir:
-            cmd = f"cd {genesplicer_dir} && ./genesplicer {tmp_name} {model_dir}"
+            cmd = ["./genesplicer", tmp_name, model_dir]
         else:
-            cmd = f"genesplicer {tmp_path} {model_dir}"
-        result = subprocess.run(cmd, shell=True, capture_output=True, text=True)
+            cmd = ["genesplicer", tmp_path, model_dir]
+        result = subprocess.run(
+            cmd, cwd=genesplicer_dir or None,
+            shell=False, capture_output=True, text=True,
+        )
         out = result.stdout.strip()
         rc = result.returncode
         err = (result.stderr or "").strip()
+    except OSError as error:
+        raise RuntimeError(f"GeneSplicer failed for {seq_name}: {error}") from error
     finally:
         try:
             os.remove(tmp_path)
@@ -1290,12 +1296,14 @@ def _process_gene(fasta_path: Path,
 
 def main():
     parser = argparse.ArgumentParser(description="GeneSplicer WT<->ALT ensemble delta caller")
-    parser.add_argument("-i", "--input", required=True,
+    parser.add_argument("-i", "--input", required=True, action=InputPathAction,
+                        extensions=('.fasta', '.fa', '.fas', '.fna', '.faa'),
                         help="variant_mapping OUTPUT ROOT (<root>/<GENE>/fastas/), or a single "
                              "genomic FASTA. In directory mode the gene is the DIRECTORY name, "
-                             "not the filename; a flat directory of FASTAs also works.")
+                             "not the filename. Gene/tool subdirectories are not input roots.")
     parser.add_argument("-m", "--variant-mapping-root", "--mapping-dir",
-                        dest="mapping_dir",
+                        dest="mapping_dir", action=InputPathAction,
+                        extensions=('.csv', '.tsv', '.txt'),
                         help="FILE MODE ONLY. In directory mode this is derived from --input, "
                              "which IS the variant_mapping output root: mappings/gDNA/ and "
                              "fastas/ are siblings under the same <GENE>/. Supply it only for a "
@@ -1345,6 +1353,7 @@ def main():
                         help="Max parallel workers (default: half cores, capped at 8)")
     parser.add_argument("-l", "--log", help="Validation log file/dir to skip failed mutations")
     args = parser.parse_args()
+    validate_input_mode(parser, args, required_file_inputs=('mapping_dir',))
 
     if args.genesplicer_dir:
         bin_path = os.path.join(args.genesplicer_dir, "genesplicer")
