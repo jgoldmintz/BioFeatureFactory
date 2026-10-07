@@ -1689,7 +1689,7 @@ def validate_mapping_content(file_path):
     try:
         with open(file_path, 'r') as f:
             # Read a sample to check for delimiters
-            sample = f.read(1024)
+            sample = f.readline() + f.readline()
             f.seek(0)
 
             # Check if file has delimiters

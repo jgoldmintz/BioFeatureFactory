@@ -165,6 +165,38 @@ class TestValidateMappingContent:
         assert result is True
         assert delim == "\t"
 
+    @pytest.mark.parametrize("delimiter", [",", "\t"])
+    @pytest.mark.parametrize("newline", ["\n", "\r\n"])
+    @pytest.mark.parametrize("map_type", ["transcript", "genomic"])
+    def test_long_replacement_row(self, tmp_dir, delimiter, newline, map_type):
+        reference = "ACGT" * 1100
+        alternate = "TGCA" * 1100
+        mutant = f"{reference}1{alternate}"
+        coordinate = f"{reference}101{alternate}"
+        columns = ["pkey", "mutant"]
+        values = [mint_pkey("ADAMTS13", mutant), mutant]
+        if map_type == "genomic":
+            columns.append("orf")
+            values.append(mutant)
+        columns.append(map_type)
+        values.append(coordinate)
+        mapping_file = _write(
+            tmp_dir / "map.csv",
+            delimiter.join(columns) + newline + delimiter.join(values) + newline,
+        )
+
+        assert validate_mapping_content(mapping_file) == [True, delimiter]
+        assert load_mapping(mapping_file, mapType=map_type) == {mutant: coordinate}
+
+    @pytest.mark.parametrize("delimiter", [",", "\t"])
+    def test_header_only(self, tmp_dir, delimiter):
+        mapping_file = _write(tmp_dir / "map.csv", f"mutant{delimiter}transcript\n")
+        assert validate_mapping_content(mapping_file) == [True, delimiter]
+
+    def test_empty_file(self, tmp_dir):
+        mapping_file = _write(tmp_dir / "empty.csv", "")
+        assert validate_mapping_content(mapping_file) is False
+
     def test_single_column_mutation(self, tmp_dir):
         f = _write(tmp_dir / "single.csv", "mutant\nA123G\nC456T\n")
         result = validate_mapping_content(f)

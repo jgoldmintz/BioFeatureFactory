@@ -1237,7 +1237,7 @@ def _process_gene(fasta_path: Path,
 
         # run GeneSplicer on ALT
         try:
-            mut_df = _run_genesplicer_on_seq(f"{gene_name}_{mutant_tok}", alt_seq, genesplicer_dir, model_dir)
+            mut_df = _run_genesplicer_on_seq(pkey, alt_seq, genesplicer_dir, model_dir)
         except Exception:
             _reject("runtime", mutant_tok, genomic_tok)
             continue

@@ -4,6 +4,7 @@ import json
 import sys
 from pathlib import Path
 
+import pandas as pd
 import pytest
 
 from biofeaturefactory.genesplicer import genesplicer_ensemble as pipeline
@@ -66,6 +67,52 @@ def test_paths_remain_single_arguments(tmp_path, monkeypatch, spaced, use_instal
     assert invocation["arguments"][0] == (fasta_path.name if use_install_dir else str(fasta_path))
     assert not fasta_path.exists()
     assert Path.cwd() == original_cwd
+
+
+@pytest.mark.parametrize("mapping_has_pkey", (False, True))
+@pytest.mark.parametrize(
+    "ref_nt,alt_nt,variant_class",
+    [("A", "G", "snv"), ("ACGT" * 750, "TGCA" * 750, "mnv")],
+    ids=("snv", "multikilobase_replacement"),
+)
+def test_process_gene_uses_pkey_for_mutant_fasta_header(
+    tmp_path, monkeypatch, mapping_has_pkey, ref_nt, alt_nt, variant_class,
+):
+    executable, model_dir, temporary_dir = make_runtime(tmp_path, monkeypatch)
+    gene_name = "GENE1"
+    wt_sequence = f"CCGA{ref_nt}TTAG"
+    mutant_sequence = f"CCGA{alt_nt}TTAG"
+    mutant_token = f"{ref_nt}5{alt_nt}"
+    fasta_path = tmp_path / f"{gene_name}.fasta"
+    fasta_path.write_text(f">genomic\n{wt_sequence}\n")
+    mapping_row = {"mutant": mutant_token, "genomic": mutant_token}
+    minted_pkey = pipeline.mint_pkey(gene_name, mutant_token)
+    expected_pkey = minted_pkey
+    if mapping_has_pkey:
+        expected_pkey = "GENE1-0123456789ab"
+        assert expected_pkey != minted_pkey
+        mapping_row["pkey"] = expected_pkey
+
+    events, sites, variants, stats = pipeline._process_gene(
+        fasta_path, pd.DataFrame([mapping_row]), str(executable.parent), str(model_dir),
+        window=151, report_radius=151, visibility_threshold=1.0, high_cutoff=5.0,
+        shift_bp=3, distance_k=75, cluster_radius=3, max_cluster_span=0, failure_map={},
+    )
+
+    invocation = json.loads((model_dir / "invocation.json").read_text())
+    assert invocation["fasta"] == f">{expected_pkey}\n{mutant_sequence}"
+    assert variants == [{
+        "pkey": expected_pkey, "variant_class": variant_class, "length_delta": 0,
+    }]
+    assert len(events) == len(sites) == 1
+    assert set(events[0]["pkey"]) == {expected_pkey}
+    assert set(sites[0]["pkey"]) == {expected_pkey}
+    assert stats["total_rows"] == stats["processed"] == 1
+    assert stats["gene_skipped"] is None
+    assert stats["skipped_detail"] == []
+    assert not Path(invocation["fasta_path"]).exists()
+    assert not list(executable.parent.glob("*.fasta"))
+    assert not list(temporary_dir.glob("*.fasta"))
 
 
 @pytest.mark.parametrize("use_install_dir", (False, True))

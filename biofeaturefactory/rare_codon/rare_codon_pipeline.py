@@ -58,6 +58,7 @@ from biofeaturefactory.lib.utility import (
     mint_pkey,
     trim_muts,
     parse_variant,
+    splice_seq,
     extract_gene_from_filename,
     load_validation_failures,
     should_skip_mutation,
@@ -346,6 +347,11 @@ FIELDNAMES = [
     'n_rare',
     'window_size',
     'qc_flags',
+    'n_rare_mut',
+    'f_enriched_mut',
+    'delta_n_rare',
+    'delta_f_enriched',
+    'comparison_status',
 ]
 
 
@@ -365,7 +371,7 @@ def cg_centre_to_codon(cg_centre):
 def run_rare_codon_analysis(gene, msa_path, usage_path, wt_gi, window_size=15,
                             rare_model='no_norm', rare_threshold=0.1,
                             null_model='genome', max_len_diff=0.2, min_aa_iden=0.5,
-                            reference_usage=None):
+                            reference_usage=None, comparison_context=None):
     """
     Run rare codon enrichment analysis on an MSA.
 
@@ -384,12 +390,18 @@ def run_rare_codon_analysis(gene, msa_path, usage_path, wt_gi, window_size=15,
             _reference_usage_pgz). When given, it defines "rare" for every sequence
             instead of the per-gene table auto-built from this MSA. None keeps the
             historical self-referential behaviour.
+        comparison_context: Optional dictionary populated with the raw focus,
+            retained-codon coordinates and fixed rarity definition for mutant
+            comparisons. Does not change the two-value return contract.
 
     Returns:
-        dict: Position -> {p_enriched, p_depleted, f_enriched_wt, etc.}
+        Pair of per-position WT results and sequence count.
     """
+    if comparison_context is not None:
+        comparison_context.clear()
     # Load and clean MSA; sanitize ambiguous codons before clean_sequences
     seqs = rc_read_fasta(msa_path)
+    raw_focus = seqs.get(wt_gi, '')
     # F54: codon_to_aa is uppercase-only (utility.py), so a soft-masked lowercase
     # codon ('atg') failed the membership test and was silently blanked to '---',
     # deleting real codons from the analysis; a fully lowercase WT collapsed to
@@ -534,11 +546,117 @@ def run_rare_codon_analysis(gene, msa_path, usage_path, wt_gi, window_size=15,
             'n_rare': rc_analysis['n_rare'][wt_gi].get(pos),
         }
 
+    if comparison_context is not None:
+        comparison_context.update(_prepare_comparison_context(
+            gene, raw_focus, rare_codons[wt_gi], rare_codon_prob[wt_gi], window_size
+        ))
     return results, len(seqs)
 
 
+def _prepare_comparison_context(gene, raw_focus, rare_codons, rare_codon_prob, window_size):
+    """Freeze the WT counting rule and map retained codons to raw ORF offsets.
+
+    Sanitized triplets still occupy raw nucleotide coordinates. Alignment-only
+    gaps do not; a partial gap consumes only its actual bases. Stop truncation
+    follows the same aligned triplet frame as the enrichment analysis.
+    """
+    codon_offsets = []
+    raw_offset = 0
+    for aligned_offset in range(0, len(raw_focus), 3):
+        codon = raw_focus[aligned_offset:aligned_offset + 3].upper()
+        amino_acid = codon_to_aa.get(codon)
+        if amino_acid == 'Stop':
+            break
+        if codon != '---' and amino_acid is not None:
+            codon_offsets.append(raw_offset)
+        raw_offset += len(codon.replace('-', ''))
+    return {
+        'gene': gene,
+        'orf_sequence': raw_focus.replace('-', '').upper(),
+        'codon_offsets': tuple(codon_offsets),
+        'rare_codons': frozenset(codon for codon in rare_codons
+                                if rare_codon_prob[codon_to_aa[codon]] > 0),
+        'window_size': window_size,
+    }
+
+
+def _compare_mutant_window(gene, variant, orf_sequence, rc_data, window_size, context):
+    """Compare the existing centered window, never the homolog alignment.
+
+    Only equal-length, sense-preserving substitutions wholly inside the window
+    are scored. A rejected comparison leaves all four allele-derived values
+    absent; legacy WT annotations are not changed.
+    """
+    required = {'gene', 'orf_sequence', 'codon_offsets', 'rare_codons', 'window_size'}
+    if not context or not required.issubset(context):
+        return {'comparison_status': 'CONTEXT_UNAVAILABLE'}
+    if context['gene'] != gene:
+        return {'comparison_status': 'GENE_MISMATCH'}
+    if not isinstance(orf_sequence, str) or context['orf_sequence'] != orf_sequence.upper():
+        return {'comparison_status': 'FOCUS_SEQUENCE_MISMATCH'}
+    if window_size < 1 or context['window_size'] != window_size:
+        return {'comparison_status': 'WINDOW_SIZE_MISMATCH'}
+    if variant.pos0 + len(variant.ref) > len(orf_sequence):
+        return {'comparison_status': 'VARIANT_OUT_OF_RANGE'}
+    try:
+        mutant_sequence = splice_seq(orf_sequence, variant.pos0, variant.ref, variant.alt)
+    except ValueError:
+        return {'comparison_status': 'REF_MISMATCH'}
+    if variant.length_delta % 3:
+        return {'comparison_status': 'UNSUPPORTED_FRAMESHIFT'}
+    if variant.length_delta:
+        return {'comparison_status': 'UNSUPPORTED_INDEL'}
+
+    first_changed_codon = variant.pos0 // 3
+    last_changed_codon = (variant.pos0 + len(variant.ref) - 1) // 3
+    for codon_index in range(first_changed_codon, last_changed_codon + 1):
+        start = codon_index * 3
+        for sequence in (orf_sequence, mutant_sequence):
+            codon = sequence[start:start + 3].upper().replace('U', 'T')
+            amino_acid = codon_to_aa.get(codon)
+            if amino_acid == 'Stop':
+                return {'comparison_status': 'UNSUPPORTED_STOP_CHANGE'}
+            if amino_acid is None:
+                return {'comparison_status': 'UNSUPPORTED_CODON'}
+    if rc_data is None:
+        return {'comparison_status': 'POSITION_NOT_IN_WINDOW'}
+
+    first_window_codon = _centre_codon(variant) - 1 - window_size // 2
+    last_window_codon = first_window_codon + window_size
+    if first_window_codon < 0 or last_window_codon * 3 > len(orf_sequence):
+        return {'comparison_status': 'POSITION_NOT_IN_WINDOW'}
+    expected_offsets = tuple(range(first_window_codon * 3, last_window_codon * 3, 3))
+    observed_offsets = context['codon_offsets'][first_window_codon:last_window_codon]
+    if observed_offsets != expected_offsets:
+        return {'comparison_status': 'UNSUPPORTED_FOCUS_FRAME'}
+    if first_changed_codon < first_window_codon or last_changed_codon >= last_window_codon:
+        return {'comparison_status': 'VARIANT_SPANS_WINDOW'}
+
+    counts = []
+    for sequence in (orf_sequence, mutant_sequence):
+        counts.append(sum(sequence[offset:offset + 3].upper().replace('U', 'T')
+                          in context['rare_codons'] for offset in expected_offsets))
+    wt_count, mutant_count = counts
+    try:
+        matches_wt = (float(rc_data['n_rare']) == wt_count and _math.isclose(
+            float(rc_data['f_enriched_wt']), wt_count / window_size,
+            rel_tol=1e-12, abs_tol=1e-12))
+    except (KeyError, TypeError, ValueError):
+        matches_wt = False
+    if not matches_wt:
+        return {'comparison_status': 'WT_WINDOW_MISMATCH'}
+    delta_count = mutant_count - wt_count
+    return {
+        'n_rare_mut': mutant_count,
+        'f_enriched_mut': mutant_count / window_size,
+        'delta_n_rare': delta_count,
+        'delta_f_enriched': delta_count / window_size,
+        'comparison_status': 'PASS',
+    }
+
+
 def _rare_codon_row(gene, ntposnt, codon_position, rc_data, window_size, qc_flags):
-    """Build the full 11-column row. Single builder for every outcome.
+    """Build the full row, initially without an allele comparison.
 
     The three exit paths of process_mutations used to construct three separate
     literals with the same keys, which is how a column comes to exist on one
@@ -580,6 +698,11 @@ def _rare_codon_row(gene, ntposnt, codon_position, rc_data, window_size, qc_flag
         'n_rare': cell('n_rare'),
         'window_size': window_size,
         'qc_flags': '',      # filled below, once `absent` is complete
+        'n_rare_mut': '',
+        'f_enriched_mut': '',
+        'delta_n_rare': '',
+        'delta_f_enriched': '',
+        'comparison_status': 'NOT_REQUESTED',
     }
     # Built after the dict literal because `absent` is only complete once every
     # cell() call has run.
@@ -633,37 +756,26 @@ def _centre_codon(variant):
     return (centre_nt - 1) // 3 + 1
 
 
-def process_mutations(mutations_list, gene, orf_sequence, rc_results, window_size, failure_map=None):
+def process_mutations(mutations_list, gene, orf_sequence, rc_results, window_size,
+                      failure_map=None, comparison_context=None):
     """
-    Annotate mutations with the rare codon enrichment of the window they fall in.
+    Preserve WT MSA annotations and optionally compare the mutant focus window.
 
-    SCOPE: the reported enrichment is a windowed WILD-TYPE property, derived from
-    the WT sequence and its ortholog MSA. It is NOT allele-specific: only the
-    codon position of the mutation is used, the mutant allele is not. Every
-    mutation mapping to the same codon window therefore receives identical
-    p_enriched/p_depleted/f_enriched_wt/n_rare values, and no WT-vs-MUT delta is
-    computed or implied by these columns.
-
-    Because the value is allele-independent, every column is defined for every
-    variant class: a deletion, an insertion and a frameshift all sit at a codon
-    position and that codon's window has an enrichment. Non-SNV tokens are
-    therefore processed by default and fully populated; what changes is the
-    qc_flags cell, which names the class and, for a multi-codon REF span, which
-    codon the single reported window describes.
+    The original enrichment columns remain allele-independent. With a context
+    from run_rare_codon_analysis, the additional columns compare sense-preserving
+    SNVs/MNVs against the same WT rarity definition. comparison_status describes
+    whether those columns were scored, independently of the WT qc_flags.
 
     Args:
         mutations_list: List of mutation strings
         gene: Gene symbol
-        orf_sequence: ORF nucleotide sequence. Deliberately NOT used as a REF
-            guard: the codon frame here is the MSA's WT record (wt_gi), and
-            nothing in this pipeline establishes that the ORF FASTA and that MSA
-            record are the same sequence rather than two isoforms. Guarding
-            against the ORF would therefore flag correct rows whenever they
-            differ. Out-of-range positions are already caught, in the right
-            frame, by the rc_results lookup below.
+        orf_sequence: Raw ungapped focus from _orf_from_msa. Used to validate REF
+            only for the new comparison, after checking it matches the context.
         rc_results: Dict from run_rare_codon_analysis
         window_size: Window size used in analysis
         failure_map: Optional validation failure map
+        comparison_context: Fixed WT context produced by run_rare_codon_analysis.
+            None retains annotation-only use by existing programmatic callers.
 
     Returns:
         list: Result dictionaries
@@ -686,8 +798,11 @@ def process_mutations(mutations_list, gene, orf_sequence, rc_results, window_siz
         # which on an indel are both legal bases.
         variant = parse_variant(ntposnt, is_nt=True)
         if variant is None:
-            results.append(_rare_codon_row(gene, ntposnt, None, None, window_size,
-                                           ['INVALID_MUTATION']))
+            row = _rare_codon_row(gene, ntposnt, None, None, window_size,
+                                  ['INVALID_MUTATION'])
+            if comparison_context is not None:
+                row['comparison_status'] = 'INVALID_MUTATION'
+            results.append(row)
             continue
 
         qc_flags = _variant_flags(variant)
@@ -710,8 +825,12 @@ def process_mutations(mutations_list, gene, orf_sequence, rc_results, window_siz
                 warned_missing = True
             qc_flags.append('POSITION_NOT_IN_WINDOW')
 
-        results.append(_rare_codon_row(gene, ntposnt, codon_pos, rc_data,
-                                       window_size, qc_flags))
+        row = _rare_codon_row(gene, ntposnt, codon_pos, rc_data, window_size, qc_flags)
+        if comparison_context is not None:
+            row.update(_compare_mutant_window(
+                gene, variant, orf_sequence, rc_data, window_size, comparison_context
+            ))
+        results.append(row)
 
     return results
 
@@ -1090,6 +1209,7 @@ def _run_single_gene(gene, msa_file, mut_file, args, wt_gi, output_dir):
     print(f"  Window size: {args.window_size}")
 
     try:
+        comparison_context = {}
         rc_results, n_seqs = run_rare_codon_analysis(
             gene=gene,
             msa_path=msa_file,
@@ -1102,6 +1222,7 @@ def _run_single_gene(gene, msa_file, mut_file, args, wt_gi, output_dir):
             max_len_diff=args.max_len_diff,
             min_aa_iden=args.min_aa_iden,
             reference_usage=args.reference_codon_usage,
+            comparison_context=comparison_context,
         )
         print(f"  MSA sequences used: {n_seqs}")
         print(f"  Positions analyzed: {len(rc_results)}")
@@ -1111,7 +1232,7 @@ def _run_single_gene(gene, msa_file, mut_file, args, wt_gi, output_dir):
 
     results = process_mutations(
         mut_list, gene, orf_sequence, rc_results,
-        args.window_size, failure_map
+        args.window_size, failure_map, comparison_context=comparison_context
     )
 
     out_dir = Path(output_dir) / gene / "RareCodon"
@@ -1129,6 +1250,9 @@ def _run_single_gene(gene, msa_file, mut_file, args, wt_gi, output_dir):
         print(f"  Total mutations: {len(results)}")
         print(f"  In enriched regions (p<0.05): {n_enriched}")
         print(f"  In depleted regions (p<0.05): {n_depleted}")
+        n_compared = sum(row['comparison_status'] == 'PASS' for row in results)
+        print(f"  WT-MUT comparisons scored: {n_compared}/{len(results)} "
+              "(see comparison_status for unscored rows)")
 
 
 def main():

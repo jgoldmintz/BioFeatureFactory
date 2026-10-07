@@ -92,6 +92,24 @@ class TestDiscoverMappingFiles:
         result = discover_mapping_files(f)
         assert "BRCA1" in result
 
+    @pytest.mark.parametrize("map_type,subdirectory", [("genomic", "gDNA"), ("transcript", "transcript")])
+    def test_long_replacement_per_gene_layout(self, tmp_path, map_type, subdirectory):
+        expected = {}
+        for gene in ("ADAMTS13", "F9"):
+            mutant = "ACGT" * 1100 + "1" + "TGCA" * 1100
+            coordinate = "ACGT" * 1100 + "101" + "TGCA" * 1100
+            mapping_file = _write(
+                tmp_path / gene / "mappings" / subdirectory / f"{map_type}_mapping_{gene}.csv",
+                f"pkey,mutant,{map_type}\n{gene}-key,{mutant},{coordinate}\n",
+            )
+            _write(
+                tmp_path / gene / "mappings" / "pkey" / f"pkey_mapping_{gene}.csv",
+                f"pkey,mutant\n{gene}-key,{mutant}\n",
+            )
+            expected[gene] = mapping_file
+
+        assert discover_mapping_files(str(tmp_path), map_type) == expected
+
     def test_nonexistent(self, tmp_path):
         result = discover_mapping_files(str(tmp_path / "nope"))
         assert result == {}
